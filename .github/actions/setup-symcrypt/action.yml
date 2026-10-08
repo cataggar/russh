@@ -14,12 +14,28 @@ description: >-
 # are left unset, as INSTALL.md recommends for packaged installs.
 #
 # Windows: downloads the official release archive from github.com/microsoft/SymCrypt, checks its
-# SHA-256, extracts symcrypt.lib and symcrypt.dll, sets SYMCRYPT_LIB_PATH (required by the
-# symcrypt-sys build script on Windows) and prepends the directory to PATH so the DLL loads at
-# runtime. Windows looks in the executable's directory and in System32 before PATH, and some Windows
-# versions (including Windows Server 2025, the windows-latest image) have their own symcrypt.dll in
-# System32. Executables then load that copy unless the provisioned DLL sits next to them; the action
-# prints a notice when this applies.
+# SHA-256, extracts symcrypt.lib and symcrypt.dll, sets SYMCRYPT_LIB_PATH (the directory with
+# symcrypt.lib, required by the symcrypt-sys build script on Windows) and SYMCRYPT_DLL (the full path
+# of symcrypt.dll), and prepends the directory to PATH.
+#
+# Windows looks for a DLL in the executable's directory and in System32 before PATH, and some images
+# (including windows-latest, Windows Server 2025) have their own symcrypt.dll in System32: an OS
+# component whose version varies by image. To make executables load the pinned DLL, which matches
+# the symcrypt.lib they link against, every Windows job that runs symcrypt-linked executables must
+# list their directories in `copy-dll-to`. The directories are created if needed, so the copy can
+# happen before `cargo build` or `cargo test`:
+#   - `target/debug/deps` for `cargo test` (unit and integration test executables)
+#   - `target/debug/examples` for examples, `target/debug` for `cargo run`
+#   - adjust the paths for `--release` (target/release/...), `--target` (target/<triple>/...) or
+#     CARGO_TARGET_DIR
+# Doctests are compiled into temporary directories, so they still resolve symcrypt.dll through
+# System32 or PATH: Windows jobs should skip them (e.g. `cargo test --all-targets`) or accept that.
+# To copy the DLL somewhere else by hand, use $env:SYMCRYPT_DLL. Without `copy-dll-to`, the action
+# prints a notice when a System32 copy exists. Example:
+#
+#   - uses: ./.github/actions/setup-symcrypt
+#     with:
+#       copy-dll-to: target/debug/deps  # ignored on Linux
 #
 # Using the action again in the same job is a no-op apart from re-exporting the environment.
 #
@@ -35,6 +51,14 @@ inputs:
       checksums in this action (currently 103.11.0, the newest version PMC publishes for Ubuntu).
     required: false
     default: "103.11.0"
+  copy-dll-to:
+    description: >-
+      Windows only: newline-separated directories, relative to the workspace or absolute, to copy
+      the provisioned symcrypt.dll into, so that executables there load it rather than a System32
+      copy (`target/debug/deps` for `cargo test`). Missing directories are created. Ignored on
+      Linux, where executables always load the packaged library.
+    required: false
+    default: ""
 
 outputs:
   version:
@@ -55,6 +79,7 @@ runs:
       shell: bash
       env:
         SYMCRYPT_VERSION: ${{ inputs.version }}
+        SYMCRYPT_COPY_DLL_TO: ${{ inputs.copy-dll-to }}
       run: |
         set -euo pipefail
         fail() { echo "::error title=setup-symcrypt::$*"; exit 1; }
@@ -114,6 +139,9 @@ runs:
 
         echo "lib-dir=$lib_dir" >> "$GITHUB_OUTPUT"
         echo "SymCrypt $version: $target (loader cache: $cached)"
+        if [ -n "${SYMCRYPT_COPY_DLL_TO//[[:space:]]/}" ]; then
+          echo "copy-dll-to is ignored on Linux: executables load libsymcrypt.so from $lib_dir"
+        fi
 
     - name: Install SymCrypt release archive (Windows)
       id: windows
@@ -176,11 +204,13 @@ runs:
           Remove-Item $zip
         }
 
-        $info = (Get-Item (Join-Path $libDir 'symcrypt.dll')).VersionInfo
+        $dll = Join-Path $libDir 'symcrypt.dll'
+        $info = (Get-Item $dll).VersionInfo
         $dllVersion = '{0}.{1}.{2}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart
         if ($dllVersion -ne $version) { Fail "symcrypt.dll reports version $dllVersion, expected $version" }
 
         "SYMCRYPT_LIB_PATH=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        "SYMCRYPT_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         $libDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         "lib-dir=$libDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
         Write-Output "SymCrypt $version ($($info.FileVersion)): $libDir"
@@ -191,11 +221,17 @@ runs:
       env:
         SYMCRYPT_EXPECTED_DIR: ${{ steps.windows.outputs.lib-dir }}
         SYMCRYPT_VERSION: ${{ inputs.version }}
+        SYMCRYPT_COPY_DLL_TO: ${{ inputs.copy-dll-to }}
       run: |
         $ErrorActionPreference = 'Stop'
         $expected = $env:SYMCRYPT_EXPECTED_DIR
+        $expectedDll = Join-Path $expected 'symcrypt.dll'
         if ($env:SYMCRYPT_LIB_PATH -ne $expected) {
           Write-Output "::error title=setup-symcrypt::SYMCRYPT_LIB_PATH is '$env:SYMCRYPT_LIB_PATH', expected '$expected'"
+          exit 1
+        }
+        if ($env:SYMCRYPT_DLL -ne $expectedDll) {
+          Write-Output "::error title=setup-symcrypt::SYMCRYPT_DLL is '$env:SYMCRYPT_DLL', expected '$expectedDll'"
           exit 1
         }
         $found = $env:PATH -split ';' | Where-Object { $_ -and (Test-Path (Join-Path $_ 'symcrypt.dll')) } | Select-Object -First 1
@@ -205,11 +241,29 @@ runs:
         }
         # Windows searches the executable's directory and System32 before PATH.
         $system = Join-Path ([Environment]::SystemDirectory) 'symcrypt.dll'
-        if (Test-Path $system) {
+        if ((Test-Path $system) -and [string]::IsNullOrWhiteSpace($env:SYMCRYPT_COPY_DLL_TO)) {
           $systemVersion = (Get-Item $system).VersionInfo.FileVersion
-          Write-Output "::notice title=setup-symcrypt::Windows loads $system ($systemVersion) before the copy on PATH; put symcrypt.dll from $expected next to an executable to make it use SymCrypt $env:SYMCRYPT_VERSION"
+          Write-Output "::notice title=setup-symcrypt::Windows loads $system ($systemVersion) before the pinned SymCrypt $env:SYMCRYPT_VERSION on PATH. List the executables' directories in the copy-dll-to input (target/debug/deps for cargo test) to load the pinned DLL, or copy $expectedDll (`$env:SYMCRYPT_DLL) next to them."
         }
         Write-Output "symcrypt.dll resolves from PATH to $found"
+
+    - name: Copy symcrypt.dll next to executables (Windows)
+      if: runner.os == 'Windows' && inputs.copy-dll-to != ''
+      shell: pwsh
+      env:
+        SYMCRYPT_LIB_DIR: ${{ steps.windows.outputs.lib-dir }}
+        SYMCRYPT_COPY_DLL_TO: ${{ inputs.copy-dll-to }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $dll = Join-Path $env:SYMCRYPT_LIB_DIR 'symcrypt.dll'
+        $dllVersion = (Get-Item $dll).VersionInfo.FileVersion
+        foreach ($entry in $env:SYMCRYPT_COPY_DLL_TO -split '\r?\n') {
+          if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+          $dir = [System.IO.Path]::GetFullPath($entry.Trim(), $env:GITHUB_WORKSPACE)
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item -LiteralPath $dll -Destination (Join-Path $dir 'symcrypt.dll') -Force
+          Write-Output "Copied $dll ($dllVersion) to $dir"
+        }
 
     - name: Reject unsupported runner
       if: runner.os != 'Linux' && runner.os != 'Windows'
