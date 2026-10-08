@@ -47,3 +47,17 @@ jobs:
         run: cargo run --manifest-path ci/symcrypt-smoke/Cargo.toml
         env:
           RUST_BACKTRACE: 1
+          # On Linux the loader must pick the packaged library.
+          SYMCRYPT_SMOKE_EXPECTED_LIBRARY: ${{ runner.os == 'Linux' && format('{0}/libsymcrypt.so.{1}', steps.symcrypt.outputs.lib-dir, steps.symcrypt.outputs.version) || '' }}
+
+      # Windows searches System32 before PATH, and windows-latest has its own symcrypt.dll there, so
+      # the run above may use that copy. A DLL next to the executable takes precedence over both, so
+      # run the smoke test again that way to check the provisioned DLL itself.
+      - name: Run the SymCrypt smoke test with the provisioned DLL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exeDir = 'ci/symcrypt-smoke/target/debug'
+          Copy-Item (Join-Path $env:SYMCRYPT_LIB_PATH 'symcrypt.dll') $exeDir
+          $env:SYMCRYPT_SMOKE_EXPECTED_LIBRARY = Join-Path (Resolve-Path $exeDir) 'symcrypt.dll'
+          & (Join-Path $exeDir 'symcrypt-smoke.exe')

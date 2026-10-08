@@ -3,7 +3,11 @@
 //! Built against the same `symcrypt` revision as russh, so a successful run shows that the library
 //! provisioned by `.github/actions/setup-symcrypt` links, loads at runtime, and computes the
 //! primitives russh relies on. The process exits non-zero if any check fails.
+//!
+//! If `SYMCRYPT_SMOKE_EXPECTED_LIBRARY` is set, the SymCrypt library loaded at runtime must be that
+//! file.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use symcrypt::cipher::BlockCipherType;
@@ -19,6 +23,7 @@ type CheckResult = Result<(), String>;
 type Check = (&'static str, fn() -> CheckResult);
 
 const CHECKS: &[Check] = &[
+    ("runtime library", runtime_library),
     ("symcrypt_random", random),
     ("SHA-256 known answers (FIPS 180-2)", sha256_kat),
     ("HMAC-SHA256 known answer (RFC 4231)", hmac_sha256_kat),
@@ -50,6 +55,75 @@ fn main() -> ExitCode {
         eprintln!("{failures} of {} SymCrypt checks failed", CHECKS.len());
         ExitCode::FAILURE
     }
+}
+
+fn runtime_library() -> CheckResult {
+    let loaded = loaded_library().ok_or("cannot find the loaded SymCrypt library")?;
+    println!("     SymCrypt loaded from {loaded}");
+    let Some(expected) =
+        std::env::var_os("SYMCRYPT_SMOKE_EXPECTED_LIBRARY").filter(|path| !path.is_empty())
+    else {
+        return Ok(());
+    };
+    let canonical = |path: &Path| {
+        std::fs::canonicalize(path).map_err(|err| format!("{}: {err}", path.display()))
+    };
+    if canonical(Path::new(&loaded))? == canonical(Path::new(&expected))? {
+        Ok(())
+    } else {
+        Err(format!(
+            "loaded {loaded}, expected {}",
+            Path::new(&expected).display()
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn loaded_library() -> Option<String> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    maps.lines()
+        .filter_map(|line| line.split_whitespace().nth(5))
+        .find(|path| {
+            Path::new(path)
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("libsymcrypt.so"))
+        })
+        .map(str::to_owned)
+}
+
+#[cfg(windows)]
+fn loaded_library() -> Option<String> {
+    use std::ffi::{c_void, OsString};
+    use std::os::windows::ffi::OsStringExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        fn GetModuleFileNameW(module: *mut c_void, path: *mut u16, size: u32) -> u32;
+    }
+
+    let name: Vec<u16> = "symcrypt.dll\0".encode_utf16().collect();
+    // SAFETY: `name` is a NUL-terminated UTF-16 string; the returned handle is not freed.
+    let module = unsafe { GetModuleHandleW(name.as_ptr()) };
+    if module.is_null() {
+        return None;
+    }
+    let mut path = vec![0u16; 32 * 1024];
+    // SAFETY: `path` is writable for `path.len()` UTF-16 units.
+    let len = unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) } as usize;
+    if len == 0 || len == path.len() {
+        return None;
+    }
+    Some(
+        OsString::from_wide(&path[..len])
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn loaded_library() -> Option<String> {
+    None
 }
 
 fn random() -> CheckResult {

@@ -16,7 +16,10 @@ description: >-
 # Windows: downloads the official release archive from github.com/microsoft/SymCrypt, checks its
 # SHA-256, extracts symcrypt.lib and symcrypt.dll, sets SYMCRYPT_LIB_PATH (required by the
 # symcrypt-sys build script on Windows) and prepends the directory to PATH so the DLL loads at
-# runtime.
+# runtime. Windows looks in the executable's directory and in System32 before PATH, and some Windows
+# versions (including Windows Server 2025, the windows-latest image) have their own symcrypt.dll in
+# System32. Executables then load that copy unless the provisioned DLL sits next to them; the action
+# prints a notice when this applies.
 #
 # Using the action again in the same job is a no-op apart from re-exporting the environment.
 #
@@ -99,13 +102,18 @@ runs:
         target="$(readlink -f "$lib_dir/libsymcrypt.so")"
         [ "$target" = "$lib_dir/libsymcrypt.so.$version" ] \
           || fail "$lib_dir/libsymcrypt.so resolves to '$target', expected $lib_dir/libsymcrypt.so.$version"
+        # The cache may list the library under /lib/<multiarch> (a symlink to /usr/lib on merged-/usr
+        # systems), so compare files rather than paths.
         soname="libsymcrypt.so.${version%%.*}"
         loader_cache="$(ldconfig -p)"
-        grep -F -q "=> $lib_dir/$soname" <<<"$loader_cache" \
-          || fail "the runtime loader cache has no $lib_dir/$soname"
+        cached=
+        while read -r path; do
+          if [ "$path" -ef "$lib_dir/$soname" ]; then cached="$path"; fi
+        done < <(awk -v soname="$soname" '$1 == soname { print $NF }' <<<"$loader_cache")
+        [ -n "$cached" ] || fail "the runtime loader cache has no entry for $lib_dir/$soname"
 
         echo "lib-dir=$lib_dir" >> "$GITHUB_OUTPUT"
-        echo "SymCrypt $version: $target"
+        echo "SymCrypt $version: $target (loader cache: $cached)"
 
     - name: Install SymCrypt release archive (Windows)
       id: windows
@@ -198,7 +206,8 @@ runs:
         # Windows searches the executable's directory and System32 before PATH.
         $system = Join-Path ([Environment]::SystemDirectory) 'symcrypt.dll'
         if (Test-Path $system) {
-          Write-Output "::warning title=setup-symcrypt::$system exists and is loaded before the PATH copy; copy symcrypt.dll next to executables that must use version $env:SYMCRYPT_VERSION"
+          $systemVersion = (Get-Item $system).VersionInfo.FileVersion
+          Write-Output "::notice title=setup-symcrypt::Windows loads $system ($systemVersion) before the copy on PATH; put symcrypt.dll from $expected next to an executable to make it use SymCrypt $env:SYMCRYPT_VERSION"
         }
         Write-Output "symcrypt.dll resolves from PATH to $found"
 
