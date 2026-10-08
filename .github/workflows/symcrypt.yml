@@ -1,0 +1,49 @@
+name: SymCrypt
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: SymCrypt smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SymCrypt
+        id: symcrypt
+        uses: ./.github/actions/setup-symcrypt
+
+      # A second run must be a no-op that leaves the same environment behind.
+      - name: Set up SymCrypt again
+        uses: ./.github/actions/setup-symcrypt
+
+      - name: Show SymCrypt location
+        shell: bash
+        env:
+          SYMCRYPT_VERSION: ${{ steps.symcrypt.outputs.version }}
+          SYMCRYPT_LIB_DIR: ${{ steps.symcrypt.outputs.lib-dir }}
+        run: |
+          echo "SymCrypt $SYMCRYPT_VERSION in $SYMCRYPT_LIB_DIR"
+          dir="$SYMCRYPT_LIB_DIR"
+          if command -v cygpath > /dev/null; then dir="$(cygpath --unix "$dir")"; fi
+          ls -l "$dir"/*symcrypt*
+
+      - name: Run the SymCrypt smoke test
+        run: cargo run --manifest-path ci/symcrypt-smoke/Cargo.toml
+        env:
+          RUST_BACKTRACE: 1

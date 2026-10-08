@@ -1,0 +1,14 @@
+[package]
+name = "symcrypt-smoke"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "CI smoke test: links the native SymCrypt library through the symcrypt crate and checks the primitives russh uses"
+
+# Not part of the russh workspace. Built only by .github/workflows/symcrypt.yml,
+# after .github/actions/setup-symcrypt has provisioned the native library.
+[workspace]
+
+[dependencies]
+# Same revision as russh's `symcrypt` feature (symcrypt 0.6.0 with ML-KEM, not on crates.io).
+symcrypt = { git = "https://github.com/microsoft/rust-symcrypt", rev = "7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb" }

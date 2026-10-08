@@ -1,0 +1,210 @@
+name: Set up SymCrypt
+description: >-
+  Installs a pinned, checksum-verified build of the native SymCrypt library so that the `symcrypt`
+  crate can link against it and load it at runtime. Supports Ubuntu 22.04/24.04 (x64 and arm64)
+  and Windows (x64 and arm64) runners.
+
+# Linux: installs the `symcrypt` package that packages.microsoft.com (PMC) publishes for Ubuntu,
+# which is how the symcrypt crate documents installing SymCrypt on Ubuntu (rust-symcrypt README
+# and INSTALL.md). PMC has the package for both amd64 and arm64. Instead of configuring the apt
+# repository and running `apt-get update`, the pinned .deb is downloaded straight from the PMC pool
+# and its SHA-256 is checked, which pins the exact build and skips the slow apt index refresh. The
+# result is the same as `apt-get install symcrypt`: the library lands in the standard linker and
+# loader path (/usr/lib/<multiarch>), so SYMCRYPT_LIB_PATH and LD_LIBRARY_PATH are not needed and
+# are left unset, as INSTALL.md recommends for packaged installs.
+#
+# Windows: downloads the official release archive from github.com/microsoft/SymCrypt, checks its
+# SHA-256, extracts symcrypt.lib and symcrypt.dll, sets SYMCRYPT_LIB_PATH (required by the
+# symcrypt-sys build script on Windows) and prepends the directory to PATH so the DLL loads at
+# runtime.
+#
+# Using the action again in the same job is a no-op apart from re-exporting the environment.
+#
+# To add a version, append its checksums to both tables below. PMC package checksums are in
+# https://packages.microsoft.com/ubuntu/24.04/prod/dists/noble/main/binary-<arch>/Packages
+# (the 22.04 pool serves identical files); release archive checksums are listed by
+# `gh release view v<version> -R microsoft/SymCrypt --json assets`.
+
+inputs:
+  version:
+    description: >-
+      SymCrypt version to install. symcrypt 0.6 needs 103.8.0 or newer. The version must have
+      checksums in this action (currently 103.11.0, the newest version PMC publishes for Ubuntu).
+    required: false
+    default: "103.11.0"
+
+outputs:
+  version:
+    description: The installed SymCrypt version.
+    value: ${{ inputs.version }}
+  lib-dir:
+    description: >-
+      Directory that holds the link-time library (libsymcrypt.so on Linux, symcrypt.lib and
+      symcrypt.dll on Windows).
+    value: ${{ steps.linux.outputs.lib-dir || steps.windows.outputs.lib-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install SymCrypt from packages.microsoft.com (Linux)
+      id: linux
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        SYMCRYPT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        fail() { echo "::error title=setup-symcrypt::$*"; exit 1; }
+
+        version="$SYMCRYPT_VERSION"
+        case "$RUNNER_ARCH" in
+          X64) arch=amd64 multiarch=x86_64-linux-gnu ;;
+          ARM64) arch=arm64 multiarch=aarch64-linux-gnu ;;
+          *) fail "unsupported Linux runner architecture '$RUNNER_ARCH' (supported: X64, ARM64)" ;;
+        esac
+
+        # SHA-256 of symcrypt_<version>-1_<arch>.deb on PMC.
+        case "$version/$arch" in
+          103.11.0/amd64) sha256=ba6a4b4718ab2a231d76dd20ade0f92370beea2db83095359e93cd0fdc0ae36a ;;
+          103.11.0/arm64) sha256=bf7f4164ac59bc1d20ee51f2b0ad59f8aa71c85ae1b3455567e206a722f1b406 ;;
+          *) fail "no pinned checksum for SymCrypt '$version' on linux/$arch; add one to .github/actions/setup-symcrypt/action.yml" ;;
+        esac
+
+        . /etc/os-release
+        case "${ID:-}/${VERSION_ID:-}" in
+          ubuntu/22.04 | ubuntu/24.04) ;;
+          *) fail "unsupported distribution '${PRETTY_NAME:-unknown}'; PMC publishes symcrypt for Ubuntu 22.04 and 24.04" ;;
+        esac
+
+        sudo=sudo
+        if [ "$(id -u)" -eq 0 ]; then sudo=; fi
+
+        if [ "$(dpkg-query -W -f='${Version}' symcrypt 2>/dev/null || true)" = "$version-1" ]; then
+          echo "SymCrypt $version is already installed"
+        else
+          deb="symcrypt_${version}-1_${arch}.deb"
+          url="https://packages.microsoft.com/ubuntu/${VERSION_ID}/prod/pool/main/s/symcrypt/$deb"
+          echo "Downloading $url"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            --output "$RUNNER_TEMP/$deb" "$url"
+          echo "$sha256  $RUNNER_TEMP/$deb" | sha256sum --check --strict -
+          $sudo dpkg --install "$RUNNER_TEMP/$deb"
+          $sudo ldconfig
+          rm -f "$RUNNER_TEMP/$deb"
+        fi
+
+        lib_dir="/usr/lib/$multiarch"
+        installed="$(dpkg-query -W -f='${Version}' symcrypt)"
+        [ "$installed" = "$version-1" ] || fail "dpkg reports symcrypt $installed, expected $version-1"
+        target="$(readlink -f "$lib_dir/libsymcrypt.so")"
+        [ "$target" = "$lib_dir/libsymcrypt.so.$version" ] \
+          || fail "$lib_dir/libsymcrypt.so resolves to '$target', expected $lib_dir/libsymcrypt.so.$version"
+        soname="libsymcrypt.so.${version%%.*}"
+        loader_cache="$(ldconfig -p)"
+        grep -F -q "=> $lib_dir/$soname" <<<"$loader_cache" \
+          || fail "the runtime loader cache has no $lib_dir/$soname"
+
+        echo "lib-dir=$lib_dir" >> "$GITHUB_OUTPUT"
+        echo "SymCrypt $version: $target"
+
+    - name: Install SymCrypt release archive (Windows)
+      id: windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SYMCRYPT_VERSION: ${{ inputs.version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        function Fail([string] $message) {
+          Write-Output "::error title=setup-symcrypt::$message"
+          exit 1
+        }
+
+        $version = $env:SYMCRYPT_VERSION
+        $arch = switch ($env:RUNNER_ARCH) { 'X64' { 'amd64' } 'ARM64' { 'arm64' } }
+        if (-not $arch) { Fail "unsupported Windows runner architecture '$env:RUNNER_ARCH' (supported: X64, ARM64)" }
+
+        # Release asset name and SHA-256 (matches the digest GitHub lists for the asset).
+        $pinned = @{
+          '103.11.0/amd64' = 'symcrypt-windows-amd64-release-103.11.0-748c20f1.zip', '5e2a9e60c03a60b952e84a3b50984f0d723a4b3ec1585f9cf6e800d4bd61159e'
+          '103.11.0/arm64' = 'symcrypt-windows-arm64-release-103.11.0-748c20f1.zip', 'a947fb36ddfdeb9c92dddcf657f6cfd755cbb1aaace01d61e2157e6bbe685b8d'
+        }
+        if (-not $pinned.ContainsKey("$version/$arch")) {
+          Fail "no pinned checksum for SymCrypt '$version' on windows/$arch; add one to .github/actions/setup-symcrypt/action.yml"
+        }
+        $asset, $sha256 = $pinned["$version/$arch"]
+
+        $root = Join-Path $env:RUNNER_TEMP "symcrypt-$version-windows-$arch"
+        $libDir = Join-Path $root 'dll'
+        $marker = Join-Path $root 'archive.sha256'
+        $files = 'symcrypt.lib', 'symcrypt.dll'
+        $complete = (Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $sha256) -and
+          -not ($files | Where-Object { -not (Test-Path (Join-Path $libDir $_)) })
+
+        if ($complete) {
+          Write-Output "SymCrypt $version is already installed in $libDir"
+        } else {
+          $zip = Join-Path $env:RUNNER_TEMP $asset
+          $url = "https://github.com/microsoft/SymCrypt/releases/download/v$version/$asset"
+          Write-Output "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zip -MaximumRetryCount 5 -RetryIntervalSec 5
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) { Fail "checksum mismatch for ${asset}: expected $sha256, got $actual" }
+
+          New-Item -ItemType Directory -Force -Path $libDir | Out-Null
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            foreach ($file in $files) {
+              $entry = $archive.GetEntry("dll/$file")
+              if (-not $entry) { Fail "$asset has no dll/$file" }
+              [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $libDir $file), $true)
+            }
+          } finally {
+            $archive.Dispose()
+          }
+          Set-Content -Path $marker -Value $sha256
+          Remove-Item $zip
+        }
+
+        $info = (Get-Item (Join-Path $libDir 'symcrypt.dll')).VersionInfo
+        $dllVersion = '{0}.{1}.{2}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart
+        if ($dllVersion -ne $version) { Fail "symcrypt.dll reports version $dllVersion, expected $version" }
+
+        "SYMCRYPT_LIB_PATH=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        $libDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        "lib-dir=$libDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        Write-Output "SymCrypt $version ($($info.FileVersion)): $libDir"
+
+    - name: Check SymCrypt runtime lookup (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SYMCRYPT_EXPECTED_DIR: ${{ steps.windows.outputs.lib-dir }}
+        SYMCRYPT_VERSION: ${{ inputs.version }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $expected = $env:SYMCRYPT_EXPECTED_DIR
+        if ($env:SYMCRYPT_LIB_PATH -ne $expected) {
+          Write-Output "::error title=setup-symcrypt::SYMCRYPT_LIB_PATH is '$env:SYMCRYPT_LIB_PATH', expected '$expected'"
+          exit 1
+        }
+        $found = $env:PATH -split ';' | Where-Object { $_ -and (Test-Path (Join-Path $_ 'symcrypt.dll')) } | Select-Object -First 1
+        if ($found -ne $expected) {
+          Write-Output "::error title=setup-symcrypt::the first symcrypt.dll on PATH is in '$found', expected '$expected'"
+          exit 1
+        }
+        # Windows searches the executable's directory and System32 before PATH.
+        $system = Join-Path ([Environment]::SystemDirectory) 'symcrypt.dll'
+        if (Test-Path $system) {
+          Write-Output "::warning title=setup-symcrypt::$system exists and is loaded before the PATH copy; copy symcrypt.dll next to executables that must use version $env:SYMCRYPT_VERSION"
+        }
+        Write-Output "symcrypt.dll resolves from PATH to $found"
+
+    - name: Reject unsupported runner
+      if: runner.os != 'Linux' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        echo "::error title=setup-symcrypt::unsupported runner OS '$RUNNER_OS' (supported: Linux, Windows)"
+        exit 1
