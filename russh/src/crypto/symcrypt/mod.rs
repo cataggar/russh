@@ -6,24 +6,26 @@
 //! linked dynamically by `symcrypt-sys`, which finds it through
 //! `SYMCRYPT_LIB_PATH` (and the loader through `LD_LIBRARY_PATH`/`PATH`).
 //!
-//! # Status
+//! # Categories
 //!
-//! Each category lives in its own file and is replaced independently. Until
-//! then it re-exports the [`rustcrypto`](super::rustcrypto) category, exactly
-//! like the `aws_lc` and `ring` backends do for their non-AEAD categories:
+//! Each category lives in its own file and is implemented independently:
 //!
-//! | Category | File | Implementation today | Issue |
-//! |---|---|---|---|
-//! | `hash` | `hash.rs` | rustcrypto (`sha1`, `sha2`) | TODO(#2) |
-//! | `kex` | `kex.rs` | rustcrypto (`curve25519-dalek`, `p256`/`p384`/`p521`, `ml-kem`, `num-bigint`) | TODO(#2) |
-//! | `sign` | `sign.rs` | rustcrypto (`ssh-key`) | TODO(#3) |
-//! | `cipher` | `cipher.rs` | rustcrypto AES-CTR/CBC; no AEAD yet | TODO(#4) |
-//! | `mac` | `mac.rs` | rustcrypto (`hmac`) | TODO(#4) |
-//! | `rng` | `rng.rs` | SymCrypt (`SymCryptRandom`) | done |
+//! | Category | File | Issue |
+//! |---|---|---|
+//! | `hash`: SHA-1, SHA-2 | `hash.rs` | #2 |
+//! | `kex`: X25519, ECDH, ML-KEM-768 hybrid, DH groups | `kex.rs` | #2 |
+//! | `sign`: host key, certificate and user signatures | `sign.rs` | #3 |
+//! | `cipher`: AEADs, AES-CTR/CBC | `cipher.rs` | #4 |
+//! | `mac`: HMAC-SHA1/SHA2 | `mac.rs` | #4 |
+//! | `rng`: protocol randomness | `rng.rs` | done |
 //!
-//! So this backend already interoperates with OpenSSH using `aes*-ctr`,
-//! `hmac-sha2-*`, `curve25519-sha256`/`mlkem768x25519-sha256` and
-//! Ed25519/ECDSA/RSA keys.
+//! A file that still re-exports the [`rustcrypto`](super::rustcrypto)
+//! implementation (exactly like the `aws_lc` and `ring` backends do for
+//! their non-AEAD categories) says so with a `TODO(#issue)` comment. With
+//! those re-exports this backend already interoperates with OpenSSH using
+//! `aes*-ctr`, `hmac-sha2-*`, `curve25519-sha256`/`mlkem768x25519-sha256`
+//! and Ed25519/ECDSA keys (RSA too with the `rsa` feature), but offers no
+//! AEAD cipher yet.
 //!
 //! # Swapping a category
 //!
@@ -61,6 +63,8 @@ pub(crate) mod sign;
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use crate::{cipher, kex, mac};
 
     #[test]
@@ -68,19 +72,31 @@ mod tests {
         crate::crypto::testing::check_provider_lists();
     }
 
-    /// What the backend offers until the categories are replaced: no AEAD,
-    /// AES-CTR, HMAC-SHA2 and the rustcrypto key exchanges.
+    /// Configured algorithms the backend does not implement are neither
+    /// offered nor accepted; the others keep their order.
     #[test]
-    fn algorithm_lists() {
-        assert!(cipher::CIPHERS.contains_key(&cipher::AES_256_CTR));
-        assert!(!cipher::CIPHERS.contains_key(&cipher::AES_256_GCM));
-        assert!(!cipher::CIPHERS.contains_key(&cipher::CHACHA20_POLY1305));
-        assert_eq!(
-            super::cipher::DEFAULT_ORDER,
-            [cipher::AES_256_CTR, cipher::AES_192_CTR, cipher::AES_128_CTR]
-        );
-        assert!(mac::MACS.contains_key(&mac::HMAC_SHA256_ETM));
-        assert!(kex::KEXES.contains_key(&kex::CURVE25519));
-        assert!(kex::KEXES.contains_key(&kex::MLKEM768X25519_SHA256));
+    fn unsupported_algorithms_are_not_negotiated() {
+        let pref = crate::Preferred {
+            kex: Cow::Owned(kex::ALL_KEX_ALGORITHMS.iter().map(|k| **k).collect()),
+            cipher: Cow::Owned(cipher::ALL_CIPHERS.iter().map(|c| **c).collect()),
+            mac: Cow::Owned(mac::ALL_MAC_ALGORITHMS.iter().map(|m| **m).collect()),
+            ..crate::Preferred::DEFAULT
+        };
+        let supported = pref.supported();
+        assert!(supported.kex.iter().copied().eq(kex::ALL_KEX_ALGORITHMS
+            .iter()
+            .map(|k| **k)
+            .filter(|k| kex::KEXES.contains_key(k))));
+        assert!(supported.cipher.iter().copied().eq(cipher::ALL_CIPHERS
+            .iter()
+            .map(|c| **c)
+            .filter(|c| cipher::CIPHERS.contains_key(c))));
+        assert!(supported.mac.iter().copied().eq(mac::ALL_MAC_ALGORITHMS
+            .iter()
+            .map(|m| **m)
+            .filter(|m| mac::MACS.contains_key(m))));
+        assert!(!supported.kex.is_empty());
+        assert!(!supported.cipher.is_empty());
+        assert!(!supported.mac.is_empty());
     }
 }

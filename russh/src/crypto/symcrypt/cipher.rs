@@ -6,3 +6,20 @@
 // and `DEFAULT_ORDER` instead of re-exporting the rustcrypto ones (which
 // have no AEAD).
 pub(crate) use crate::crypto::rustcrypto::cipher::{ALGORITHMS, DEFAULT_ORDER};
+
+#[cfg(test)]
+mod tests {
+    use crate::cipher::{self, CIPHERS};
+
+    // TODO(#4): replace with the ciphers this backend implements.
+    #[test]
+    fn offers_aes_ctr_and_no_aead() {
+        assert_eq!(
+            super::DEFAULT_ORDER,
+            [cipher::AES_256_CTR, cipher::AES_192_CTR, cipher::AES_128_CTR]
+        );
+        assert!(CIPHERS.contains_key(&cipher::AES_128_CTR));
+        assert!(!CIPHERS.contains_key(&cipher::AES_256_GCM));
+        assert!(!CIPHERS.contains_key(&cipher::CHACHA20_POLY1305));
+    }
+}
