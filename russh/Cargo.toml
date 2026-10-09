@@ -95,7 +95,7 @@ ssh-key.workspace = true
 subtle = "2.4"
 # symcrypt 0.6 (with `symcrypt::mlkem`) is not on crates.io yet.
 # TODO: switch to crates.io once symcrypt >= 0.6 with mlkem is published.
-symcrypt = { git = "https://github.com/microsoft/rust-symcrypt", rev = "7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb", optional = true }
+symcrypt = { git = "https://github.com/microsoft/rust-symcrypt", rev = "7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb", optional = true, features = ["sha1"] }
 symcrypt-sys = { git = "https://github.com/microsoft/rust-symcrypt", rev = "7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb", optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "sync", "time"] }
