@@ -36,6 +36,13 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: Isolate Linux Rust toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@1.91.0
         if: runner.os == 'Linux'
 
@@ -97,6 +104,13 @@ jobs:
           mkdir -p /run/sshd
 
       - uses: actions/checkout@v4
+
+      - name: Isolate Linux Rust toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@1.91.0
         if: runner.os == 'Linux'
