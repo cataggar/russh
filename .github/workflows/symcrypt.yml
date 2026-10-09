@@ -55,3 +55,43 @@ jobs:
           # The loader must pick the provisioned library: the packaged one on Linux, and on Windows the
           # copy next to the executable rather than C:\Windows\System32\symcrypt.dll.
           SYMCRYPT_SMOKE_EXPECTED_LIBRARY: ${{ runner.os == 'Windows' && format('{0}\ci\symcrypt-smoke\target\debug\symcrypt.dll', github.workspace) || format('{0}/libsymcrypt.so.{1}', steps.symcrypt.outputs.lib-dir, steps.symcrypt.outputs.version) }}
+
+  # russh with SymCrypt as its only crypto backend. The test filters pick up new tests without
+  # editing this workflow: unit tests under `crypto::symcrypt` (russh/src/crypto/symcrypt/) and
+  # integration tests named russh/tests/symcrypt_*.rs.
+  russh-symcrypt-only:
+    name: russh (symcrypt only)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSH
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client openssh-server
+          sudo mkdir -p /run/sshd
+
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
+
+      - name: Build
+        run: cargo build -p russh --no-default-features --features symcrypt
+
+      - name: Install Clippy
+        run: rustup component add clippy
+
+      - name: Clippy
+        run: cargo clippy -p russh --no-default-features --features symcrypt -- -D warnings
+
+      - name: Unit tests (crypto::symcrypt)
+        run: cargo test -p russh --no-default-features --features symcrypt --lib -- crypto::symcrypt
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Integration tests (tests/symcrypt_*.rs)
+        run: cargo test -p russh --no-default-features --features symcrypt --test 'symcrypt_*'
+        env:
+          RUST_BACKTRACE: 1
+          # Fail rather than skip the OpenSSH interop checks if sshd can't be started.
+          RUSSH_REQUIRE_SSHD: 1

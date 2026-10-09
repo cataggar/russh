@@ -22,7 +22,6 @@ use bytes::Bytes;
 use cert::PublicKeyOrCertificate;
 use log::{debug, error, info, trace, warn};
 use msg;
-use signature::Verifier;
 use ssh_encoding::{Decode, Encode, Reader};
 use ssh_key::{PublicKey, Signature};
 use tokio::time::Instant;
@@ -968,6 +967,24 @@ impl Encrypted {
             Ok(pk_or_cert) => {
                 debug!("is_real = {is_real:?}");
 
+                let requested_algo = match pk_or_cert {
+                    PublicKeyOrCertificate::PublicKey { .. } => {
+                        ssh_key::Algorithm::new(&pubkey_algo)
+                    }
+                    PublicKeyOrCertificate::Certificate(_) => {
+                        ssh_key::Algorithm::new_certificate_ext(&pubkey_algo)
+                    }
+                };
+                // Neither probe nor verify an algorithm the crypto backend
+                // cannot verify.
+                if let Ok(algo) = &requested_algo
+                    && !crate::crypto::is_supported_signature_algorithm(algo)
+                {
+                    debug!("public key algorithm {algo} is not supported by the crypto backend");
+                    reject_auth_request(until, &mut self.write, auth_request).await?;
+                    return Ok(());
+                }
+
                 // Handle certificates specifically
                 let pubkey = match pk_or_cert {
                     PublicKeyOrCertificate::PublicKey { ref key, .. } => key.clone(),
@@ -988,7 +1005,7 @@ impl Encrypted {
                         }
 
                         // Verify the certificate’s signature
-                        if cert.verify_signature().is_err() {
+                        if crate::crypto::verify_certificate(cert).is_err() {
                             warn!("Certificate signature is invalid");
                             reject_auth_request(until, &mut self.write, auth_request).await?;
                             return Ok(());
@@ -1033,14 +1050,6 @@ impl Encrypted {
                     // RFC 4252 §7 / RFC 8332 §3: the signature must use the
                     // algorithm named in the request. Otherwise a client can
                     // announce rsa-sha2-512 and sign with ssh-rsa (SHA-1).
-                    let requested_algo = match pk_or_cert {
-                        PublicKeyOrCertificate::PublicKey { .. } => {
-                            ssh_key::Algorithm::new(&pubkey_algo)
-                        }
-                        PublicKeyOrCertificate::Certificate(_) => {
-                            ssh_key::Algorithm::new_certificate_ext(&pubkey_algo)
-                        }
-                    };
                     if requested_algo.ok() != Some(sig.algorithm()) {
                         debug!("signature algorithm does not match the requested one");
                         auth_user.clear();
@@ -1066,7 +1075,7 @@ impl Encrypted {
                             map_err!(session_id.encode(&mut *buf))?;
                             buf.extend_from_slice(sig_init_buffer);
 
-                            Ok(Verifier::verify(&pubkey, &buf, &sig).is_ok())
+                            Ok(crate::crypto::verify(pubkey.key_data(), &buf, &sig).is_ok())
                         })? {
                             debug!("signature verified");
                             let auth = match pk_or_cert {

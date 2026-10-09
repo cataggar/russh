@@ -2,19 +2,14 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 
 use byteorder::{BigEndian, ByteOrder};
-use elliptic_curve::Generate;
-use elliptic_curve::ecdh::{EphemeralSecret, SharedSecret};
-use elliptic_curve::point::PointCompression;
-use elliptic_curve::sec1::{FromSec1Point, ModulusSize, ToSec1Point};
-use elliptic_curve::{AffinePoint, Curve, CurveArithmetic, FieldBytesSize};
 use log::debug;
-use p256::NistP256;
-use p384::NistP384;
-use p521::NistP521;
-use sha2::{Digest, Sha256, Sha384, Sha512};
 use ssh_encoding::{Encode, Writer};
+use zeroize::Zeroizing;
 
 use super::{KexAlgorithm, SharedSecret as KexSharedSecret, encode_mpint};
+use crate::crypto::provider::hash::{Sha256, Sha384, Sha512};
+use crate::crypto::provider::kex::{NistP256, NistP384, NistP521};
+use crate::crypto::{Hash, KeyAgreement};
 use crate::kex::{KexAlgorithmImplementor, KexType, compute_keys};
 use crate::mac::{self};
 use crate::session::Exchange;
@@ -24,12 +19,7 @@ pub struct EcdhNistP256KexType {}
 
 impl KexType for EcdhNistP256KexType {
     fn make(&self) -> KexAlgorithm {
-        EcdhNistPKex::<NistP256, Sha256> {
-            local_secret: None,
-            shared_secret: None,
-            _digest: PhantomData,
-        }
-        .into()
+        EcdhNistPKex::<NistP256, Sha256>::new().into()
     }
 }
 
@@ -37,12 +27,7 @@ pub struct EcdhNistP384KexType {}
 
 impl KexType for EcdhNistP384KexType {
     fn make(&self) -> KexAlgorithm {
-        EcdhNistPKex::<NistP384, Sha384> {
-            local_secret: None,
-            shared_secret: None,
-            _digest: PhantomData,
-        }
-        .into()
+        EcdhNistPKex::<NistP384, Sha384>::new().into()
     }
 }
 
@@ -50,23 +35,30 @@ pub struct EcdhNistP521KexType {}
 
 impl KexType for EcdhNistP521KexType {
     fn make(&self) -> KexAlgorithm {
-        EcdhNistPKex::<NistP521, Sha512> {
+        EcdhNistPKex::<NistP521, Sha512>::new().into()
+    }
+}
+
+/// ECDH key exchange (RFC 5656) over the provider's key agreement `K`
+/// and hash `H`.
+#[doc(hidden)]
+pub struct EcdhNistPKex<K: KeyAgreement, H> {
+    local_secret: Option<K::PrivateKey>,
+    shared_secret: Option<Zeroizing<Vec<u8>>>,
+    _digest: PhantomData<fn() -> H>,
+}
+
+impl<K: KeyAgreement, H> EcdhNistPKex<K, H> {
+    fn new() -> Self {
+        Self {
             local_secret: None,
             shared_secret: None,
             _digest: PhantomData,
         }
-        .into()
     }
 }
 
-#[doc(hidden)]
-pub struct EcdhNistPKex<C: Curve + CurveArithmetic, D: Digest> {
-    local_secret: Option<EphemeralSecret<C>>,
-    shared_secret: Option<SharedSecret<C>>,
-    _digest: PhantomData<D>,
-}
-
-impl<C: Curve + CurveArithmetic, D: Digest> std::fmt::Debug for EcdhNistPKex<C, D> {
+impl<K: KeyAgreement, H> std::fmt::Debug for EcdhNistPKex<K, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
@@ -75,12 +67,7 @@ impl<C: Curve + CurveArithmetic, D: Digest> std::fmt::Debug for EcdhNistPKex<C, 
     }
 }
 
-impl<C: Curve + CurveArithmetic, D: Digest> KexAlgorithmImplementor for EcdhNistPKex<C, D>
-where
-    C: PointCompression,
-    FieldBytesSize<C>: ModulusSize,
-    AffinePoint<C>: FromSec1Point<C> + ToSec1Point<C>,
-{
+impl<K: KeyAgreement, H: Hash> KexAlgorithmImplementor for EcdhNistPKex<K, H> {
     fn skip_exchange(&self) -> bool {
         false
     }
@@ -102,19 +89,16 @@ where
             }
 
             #[allow(clippy::indexing_slicing)] // length checked
-            elliptic_curve::PublicKey::<C>::from_sec1_bytes(&payload[5..(5 + pubkey_len)])
-                .map_err(|_| crate::Error::Inconsistent)?
+            &payload[5..(5 + pubkey_len)]
         };
 
-        let server_secret = elliptic_curve::ecdh::EphemeralSecret::<C>::generate_from_rng(&mut rand::rng());
-        let server_pubkey = server_secret.public_key();
+        let (server_secret, server_pubkey) = K::generate().map_err(|_| crate::Error::Kex)?;
+        let shared =
+            K::agree(server_secret, client_pubkey).map_err(|_| crate::Error::Inconsistent)?;
 
         // fill exchange.
         exchange.server_ephemeral.clear();
-        exchange
-            .server_ephemeral
-            .extend_from_slice(&server_pubkey.to_sec1_bytes());
-        let shared = server_secret.diffie_hellman(&client_pubkey);
+        exchange.server_ephemeral.extend_from_slice(&server_pubkey);
         self.shared_secret = Some(shared);
         Ok(())
     }
@@ -125,15 +109,14 @@ where
         client_ephemeral: &mut Vec<u8>,
         writer: &mut impl Writer,
     ) -> Result<(), crate::Error> {
-        let client_secret = elliptic_curve::ecdh::EphemeralSecret::<C>::generate_from_rng(&mut rand::rng());
-        let client_pubkey = client_secret.public_key();
+        let (client_secret, client_pubkey) = K::generate().map_err(|_| crate::Error::Kex)?;
 
         // fill exchange.
         client_ephemeral.clear();
-        client_ephemeral.extend_from_slice(&client_pubkey.to_sec1_bytes());
+        client_ephemeral.extend_from_slice(&client_pubkey);
 
         msg::KEX_ECDH_INIT.encode(writer)?;
-        client_pubkey.to_sec1_bytes().encode(writer)?;
+        client_pubkey.as_slice().encode(writer)?;
 
         self.local_secret = Some(client_secret);
         Ok(())
@@ -141,16 +124,13 @@ where
 
     fn compute_shared_secret(&mut self, remote_pubkey_: &[u8]) -> Result<(), crate::Error> {
         let local_secret = self.local_secret.take().ok_or(crate::Error::KexInit)?;
-        let pubkey = elliptic_curve::PublicKey::<C>::from_sec1_bytes(remote_pubkey_)
-            .map_err(|_| crate::Error::KexInit)?;
-        self.shared_secret = Some(local_secret.diffie_hellman(&pubkey));
+        let shared = K::agree(local_secret, remote_pubkey_).map_err(|_| crate::Error::KexInit)?;
+        self.shared_secret = Some(shared);
         Ok(())
     }
 
     fn shared_secret_bytes(&self) -> Option<&[u8]> {
-        self.shared_secret
-            .as_ref()
-            .map(|s| s.raw_secret_bytes().deref())
+        self.shared_secret.as_ref().map(|s| s.as_slice())
     }
 
     fn compute_exchange_hash(
@@ -171,13 +151,10 @@ where
         exchange.server_ephemeral.deref().encode(buffer)?;
 
         if let Some(ref shared) = self.shared_secret {
-            encode_mpint(shared.raw_secret_bytes(), buffer)?;
+            encode_mpint(shared, buffer)?;
         }
 
-        let mut hasher = D::new();
-        hasher.update(&buffer);
-
-        Ok(hasher.finalize().to_vec())
+        Ok(H::digest_to_vec(&buffer[..]))
     }
 
     fn compute_keys(
@@ -192,10 +169,10 @@ where
         let shared_secret = self
             .shared_secret
             .as_ref()
-            .map(|x| KexSharedSecret::from_mpint(x.raw_secret_bytes()))
+            .map(|x| KexSharedSecret::from_mpint(x))
             .transpose()?;
 
-        compute_keys::<D>(
+        compute_keys::<H>(
             shared_secret.as_ref(),
             session_id,
             exchange_hash,
@@ -213,34 +190,20 @@ mod tests {
 
     #[test]
     fn test_shared_secret() {
-        let mut party1 = EcdhNistPKex::<NistP256, Sha256> {
-            local_secret: Some(EphemeralSecret::<NistP256>::generate_from_rng(&mut rand::rng())),
-            shared_secret: None,
-            _digest: PhantomData,
-        };
-        let p1_pubkey = party1.local_secret.as_ref().unwrap().public_key();
+        let (secret1, p1_pubkey) = NistP256::generate().unwrap();
+        let mut party1 = EcdhNistPKex::<NistP256, Sha256>::new();
+        party1.local_secret = Some(secret1);
 
-        let mut party2 = EcdhNistPKex::<NistP256, Sha256> {
-            local_secret: Some(EphemeralSecret::<NistP256>::generate_from_rng(&mut rand::rng())),
-            shared_secret: None,
-            _digest: PhantomData,
-        };
-        let p2_pubkey = party2.local_secret.as_ref().unwrap().public_key();
+        let (secret2, p2_pubkey) = NistP256::generate().unwrap();
+        let mut party2 = EcdhNistPKex::<NistP256, Sha256>::new();
+        party2.local_secret = Some(secret2);
 
-        party1
-            .compute_shared_secret(&p2_pubkey.to_sec1_bytes())
-            .unwrap();
-
-        party2
-            .compute_shared_secret(&p1_pubkey.to_sec1_bytes())
-            .unwrap();
+        party1.compute_shared_secret(&p2_pubkey).unwrap();
+        party2.compute_shared_secret(&p1_pubkey).unwrap();
 
         let p1_shared_secret = party1.shared_secret.unwrap();
         let p2_shared_secret = party2.shared_secret.unwrap();
 
-        assert_eq!(
-            p1_shared_secret.raw_secret_bytes(),
-            p2_shared_secret.raw_secret_bytes()
-        )
+        assert_eq!(p1_shared_secret, p2_shared_secret)
     }
 }

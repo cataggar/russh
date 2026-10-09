@@ -34,20 +34,17 @@ use dh::{
     DhGroup14Sha256KexType, DhGroup15Sha512KexType, DhGroup16Sha512KexType, DhGroup17Sha512KexType,
     DhGroup18Sha512KexType,
 };
-use digest::Digest;
 use ecdh_nistp::{EcdhNistP256KexType, EcdhNistP384KexType, EcdhNistP521KexType};
 use enum_dispatch::enum_dispatch;
 use hybrid_mlkem::MlKem768X25519KexType;
-use p256::NistP256;
-use p384::NistP384;
-use p521::NistP521;
-use sha1::Sha1;
-use sha2::{Sha256, Sha384, Sha512};
 use ssh_encoding::{Encode, Writer};
 use ssh_key::{Certificate, PublicKey};
 
 use crate::cipher::CIPHERS;
 use crate::client::GexParams;
+use crate::crypto::provider::hash::{Sha1, Sha256, Sha384, Sha512};
+use crate::crypto::provider::kex::{NistP256, NistP384, NistP521};
+use crate::crypto::{self, provider};
 use crate::mac::{self, MACS};
 use crate::session::{Exchange, NewKeys};
 use crate::{CryptoVec, Error, cipher};
@@ -277,22 +274,27 @@ pub const EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT: Name = Name("kex-strict-c-v00@
 /// `kex-strict-s-v00@openssh.com`
 pub const EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER: Name = Name("kex-strict-s-v00@openssh.com");
 
-const _CURVE25519: Curve25519KexType = Curve25519KexType {};
-const _DH_GEX_SHA1: DhGexSha1KexType = DhGexSha1KexType {};
-const _DH_GEX_SHA256: DhGexSha256KexType = DhGexSha256KexType {};
-const _DH_G1_SHA1: DhGroup1Sha1KexType = DhGroup1Sha1KexType {};
-const _DH_G14_SHA1: DhGroup14Sha1KexType = DhGroup14Sha1KexType {};
-const _DH_G14_SHA256: DhGroup14Sha256KexType = DhGroup14Sha256KexType {};
-const _DH_G15_SHA512: DhGroup15Sha512KexType = DhGroup15Sha512KexType {};
-const _DH_G16_SHA512: DhGroup16Sha512KexType = DhGroup16Sha512KexType {};
-const _DH_G17_SHA512: DhGroup17Sha512KexType = DhGroup17Sha512KexType {};
-const _DH_G18_SHA512: DhGroup18Sha512KexType = DhGroup18Sha512KexType {};
-const _ECDH_SHA2_NISTP256: EcdhNistP256KexType = EcdhNistP256KexType {};
-const _ECDH_SHA2_NISTP384: EcdhNistP384KexType = EcdhNistP384KexType {};
-const _ECDH_SHA2_NISTP521: EcdhNistP521KexType = EcdhNistP521KexType {};
-const _MLKEM768X25519_SHA256: MlKem768X25519KexType = MlKem768X25519KexType {};
+// The key exchange methods, written once over the provider's primitives
+// (`crypto::provider::{kex, hash}`). Each provider's `kex::ALGORITHMS` lists
+// the ones it can run.
+pub(crate) const _CURVE25519: Curve25519KexType = Curve25519KexType {};
+pub(crate) const _DH_GEX_SHA1: DhGexSha1KexType = DhGexSha1KexType {};
+pub(crate) const _DH_GEX_SHA256: DhGexSha256KexType = DhGexSha256KexType {};
+pub(crate) const _DH_G1_SHA1: DhGroup1Sha1KexType = DhGroup1Sha1KexType {};
+pub(crate) const _DH_G14_SHA1: DhGroup14Sha1KexType = DhGroup14Sha1KexType {};
+pub(crate) const _DH_G14_SHA256: DhGroup14Sha256KexType = DhGroup14Sha256KexType {};
+pub(crate) const _DH_G15_SHA512: DhGroup15Sha512KexType = DhGroup15Sha512KexType {};
+pub(crate) const _DH_G16_SHA512: DhGroup16Sha512KexType = DhGroup16Sha512KexType {};
+pub(crate) const _DH_G17_SHA512: DhGroup17Sha512KexType = DhGroup17Sha512KexType {};
+pub(crate) const _DH_G18_SHA512: DhGroup18Sha512KexType = DhGroup18Sha512KexType {};
+pub(crate) const _ECDH_SHA2_NISTP256: EcdhNistP256KexType = EcdhNistP256KexType {};
+pub(crate) const _ECDH_SHA2_NISTP384: EcdhNistP384KexType = EcdhNistP384KexType {};
+pub(crate) const _ECDH_SHA2_NISTP521: EcdhNistP521KexType = EcdhNistP521KexType {};
+pub(crate) const _MLKEM768X25519_SHA256: MlKem768X25519KexType = MlKem768X25519KexType {};
 const _NONE: none::NoneKexType = none::NoneKexType {};
 
+/// Every key exchange name russh knows. The ones the crypto backend
+/// implements are the keys of `KEXES`.
 pub const ALL_KEX_ALGORITHMS: &[&Name] = &[
     &MLKEM768X25519_SHA256,
     &CURVE25519,
@@ -315,23 +317,8 @@ pub const ALL_KEX_ALGORITHMS: &[&Name] = &[
 pub(crate) static KEXES: LazyLock<HashMap<&'static Name, &(dyn KexType + Send + Sync)>> =
     LazyLock::new(|| {
         let mut h: HashMap<&'static Name, &(dyn KexType + Send + Sync)> = HashMap::new();
-        h.insert(&MLKEM768X25519_SHA256, &_MLKEM768X25519_SHA256);
-        h.insert(&CURVE25519, &_CURVE25519);
-        h.insert(&CURVE25519_PRE_RFC_8731, &_CURVE25519);
-        h.insert(&DH_GEX_SHA1, &_DH_GEX_SHA1);
-        h.insert(&DH_GEX_SHA256, &_DH_GEX_SHA256);
-        h.insert(&DH_G18_SHA512, &_DH_G18_SHA512);
-        h.insert(&DH_G17_SHA512, &_DH_G17_SHA512);
-        h.insert(&DH_G16_SHA512, &_DH_G16_SHA512);
-        h.insert(&DH_G15_SHA512, &_DH_G15_SHA512);
-        h.insert(&DH_G14_SHA256, &_DH_G14_SHA256);
-        h.insert(&DH_G14_SHA1, &_DH_G14_SHA1);
-        h.insert(&DH_G1_SHA1, &_DH_G1_SHA1);
-        h.insert(&ECDH_SHA2_NISTP256, &_ECDH_SHA2_NISTP256);
-        h.insert(&ECDH_SHA2_NISTP384, &_ECDH_SHA2_NISTP384);
-        h.insert(&ECDH_SHA2_NISTP521, &_ECDH_SHA2_NISTP521);
         h.insert(&NONE, &_NONE);
-        assert_eq!(ALL_KEX_ALGORITHMS.len(), h.len());
+        h.extend(provider::kex::ALGORITHMS.iter().copied());
         h
     });
 
@@ -367,7 +354,7 @@ impl SharedSecret {
     }
 }
 
-pub(crate) fn compute_keys<D: Digest>(
+pub(crate) fn compute_keys<H: crypto::Hash>(
     shared_secret: Option<&SharedSecret>,
     session_id: &[u8],
     exchange_hash: &[u8],
@@ -397,11 +384,7 @@ pub(crate) fn compute_keys<D: Digest>(
                         buffer.extend(exchange_hash.as_ref());
                         buffer.push(c);
                         buffer.extend(session_id.as_ref());
-                        let hash = {
-                            let mut hasher = D::new();
-                            hasher.update(&buffer[..]);
-                            hasher.finalize()
-                        };
+                        let hash = H::digest(&buffer[..]);
                         key.extend(hash.as_ref());
 
                         while key.len() < len {
@@ -412,11 +395,7 @@ pub(crate) fn compute_keys<D: Digest>(
                             }
                             buffer.extend(exchange_hash.as_ref());
                             buffer.extend(key);
-                            let hash = {
-                                let mut hasher = D::new();
-                                hasher.update(&buffer[..]);
-                                hasher.finalize()
-                            };
+                            let hash = H::digest(&buffer[..]);
                             key.extend(hash.as_ref());
                         }
 

@@ -19,6 +19,7 @@ mod auth;
 mod cert;
 /// Cipher names
 pub mod cipher;
+mod crypto;
 /// Compression algorithm names
 pub mod compression;
 /// Key exchange algorithm names

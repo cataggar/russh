@@ -1,4 +1,3 @@
-use rand::rng;
 // Copyright 2016 Pierre-Étienne Meunier
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,9 +40,10 @@ pub fn parse_public_key(mut p: &[u8]) -> Result<PublicKey, Error> {
     Ok(ssh_key::public::KeyData::decode(&mut p)?.into())
 }
 
-/// Obtain a cryptographic-safe random number generator.
+/// Obtain a cryptographic-safe random number generator (the crypto
+/// backend's).
 pub fn safe_rng() -> impl rand::CryptoRng {
-    rng()
+    crate::crypto::ProviderRng
 }
 
 mod private_key_with_hash_alg {

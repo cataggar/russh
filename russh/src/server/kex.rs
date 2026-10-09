@@ -3,13 +3,12 @@ use std::cell::RefCell;
 
 use client::GexParams;
 use log::debug;
-use num_bigint::BigUint;
 use ssh_encoding::Encode;
 use ssh_key::Algorithm;
 
 use super::*;
 use crate::helpers::sign_with_hash_alg;
-use crate::kex::dh::biguint_to_mpint;
+use crate::crypto::mpint_body;
 use crate::kex::{KEXES, KexAlgorithm, KexAlgorithmImplementor, KexCause};
 use crate::keys::key::PrivateKeyWithHashAlg;
 use crate::negotiation::{Names, Select, is_key_compatible_with_algo};
@@ -202,8 +201,8 @@ impl ServerKex {
                     return Err(Error::Kex)?;
                 };
 
-                let prime = biguint_to_mpint(&BigUint::from_bytes_be(&dh_group.prime));
-                let generator = biguint_to_mpint(&BigUint::from_bytes_be(&dh_group.generator));
+                let prime = mpint_body(&dh_group.prime);
+                let generator = mpint_body(&dh_group.generator);
 
                 self.exchange.gex = Some((gex_params, dh_group.clone()));
                 kex.dh_gex_set_group(dh_group)?;

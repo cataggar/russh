@@ -16,16 +16,15 @@ use std::borrow::Cow;
 
 use bytes::Bytes;
 use log::debug;
-use rand_core::Rng;
 use ssh_encoding::{Decode, Encode};
-use ssh_key::{Algorithm, Certificate, EcdsaCurve, HashAlg, PrivateKey};
+use ssh_key::{Algorithm, Certificate, PrivateKey};
 
 use crate::cipher::CIPHERS;
+use crate::crypto::{self, provider};
 use crate::helpers::{AlgorithmExt, NameList};
 use crate::kex::{
     KexCause, EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT, EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
 };
-use crate::keys::key::safe_rng;
 use crate::parsing::ensure_end;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::server::Config;
@@ -159,22 +158,8 @@ impl Preferred {
     }
 }
 
-const SAFE_KEX_ORDER: &[kex::Name] = &[
-    kex::MLKEM768X25519_SHA256,
-    kex::CURVE25519,
-    kex::CURVE25519_PRE_RFC_8731,
-    kex::DH_GEX_SHA256,
-    kex::DH_G18_SHA512,
-    kex::DH_G17_SHA512,
-    kex::DH_G16_SHA512,
-    kex::DH_G15_SHA512,
-    kex::DH_G14_SHA256,
-    kex::EXTENSION_SUPPORT_AS_CLIENT,
-    kex::EXTENSION_SUPPORT_AS_SERVER,
-    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
-    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
-];
-
+/// RFC 8308 / OpenSSH strict-kex pseudo-algorithms. They are not key
+/// exchange methods, so every backend advertises them.
 const KEX_EXTENSION_NAMES: &[kex::Name] = &[
     kex::EXTENSION_SUPPORT_AS_CLIENT,
     kex::EXTENSION_SUPPORT_AS_SERVER,
@@ -182,21 +167,36 @@ const KEX_EXTENSION_NAMES: &[kex::Name] = &[
     kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
 ];
 
-const CIPHER_ORDER: &[cipher::Name] = &[
-    cipher::CHACHA20_POLY1305,
-    cipher::AES_256_GCM,
-    cipher::AES_256_CTR,
-    cipher::AES_192_CTR,
-    cipher::AES_128_CTR,
-];
+const SAFE_KEX_ORDER_ARRAY: [kex::Name;
+    provider::kex::DEFAULT_ORDER.len() + KEX_EXTENSION_NAMES.len()] =
+    concat_kex_names(provider::kex::DEFAULT_ORDER, KEX_EXTENSION_NAMES);
 
-// SHA-1 MAC variants are excluded from defaults.
-const SAFE_HMAC_ORDER: &[mac::Name] = &[
-    mac::HMAC_SHA512_ETM,
-    mac::HMAC_SHA256_ETM,
-    mac::HMAC_SHA512,
-    mac::HMAC_SHA256,
-];
+/// The crypto backend's key exchange preference, then the extension names.
+const SAFE_KEX_ORDER: &[kex::Name] = &SAFE_KEX_ORDER_ARRAY;
+
+#[allow(clippy::indexing_slicing)] // evaluated at compile time
+const fn concat_kex_names<const N: usize>(a: &[kex::Name], b: &[kex::Name]) -> [kex::Name; N] {
+    assert!(a.len() + b.len() == N);
+    let mut names = [kex::NONE; N];
+    let mut i = 0;
+    while i < a.len() {
+        names[i] = a[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < b.len() {
+        names[a.len() + j] = b[j];
+        j += 1;
+    }
+    names
+}
+
+/// The crypto backend's cipher preference.
+const CIPHER_ORDER: &[cipher::Name] = provider::cipher::DEFAULT_ORDER;
+
+/// The crypto backend's MAC preference (SHA-1 MAC variants are excluded
+/// from defaults).
+const SAFE_HMAC_ORDER: &[mac::Name] = provider::mac::DEFAULT_ORDER;
 
 const COMPRESSION_ORDER: &[compression::Name] = &[
     compression::NONE,
@@ -210,25 +210,7 @@ impl Preferred {
     pub const DEFAULT: Preferred = Preferred {
         kex: Cow::Borrowed(SAFE_KEX_ORDER),
         host_key_certificates: Cow::Borrowed(&[]),
-        key: Cow::Borrowed(&[
-            Algorithm::Ed25519,
-            Algorithm::Ecdsa {
-                curve: EcdsaCurve::NistP256,
-            },
-            Algorithm::Ecdsa {
-                curve: EcdsaCurve::NistP384,
-            },
-            Algorithm::Ecdsa {
-                curve: EcdsaCurve::NistP521,
-            },
-            Algorithm::Rsa {
-                hash: Some(HashAlg::Sha512),
-            },
-            Algorithm::Rsa {
-                hash: Some(HashAlg::Sha256),
-            },
-            Algorithm::Rsa { hash: None },
-        ]),
+        key: Cow::Borrowed(provider::sign::DEFAULT_ORDER),
         cipher: Cow::Borrowed(CIPHER_ORDER),
         mac: Cow::Borrowed(SAFE_HMAC_ORDER),
         compression: Cow::Borrowed(COMPRESSION_ORDER),
@@ -250,6 +232,37 @@ impl Default for Preferred {
     }
 }
 
+impl Preferred {
+    /// These preferences without the algorithms the crypto backend does not
+    /// implement, so that they are neither advertised nor accepted.
+    pub(crate) fn supported(&self) -> Cow<'_, Preferred> {
+        fn retain<T: Clone>(list: &mut Cow<'static, [T]>, keep: impl Fn(&T) -> bool) -> bool {
+            if list.iter().all(&keep) {
+                return false;
+            }
+            *list = Cow::Owned(list.iter().filter(|x| keep(x)).cloned().collect());
+            true
+        }
+
+        let mut pref = self.clone();
+        let mut changed = retain(&mut pref.kex, |k| {
+            KEX_EXTENSION_NAMES.contains(k) || kex::KEXES.contains_key(k)
+        });
+        changed |= retain(&mut pref.key, crypto::is_supported_signature_algorithm);
+        changed |= retain(
+            &mut pref.host_key_certificates,
+            crypto::is_supported_signature_algorithm,
+        );
+        changed |= retain(&mut pref.cipher, |c| CIPHERS.contains_key(c));
+        changed |= retain(&mut pref.mac, |m| mac::MACS.contains_key(m));
+        if changed {
+            Cow::Owned(pref)
+        } else {
+            Cow::Borrowed(self)
+        }
+    }
+}
+
 pub(crate) trait Select {
     fn is_server() -> bool;
 
@@ -268,6 +281,7 @@ pub(crate) trait Select {
         available_certificates: Option<&[Certificate]>,
         cause: &KexCause,
     ) -> Result<Names, Error> {
+        let pref = &*pref.supported();
         let &Some(mut r) = &buffer.get(17..) else {
             return Err(Error::Inconsistent);
         };
@@ -513,11 +527,12 @@ pub(crate) fn write_kex(
     writer: &mut PacketWriter,
     server_config: Option<&Config>,
 ) -> Result<Bytes, Error> {
+    let prefs = &*prefs.supported();
     writer.packet_bytes(|w| {
         msg::KEXINIT.encode(w)?;
 
         let mut cookie = [0; 16];
-        safe_rng().fill_bytes(&mut cookie);
+        crypto::fill_random(&mut cookie);
         for b in cookie {
             b.encode(w)?;
         }
@@ -637,6 +652,7 @@ pub(crate) fn write_kex(
 #[cfg(test)]
 mod tests {
     use ssh_encoding::Encode;
+    use ssh_key::HashAlg;
 
     use super::*;
     use crate::helpers::NameList;
@@ -998,5 +1014,115 @@ mod tests {
             server_certificate_names(&no_sha1, &[cert], &keys),
             vec!["rsa-sha2-512-cert-v01@openssh.com".to_string()]
         );
+    }
+
+    /// With the `aws_lc` and `ring` backends the default preferences are
+    /// exactly the ones russh had before the crypto abstraction.
+    #[cfg(any(russh_backend = "aws_lc", russh_backend = "ring"))]
+    #[test]
+    fn default_preferences_are_unchanged() {
+        use ssh_key::EcdsaCurve;
+
+        for pref in [
+            Preferred::DEFAULT,
+            Preferred::COMPRESSED,
+            Preferred::default(),
+        ] {
+            assert_eq!(
+                pref.kex[..],
+                [
+                    kex::MLKEM768X25519_SHA256,
+                    kex::CURVE25519,
+                    kex::CURVE25519_PRE_RFC_8731,
+                    kex::DH_GEX_SHA256,
+                    kex::DH_G18_SHA512,
+                    kex::DH_G17_SHA512,
+                    kex::DH_G16_SHA512,
+                    kex::DH_G15_SHA512,
+                    kex::DH_G14_SHA256,
+                    kex::EXTENSION_SUPPORT_AS_CLIENT,
+                    kex::EXTENSION_SUPPORT_AS_SERVER,
+                    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+                    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+                ]
+            );
+            assert!(pref.host_key_certificates.is_empty());
+            assert_eq!(
+                pref.key[..],
+                [
+                    Algorithm::Ed25519,
+                    Algorithm::Ecdsa {
+                        curve: EcdsaCurve::NistP256,
+                    },
+                    Algorithm::Ecdsa {
+                        curve: EcdsaCurve::NistP384,
+                    },
+                    Algorithm::Ecdsa {
+                        curve: EcdsaCurve::NistP521,
+                    },
+                    Algorithm::Rsa {
+                        hash: Some(HashAlg::Sha512),
+                    },
+                    Algorithm::Rsa {
+                        hash: Some(HashAlg::Sha256),
+                    },
+                    Algorithm::Rsa { hash: None },
+                ]
+            );
+            assert_eq!(
+                pref.cipher[..],
+                [
+                    cipher::CHACHA20_POLY1305,
+                    cipher::AES_256_GCM,
+                    cipher::AES_256_CTR,
+                    cipher::AES_192_CTR,
+                    cipher::AES_128_CTR,
+                ]
+            );
+            assert_eq!(
+                pref.mac[..],
+                [
+                    mac::HMAC_SHA512_ETM,
+                    mac::HMAC_SHA256_ETM,
+                    mac::HMAC_SHA512,
+                    mac::HMAC_SHA256,
+                ]
+            );
+            assert_eq!(pref.compression[..], *COMPRESSION_ORDER);
+            // Everything is implemented, so nothing is filtered out.
+            assert!(matches!(pref.supported(), Cow::Borrowed(_)));
+        }
+    }
+
+    /// Algorithms the backend does not implement are neither advertised nor
+    /// accepted, whatever the configured preferences say.
+    #[test]
+    fn unsupported_algorithms_are_filtered_out() {
+        let pref = Preferred {
+            kex: Cow::Owned(
+                std::iter::once(kex::NONE)
+                    .chain(kex::ALL_KEX_ALGORITHMS.iter().map(|k| **k))
+                    .chain(KEX_EXTENSION_NAMES.iter().copied())
+                    .collect(),
+            ),
+            cipher: Cow::Owned(cipher::ALL_CIPHERS.iter().map(|c| **c).collect()),
+            mac: Cow::Owned(mac::ALL_MAC_ALGORITHMS.iter().map(|m| **m).collect()),
+            ..Preferred::DEFAULT
+        };
+        let supported = pref.supported();
+        assert!(supported.kex.iter().all(|k| {
+            KEX_EXTENSION_NAMES.contains(k) || kex::KEXES.contains_key(k)
+        }));
+        assert!(supported.kex.contains(&kex::NONE));
+        assert!(supported.cipher.iter().all(|c| CIPHERS.contains_key(c)));
+        assert!(supported.mac.iter().all(|m| mac::MACS.contains_key(m)));
+        assert_eq!(supported.key, Preferred::DEFAULT.key);
+        // The remaining order is preserved.
+        let ciphers: Vec<_> = cipher::ALL_CIPHERS
+            .iter()
+            .map(|c| **c)
+            .filter(|c| CIPHERS.contains_key(c))
+            .collect();
+        assert_eq!(supported.cipher[..], ciphers[..]);
     }
 }

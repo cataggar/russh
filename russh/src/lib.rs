@@ -87,10 +87,19 @@
 //! messages sent through a `server::Handle` are processed when there
 //! is no incoming packet to read.
 
-#[cfg(not(any(feature = "ring", feature = "aws-lc-rs")))]
+// `russh_backend` is set by build.rs from the backend features.
+#[cfg(not(any(
+    russh_backend = "aws_lc",
+    russh_backend = "ring",
+    russh_backend = "symcrypt"
+)))]
 compile_error!(
-    "`russh` requires enabling either the `ring` or `aws-lc-rs` feature as a crypto backend."
+    "`russh` requires enabling one of the `aws-lc-rs`, `ring` or `symcrypt` features as a crypto backend."
 );
 
-#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
+#[cfg(any(
+    russh_backend = "aws_lc",
+    russh_backend = "ring",
+    russh_backend = "symcrypt"
+))]
 include!("lib_inner.rs");

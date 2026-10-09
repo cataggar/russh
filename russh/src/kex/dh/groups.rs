@@ -2,7 +2,6 @@ use std::fmt::Debug;
 use std::ops::Deref;
 
 use hex_literal::hex;
-use num_bigint::{BigRng010, BigUint};
 
 #[derive(Clone)]
 pub enum DhGroupUInt {
@@ -258,62 +257,5 @@ pub const DH_GROUP18: DhGroup = DhGroup {
     ),
     generator: DhGroupUInt::new(&[2]),
 };
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub(crate) struct DH {
-    prime_num: BigUint,
-    generator: BigUint,
-    private_key: BigUint,
-    public_key: BigUint,
-    shared_secret: BigUint,
-}
-
-impl DH {
-    pub fn new(group: &DhGroup) -> Self {
-        Self {
-            prime_num: BigUint::from_bytes_be(&group.prime),
-            generator: BigUint::from_bytes_be(&group.generator),
-            private_key: BigUint::default(),
-            public_key: BigUint::default(),
-            shared_secret: BigUint::default(),
-        }
-    }
-
-    pub fn generate_private_key(&mut self, is_server: bool) -> BigUint {
-        let q = (&self.prime_num - &BigUint::from(1u8)) / &BigUint::from(2u8);
-        let mut rng = rand::rng();
-        self.private_key =
-            rng.random_biguint_range(&if is_server { 1u8.into() } else { 2u8.into() }, &q);
-        self.private_key.clone()
-    }
-
-    pub fn generate_public_key(&mut self) -> BigUint {
-        self.public_key = self.generator.modpow(&self.private_key, &self.prime_num);
-        self.public_key.clone()
-    }
-
-    pub fn compute_shared_secret(&mut self, other_public_key: BigUint) -> BigUint {
-        self.shared_secret = other_public_key.modpow(&self.private_key, &self.prime_num);
-        self.shared_secret.clone()
-    }
-
-    pub fn validate_shared_secret(&self, shared_secret: &BigUint) -> bool {
-        let one = BigUint::from(1u8);
-        let prime_minus_one = &self.prime_num - &one;
-
-        shared_secret > &one && shared_secret < &prime_minus_one
-    }
-
-    pub fn decode_public_key(buffer: &[u8]) -> BigUint {
-        BigUint::from_bytes_be(buffer)
-    }
-
-    pub fn validate_public_key(&self, public_key: &BigUint) -> bool {
-        let one = BigUint::from(1u8);
-        let prime_minus_one = &self.prime_num - &one;
-
-        public_key > &one && public_key < &prime_minus_one
-    }
-}
 
 pub(crate) const BUILTIN_SAFE_DH_GROUPS: &[&DhGroup] = &[&DH_GROUP14, &DH_GROUP16];

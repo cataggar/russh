@@ -14,7 +14,8 @@ rust-version = "1.89"
 
 [features]
 default = ["flate2", "aws-lc-rs", "rsa"]
-# Crypto backends: enable at least one of `aws-lc-rs` or `ring`.
+# Crypto backends: enable at least one of `aws-lc-rs`, `ring` or `symcrypt`.
+# If several are enabled, the first of `aws-lc-rs`, `ring`, `symcrypt` is used.
 aws-lc-rs = ["dep:aws-lc-rs"] # Default crypto backend.
 async-trait = ["dep:async-trait"]
 # Danger: 3DES cipher is insecure.
@@ -24,6 +25,9 @@ dsa = ["ssh-key/dsa"]
 ring = ["dep:ring"] # Alternative crypto backend.
 rsa = ["dep:rsa", "dep:pkcs1", "ssh-key/rsa"]
 serde = ["ssh-key/serde"]
+# Alternative crypto backend; links the native SymCrypt library (see the
+# `symcrypt-sys` crate for how it is found, e.g. `SYMCRYPT_LIB_PATH`).
+symcrypt = ["dep:symcrypt", "dep:symcrypt-sys"]
 _bench = ["dep:criterion"]
 
 [dependencies]
@@ -89,6 +93,10 @@ spki = "0.8"
 ssh-encoding.workspace = true
 ssh-key.workspace = true
 subtle = "2.4"
+# symcrypt 0.6 (with `symcrypt::mlkem`) is not on crates.io yet.
+# TODO: switch to crates.io once symcrypt >= 0.6 with mlkem is published.
+symcrypt = { git = "https://github.com/microsoft/rust-symcrypt", rev = "7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb", optional = true }
+symcrypt-sys = { git = "https://github.com/microsoft/rust-symcrypt", rev = "7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb", optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "sync", "time"] }
 typenum = "1.17"

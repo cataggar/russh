@@ -1,11 +1,15 @@
+//! CBC mode (legacy `aes*-cbc` and `3des-cbc`).
+
 use cbc::cipher::{InnerIvInit, Iv, IvSizeUser};
 use cbc::{Decryptor, Encryptor};
 use cipher::common::InnerUser;
+use cipher::typenum::Unsigned;
 use cipher::{
     Block, BlockCipherDecrypt, BlockCipherEncrypt, BlockModeDecrypt, BlockModeEncrypt, IvState,
+    KeyInit, KeyIvInit, KeySizeUser,
 };
 
-use super::block::{BlockStreamCipher, PacketLengthProbe};
+use crate::crypto::{BlockStream, CryptoError, Result};
 
 /// CBC wrapper that stores the decryption cipher and IV separately rather than
 /// a `cbc::Decryptor`, because `Decryptor` is no longer `Clone` in cbc 0.2.
@@ -49,8 +53,18 @@ impl<C: BlockCipherEncrypt + BlockCipherDecrypt> IvSizeUser for CbcWrapper<C> {
     type IvSize = C::BlockSize;
 }
 
-impl<C: BlockCipherEncrypt + BlockCipherDecrypt + Clone> BlockStreamCipher for CbcWrapper<C> {
-    fn encrypt_data(&mut self, data: &mut [u8]) {
+impl<C> BlockStream for CbcWrapper<C>
+where
+    C: BlockCipherEncrypt + BlockCipherDecrypt + KeyInit + Clone + Send + 'static,
+{
+    const KEY_LEN: usize = <C as KeySizeUser>::KeySize::USIZE;
+    const IV_LEN: usize = C::BlockSize::USIZE;
+
+    fn new(key: &[u8], iv: &[u8]) -> Result<Self> {
+        <Self as KeyIvInit>::new_from_slices(key, iv).map_err(|_| CryptoError)
+    }
+
+    fn encrypt(&mut self, data: &mut [u8]) {
         for chunk in data.chunks_exact_mut(C::block_size()) {
             #[allow(clippy::expect_used)]
             let block = <&mut Block<C>>::try_from(chunk).expect("chunk length matches block size");
@@ -58,13 +72,11 @@ impl<C: BlockCipherEncrypt + BlockCipherDecrypt + Clone> BlockStreamCipher for C
         }
     }
 
-    fn decrypt_data(&mut self, data: &mut [u8]) {
+    fn decrypt(&mut self, data: &mut [u8]) {
         self.dec_iv = self.decrypt_inner(data)
     }
-}
 
-impl<C: BlockCipherEncrypt + BlockCipherDecrypt + Clone> PacketLengthProbe for CbcWrapper<C> {
-    fn decrypt_packet_length_block(&self, first_block: &mut [u8; 16]) {
+    fn peek_decrypt(&self, first_block: &mut [u8; 16]) {
         let _ = self.decrypt_inner(first_block);
     }
 }
@@ -81,13 +93,14 @@ impl<C: BlockCipherEncrypt + BlockCipherDecrypt + Clone> InnerIvInit for CbcWrap
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use aes::Aes128;
-    use cbc::cipher::KeyIvInit;
     #[cfg(feature = "des")]
     use des::TdesEde3;
 
-    use super::{BlockStreamCipher, CbcWrapper, PacketLengthProbe};
+    use super::CbcWrapper;
+    use crate::crypto::BlockStream;
 
     #[test]
     fn packet_length_probe_does_not_advance_cbc_decryptor_state() {
@@ -95,18 +108,18 @@ mod tests {
         let key = fixture_bytes::<16>(11);
         let iv = fixture_bytes::<16>(5);
 
-        let mut encryptor = CbcWrapper::<Aes128>::new(&key.into(), &iv.into());
+        let mut encryptor = CbcWrapper::<Aes128>::new(&key, &iv).unwrap();
         let mut ciphertext = plaintext;
-        encryptor.encrypt_data(&mut ciphertext);
+        encryptor.encrypt(&mut ciphertext);
 
-        let cipher = CbcWrapper::<Aes128>::new(&key.into(), &iv.into());
+        let cipher = CbcWrapper::<Aes128>::new(&key, &iv).unwrap();
         let mut probed_block = ciphertext;
-        cipher.decrypt_packet_length_block(&mut probed_block);
+        cipher.peek_decrypt(&mut probed_block);
         assert_eq!(probed_block, plaintext);
 
         let mut decrypted = ciphertext;
         let mut cipher_after_probe = cipher;
-        cipher_after_probe.decrypt_data(&mut decrypted);
+        cipher_after_probe.decrypt(&mut decrypted);
         assert_eq!(decrypted, plaintext);
     }
 
@@ -117,13 +130,13 @@ mod tests {
         let key = fixture_bytes::<24>(11);
         let iv = fixture_bytes::<8>(5);
 
-        let mut encryptor = CbcWrapper::<TdesEde3>::new(&key.into(), &iv.into());
+        let mut encryptor = CbcWrapper::<TdesEde3>::new(&key, &iv).unwrap();
         let mut ciphertext = plaintext;
-        encryptor.encrypt_data(&mut ciphertext);
+        encryptor.encrypt(&mut ciphertext);
 
-        let cipher = CbcWrapper::<TdesEde3>::new(&key.into(), &iv.into());
+        let cipher = CbcWrapper::<TdesEde3>::new(&key, &iv).unwrap();
         let mut probed_block = ciphertext;
-        cipher.decrypt_packet_length_block(&mut probed_block);
+        cipher.peek_decrypt(&mut probed_block);
         assert_eq!(probed_block, plaintext);
     }
 
