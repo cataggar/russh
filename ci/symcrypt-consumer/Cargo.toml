@@ -1,0 +1,15 @@
+[package]
+name = "symcrypt-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "CI check: a downstream crate that depends on russh with only the symcrypt feature"
+
+# Not part of the russh workspace, so features are resolved for this crate alone, as they would be
+# for a downstream user. Built only by .github/workflows/symcrypt.yml, after
+# .github/actions/setup-symcrypt has provisioned the native library.
+[workspace]
+
+[dependencies]
+russh = { path = "../../russh", default-features = false, features = ["symcrypt"] }
+tokio = { version = "1.17.0", features = ["macros", "rt"] }
