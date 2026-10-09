@@ -1,7 +1,10 @@
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
-use russh::keys::{PrivateKey, PublicKeyOrCertificate};
+use common::test_keys;
+use russh::keys::PublicKeyOrCertificate;
 use russh::{MethodKind, MethodSet, client, server};
 
 struct AcceptTestServerKey;
@@ -40,9 +43,7 @@ async fn auth_does_not_carry_remaining_methods_across_username_change() {
     server_config.inactivity_timeout = None;
     server_config.auth_rejection_time = Duration::from_millis(1);
     server_config.auth_rejection_time_initial = Some(Duration::from_millis(1));
-    server_config.keys.push(
-        PrivateKey::random(&mut rand::rng(), russh::keys::ssh_key::Algorithm::Ed25519).unwrap(),
-    );
+    server_config.keys.push(test_keys::key(0));
     let server_config = Arc::new(server_config);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

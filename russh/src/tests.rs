@@ -4,6 +4,100 @@ use futures::Future;
 
 use super::*;
 
+/// Keys for the tests that need a host, user or CA key of any kind.
+///
+/// With the RustCrypto-based backends they are random Ed25519 keys. The
+/// SymCrypt backend can neither generate keys nor use Ed25519, so it gets the
+/// committed ECDSA P-256 keys of `tests/data/test-keys` (made with
+/// `ssh-keygen -t ecdsa -b 256 -N "" -C russh-test`) and signs certificates
+/// itself. `tests/common/test_keys.rs` is the same for the integration tests.
+pub(crate) mod test_keys {
+    use ssh_key::certificate::Builder;
+    use ssh_key::{Algorithm, Certificate, PrivateKey};
+
+    /// The algorithm of the [`key`]s.
+    #[cfg(not(russh_backend = "symcrypt"))]
+    pub(crate) const ALGORITHM: Algorithm = Algorithm::Ed25519;
+    /// The algorithm of the [`key`]s.
+    #[cfg(russh_backend = "symcrypt")]
+    pub(crate) const ALGORITHM: Algorithm = Algorithm::Ecdsa {
+        curve: ssh_key::EcdsaCurve::NistP256,
+    };
+
+    /// A private key of [`ALGORITHM`]. Keys with different `n` (0 to 3)
+    /// differ; with the RustCrypto-based backends, every key does.
+    #[cfg(not(russh_backend = "symcrypt"))]
+    pub(crate) fn key(_n: usize) -> PrivateKey {
+        PrivateKey::random(&mut rand::rng(), ALGORITHM).unwrap()
+    }
+
+    /// A private key of [`ALGORITHM`]. Keys with different `n` (0 to 3)
+    /// differ; with the RustCrypto-based backends, every key does.
+    #[cfg(russh_backend = "symcrypt")]
+    pub(crate) fn key(n: usize) -> PrivateKey {
+        const KEYS: [&str; 4] = [
+            include_str!("../tests/data/test-keys/ecdsa-p256-0"),
+            include_str!("../tests/data/test-keys/ecdsa-p256-1"),
+            include_str!("../tests/data/test-keys/ecdsa-p256-2"),
+            include_str!("../tests/data/test-keys/ecdsa-p256-3"),
+        ];
+        crate::keys::decode_secret_key(KEYS[n], None).unwrap()
+    }
+
+    /// The certificate `builder` describes, signed by `ca`.
+    #[cfg(not(russh_backend = "symcrypt"))]
+    pub(crate) fn certify(builder: Builder, ca: &PrivateKey) -> Certificate {
+        builder.sign(ca).unwrap()
+    }
+
+    /// The certificate `builder` describes, signed by `ca`.
+    ///
+    /// ssh-key signs, and checks its signature in debug builds, with
+    /// RustCrypto only: this signs through the backend instead, then
+    /// assembles the certificate from the signed data and the signature.
+    #[cfg(russh_backend = "symcrypt")]
+    pub(crate) fn certify(builder: Builder, ca: &PrivateKey) -> Certificate {
+        use std::cell::RefCell;
+
+        use ssh_encoding::Encode;
+        use ssh_key::{HashAlg, Signature, public};
+
+        struct BackendSigner<'a> {
+            key: &'a PrivateKey,
+            signed: RefCell<Option<(Vec<u8>, Signature)>>,
+        }
+
+        impl signature::Signer<Signature> for BackendSigner<'_> {
+            fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
+                let hash_alg = match self.key.algorithm() {
+                    Algorithm::Rsa { .. } => Some(HashAlg::Sha512),
+                    _ => None,
+                };
+                let signature = crate::crypto::sign(self.key, hash_alg, message)
+                    .map_err(|_| signature::Error::new())?;
+                *self.signed.borrow_mut() = Some((message.to_vec(), signature.clone()));
+                Ok(signature)
+            }
+        }
+
+        impl From<&BackendSigner<'_>> for public::KeyData {
+            fn from(signer: &BackendSigner<'_>) -> Self {
+                signer.key.public_key().key_data().clone()
+            }
+        }
+
+        let signer = BackendSigner {
+            key: ca,
+            signed: RefCell::new(None),
+        };
+        // Fails in debug builds if ssh-key cannot verify the signature.
+        let _ = builder.sign(&signer);
+        let (mut encoded, signature) = signer.signed.into_inner().expect("incomplete certificate");
+        signature.encode_prefixed(&mut encoded).unwrap();
+        Certificate::from_bytes(&encoded).unwrap()
+    }
+}
+
 #[cfg(feature = "flate2")]
 mod compress {
     use std::borrow::Cow;
@@ -13,7 +107,6 @@ mod compress {
 
     use keys::PrivateKeyWithHashAlg;
     use log::debug;
-    use ssh_key::PrivateKey;
 
     use super::server::{Server as _, Session};
     use super::*;
@@ -27,14 +120,12 @@ mod compress {
     async fn compress_local_test() {
         let _ = env_logger::try_init();
 
-        let client_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let client_key = test_keys::key(1);
         let mut config = server::Config::default();
         config.preferred = preferred_zlib();
         config.inactivity_timeout = None; // Some(std::time::Duration::from_secs(3));
         config.auth_rejection_time = std::time::Duration::from_secs(3);
-        config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         let config = Arc::new(config);
         let mut sh = Server {
             clients: Arc::new(Mutex::new(HashMap::new())),
@@ -174,7 +265,6 @@ mod compress {
 mod channels {
     use keys::PrivateKeyWithHashAlg;
     use server::Session;
-    use ssh_key::PrivateKey;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::cert::PublicKeyOrCertificate;
@@ -200,13 +290,11 @@ mod channels {
 
         let _ = env_logger::try_init();
 
-        let client_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let client_key = test_keys::key(1);
         let mut config = server::Config::default();
         config.inactivity_timeout = None;
         config.auth_rejection_time = std::time::Duration::from_secs(3);
-        config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         let config = Arc::new(config);
         let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = socket.local_addr().unwrap();
@@ -863,7 +951,6 @@ pub(crate) mod raw_no_crypto {
     use std::time::Duration;
 
     use byteorder::{BigEndian, ByteOrder};
-    use ssh_key::{Algorithm, PrivateKey};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -1040,9 +1127,7 @@ pub(crate) mod raw_no_crypto {
     fn strict_kex_server_config() -> Arc<server::Config> {
         let mut config = server::Config::default();
         config.inactivity_timeout = None;
-        config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         Arc::new(config)
     }
 
@@ -1053,7 +1138,7 @@ pub(crate) mod raw_no_crypto {
         payload.push(MSG_KEXINIT);
         payload.extend_from_slice(&[0; 16]);
         encode_name_list(&mut payload, kex_names);
-        encode_name_list(&mut payload, &["ssh-ed25519"]);
+        encode_name_list(&mut payload, &[test_keys::ALGORITHM.as_str()]);
         encode_name_list(&mut payload, &["aes256-ctr"]);
         encode_name_list(&mut payload, &["aes256-ctr"]);
         encode_name_list(&mut payload, &["hmac-sha2-256"]);
@@ -1106,9 +1191,7 @@ pub(crate) mod raw_no_crypto {
             kex: Cow::Owned(vec![kex::NONE, kex::CURVE25519]),
             ..no_crypto_preferred()
         };
-        config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         Arc::new(config)
     }
 
@@ -1163,9 +1246,7 @@ pub(crate) mod raw_no_crypto {
         config.auth_rejection_time = Duration::from_millis(1);
         config.auth_rejection_time_initial = Some(Duration::from_millis(1));
         config.preferred = no_crypto_preferred();
-        config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         Arc::new(config)
     }
 
@@ -1173,7 +1254,7 @@ pub(crate) mod raw_no_crypto {
         Preferred {
             host_key_certificates: Cow::Borrowed(&[]),
             kex: Cow::Owned(vec![kex::NONE]),
-            key: Cow::Owned(vec![Algorithm::Ed25519]),
+            key: Cow::Owned(vec![test_keys::ALGORITHM]),
             cipher: Cow::Owned(vec![cipher::NONE]),
             mac: Cow::Owned(vec![mac::NONE]),
             compression: Cow::Owned(vec![compression::NONE]),
@@ -1224,7 +1305,7 @@ pub(crate) mod raw_no_crypto {
         payload.push(MSG_KEXINIT);
         payload.extend_from_slice(&[0; 16]);
         encode_name_list(&mut payload, &[kex_name]);
-        encode_name_list(&mut payload, &["ssh-ed25519"]);
+        encode_name_list(&mut payload, &[test_keys::ALGORITHM.as_str()]);
         encode_name_list(&mut payload, &["none"]);
         encode_name_list(&mut payload, &["none"]);
         encode_name_list(&mut payload, &["none"]);
@@ -1451,6 +1532,7 @@ mod future_certificate {
 
     use ssh_key::{PrivateKey, certificate};
 
+    use super::test_keys;
     use crate::cert::PublicKeyOrCertificate;
     use crate::keys::agent::client::AgentClient;
     use crate::server::Session;
@@ -1500,7 +1582,7 @@ mod future_certificate {
         builder.key_id("test-user-cert").unwrap();
         builder.cert_type(certificate::CertType::User).unwrap();
         builder.valid_principal("testuser").unwrap();
-        builder.sign(ca_key).unwrap()
+        test_keys::certify(builder, ca_key)
     }
 
     #[tokio::test]
@@ -1511,8 +1593,8 @@ mod future_certificate {
         let (mut agent, agent_path, dir) = spawn_agent().await;
 
         // 2. Create CA key and user key
-        let ca_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let user_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let ca_key = test_keys::key(0);
+        let user_key = test_keys::key(1);
 
         // 3. Create a certificate
         let cert = create_test_cert(&ca_key, &user_key);
@@ -1552,9 +1634,7 @@ mod future_certificate {
         let mut server_config = server::Config::default();
         server_config.inactivity_timeout = None;
         server_config.auth_rejection_time = std::time::Duration::from_secs(3);
-        server_config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+        server_config.keys.push(test_keys::key(2));
         let server_config = Arc::new(server_config);
 
         let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1636,7 +1716,7 @@ mod future_certificate {
         let stream = tokio::net::UnixStream::connect(&agent_path).await.unwrap();
         let mut agent_client = AgentClient::connect(stream);
 
-        // Authenticate using FutureCertificate (None for hash_alg since Ed25519 doesn't need it)
+        // Authenticate using FutureCertificate (None for hash_alg: the key is not RSA)
         let auth_result = session
             .authenticate_certificate_with("testuser", cert.clone(), None, &mut agent_client)
             .await
@@ -1664,7 +1744,6 @@ mod rekey_under_load {
     use std::sync::Arc;
 
     use keys::PrivateKeyWithHashAlg;
-    use ssh_key::PrivateKey;
 
     use super::*;
     use crate::cert::PublicKeyOrCertificate;
@@ -1728,9 +1807,7 @@ mod rekey_under_load {
         config.inactivity_timeout = None;
         // Rekey every 64 KiB written: ~16 rekeys over the transfer below.
         config.limits = Limits::new(64 * 1024, 1 << 30, std::time::Duration::from_secs(3600));
-        config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         let config = Arc::new(config);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1740,7 +1817,7 @@ mod rekey_under_load {
             server::run_stream(config, socket, Echo).await.unwrap().await
         });
 
-        let key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let key = test_keys::key(1);
         let mut session = client::connect(Arc::new(client::Config::default()), addr, Client)
             .await
             .unwrap();

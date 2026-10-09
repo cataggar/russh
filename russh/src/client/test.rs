@@ -4,7 +4,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use log::debug;
-    use ssh_key::PrivateKey;
     use tokio::net::TcpListener;
 
     use crate::cert::PublicKeyOrCertificate;
@@ -13,8 +12,8 @@ mod tests {
     use crate::client::{Config, Handler, connect};
     use crate::keys::PrivateKeyWithHashAlg;
     use crate::server::{self, Auth, Handler as ServerHandler, Server, Session};
+    use crate::tests::test_keys;
     use crate::{ChannelId, SshId}; // Import directly from crate root
-    use rand::rng;
 
     #[derive(Clone)]
     struct TestServer {
@@ -97,16 +96,14 @@ mod tests {
         let _ = env_logger::try_init();
 
         // Create a client key
-        let client_key = PrivateKey::random(&mut rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let client_key = test_keys::key(1);
 
         // Configure the server
         let mut config = server::Config::default();
         config.auth_rejection_time = std::time::Duration::from_secs(1);
         config.server_id = SshId::Standard("SSH-1.99-CustomServer_1.0".into());
         config.inactivity_timeout = None;
-        config
-            .keys
-            .push(PrivateKey::random(&mut rng(), ssh_key::Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         let config = Arc::new(config);
 
         // Create server struct
@@ -178,14 +175,12 @@ mod tests {
     async fn test_send_custom_global_request() {
         let _ = env_logger::try_init();
 
-        let client_key = PrivateKey::random(&mut rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let client_key = test_keys::key(1);
 
         let mut config = server::Config::default();
         config.auth_rejection_time = std::time::Duration::from_secs(1);
         config.inactivity_timeout = None;
-        config
-            .keys
-            .push(PrivateKey::random(&mut rng(), ssh_key::Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         let config = Arc::new(config);
 
         let mut server = TestServer {

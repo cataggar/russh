@@ -1,9 +1,12 @@
 //! Regression test catching <https://github.com/Eugeny/russh/issues/772>.
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::test_keys;
 use russh::keys::ssh_key::certificate::{Builder, CertType};
-use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key};
 use russh::{MethodKind, MethodSet, client, server};
 
 struct AcceptServerKey;
@@ -88,9 +91,7 @@ async fn connect() -> client::Handle<AcceptServerKey> {
     // A partial success must not count as a failed attempt: every test below
     // that sends a second request after a partial success relies on this.
     server_config.max_auth_attempts = 1;
-    server_config
-        .keys
-        .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+    server_config.keys.push(test_keys::key(0));
     let server_config = Arc::new(server_config);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -152,7 +153,7 @@ async fn password() {
 #[tokio::test]
 async fn publickey() {
     let mut session = connect().await;
-    let key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+    let key = test_keys::key(1);
     let client::AuthResult::Failure {
         partial_success,
         remaining_methods,
@@ -243,13 +244,13 @@ async fn handlerless_rejection_after_partial_success() {
         "expected partial success, got {first:?}"
     );
 
-    let key = Arc::new(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
-    let ca = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+    let key = Arc::new(test_keys::key(1));
+    let ca = test_keys::key(2);
     let mut builder =
         Builder::new_with_random_nonce(&mut rand::rng(), key.public_key().clone(), 1, 2).unwrap();
     builder.cert_type(CertType::User).unwrap();
     builder.valid_principal("alice").unwrap();
-    let expired_cert = builder.sign(&ca).unwrap();
+    let expired_cert = test_keys::certify(builder, &ca);
 
     let second = session
         .authenticate_openssh_cert("alice", key, expired_cert)

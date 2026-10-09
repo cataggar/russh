@@ -1,11 +1,13 @@
+mod common;
+
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
+use common::test_keys;
 use futures::FutureExt;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelMsg, client};
-use ssh_key::PrivateKey;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep, timeout};
@@ -50,7 +52,7 @@ async fn server_handle_data_backpressures_when_client_stops_reading() -> Result<
         channel_buffer_size: 1,
         ..Default::default()
     });
-    let key = Arc::new(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+    let key = Arc::new(test_keys::key(1));
     let mut session = russh::client::connect(config, addr, Client).await?;
     let mut channel = match session
         .authenticate_publickey(
@@ -95,7 +97,7 @@ async fn server_handle_data_backpressures_when_client_stops_reading() -> Result<
 
 async fn stream(addr: SocketAddr, data: &[u8], tx: watch::Sender<()>) -> Result<(), anyhow::Error> {
     let config = Arc::new(client::Config::default());
-    let key = Arc::new(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+    let key = Arc::new(test_keys::key(1));
 
     let mut session = russh::client::connect(config, addr, Client).await?;
     let channel = match session
@@ -153,7 +155,7 @@ struct Server {
 impl Server {
     async fn run(addr: SocketAddr, rx: watch::Receiver<()>) {
         let config = Arc::new(server::Config {
-            keys: vec![PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap()],
+            keys: vec![test_keys::key(0)],
             window_size: WINDOW_SIZE as u32,
             channel_buffer_size: CHANNEL_BUFFER_SIZE,
             ..Default::default()
@@ -223,7 +225,7 @@ struct HandleBackpressureServer {
 impl HandleBackpressureServer {
     async fn run(addr: SocketAddr, progress_tx: mpsc::UnboundedSender<usize>) {
         let config = Arc::new(server::Config {
-            keys: vec![PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap()],
+            keys: vec![test_keys::key(0)],
             event_buffer_size: 1,
             ..Default::default()
         });

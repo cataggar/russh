@@ -83,16 +83,17 @@ impl AgentIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ssh_key::{PrivateKey, certificate};
+    use crate::tests::test_keys;
+    use ssh_key::certificate;
 
     fn create_test_certificate() -> Certificate {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // Create a CA key
-        let ca_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let ca_key = test_keys::key(0);
 
         // Create a user key to be certified
-        let user_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let user_key = test_keys::key(1);
 
         // Build and sign the certificate with reasonable validity window
         let now = SystemTime::now()
@@ -114,15 +115,12 @@ mod tests {
         builder.key_id("test-cert").unwrap();
         builder.cert_type(certificate::CertType::User).unwrap();
         builder.valid_principal("testuser").unwrap();
-        builder.sign(&ca_key).unwrap()
+        test_keys::certify(builder, &ca_key)
     }
 
     #[test]
     fn test_agent_identity_public_key_variant() {
-        let key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
-            .unwrap()
-            .public_key()
-            .clone();
+        let key = test_keys::key(0).public_key().clone();
         let comment = "test-key-comment".to_string();
 
         let identity = AgentIdentity::PublicKey {
@@ -160,10 +158,7 @@ mod tests {
 
     #[test]
     fn test_agent_identity_clone() {
-        let key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
-            .unwrap()
-            .public_key()
-            .clone();
+        let key = test_keys::key(0).public_key().clone();
 
         let identity = AgentIdentity::PublicKey {
             key,
@@ -176,10 +171,7 @@ mod tests {
 
     #[test]
     fn test_agent_identity_debug() {
-        let key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519)
-            .unwrap()
-            .public_key()
-            .clone();
+        let key = test_keys::key(0).public_key().clone();
 
         let identity = AgentIdentity::PublicKey {
             key,

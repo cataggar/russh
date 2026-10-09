@@ -656,6 +656,7 @@ mod tests {
 
     use super::*;
     use crate::helpers::NameList;
+    use crate::tests::test_keys;
 
     /// Build a minimal KEXINIT payload with custom kex and host-key
     /// name-lists and a `first_kex_packet_follows` flag. All other lists come
@@ -741,7 +742,15 @@ mod tests {
     }
 
     const KEX_FIRST: &[&str] = &["mlkem768x25519-sha256"];
-    const ED25519_CERT: &str = "ssh-ed25519-cert-v01@openssh.com";
+    // The algorithm of `test_keys`, as a plain host key and as a certificate.
+    #[cfg(not(russh_backend = "symcrypt"))]
+    const PLAIN: &str = "ssh-ed25519";
+    #[cfg(not(russh_backend = "symcrypt"))]
+    const CERT: &str = "ssh-ed25519-cert-v01@openssh.com";
+    #[cfg(russh_backend = "symcrypt")]
+    const PLAIN: &str = "ecdsa-sha2-nistp256";
+    #[cfg(russh_backend = "symcrypt")]
+    const CERT: &str = "ecdsa-sha2-nistp256-cert-v01@openssh.com";
 
     fn cert_prefs(certs: &'static [Algorithm]) -> Preferred {
         Preferred {
@@ -752,17 +761,17 @@ mod tests {
 
     #[test]
     fn certificate_negotiated_when_advertised() {
-        let buf = build_kexinit_keys(KEX_FIRST, &[ED25519_CERT, "ssh-ed25519"], false);
+        let buf = build_kexinit_keys(KEX_FIRST, &[CERT, PLAIN], false);
         let names = Client::read_kex(
             &buf,
-            &cert_prefs(&[Algorithm::Ed25519]),
+            &cert_prefs(&[test_keys::ALGORITHM]),
             None,
             None,
             &KexCause::Initial,
         )
         .unwrap();
         assert!(names.host_key_is_certificate);
-        assert_eq!(names.key, Algorithm::Ed25519);
+        assert_eq!(names.key, test_keys::ALGORITHM);
     }
 
     /// The negotiated algorithm for an RSA certificate must keep the hash
@@ -793,38 +802,38 @@ mod tests {
     /// no matter what the server offers.
     #[test]
     fn certificate_ignored_when_not_advertised() {
-        let buf = build_kexinit_keys(KEX_FIRST, &[ED25519_CERT, "ssh-ed25519"], false);
+        let buf = build_kexinit_keys(KEX_FIRST, &[CERT, PLAIN], false);
         let names = Client::read_kex(&buf, &Preferred::DEFAULT, None,
             None, &KexCause::Initial).unwrap();
         assert!(!names.host_key_is_certificate);
-        assert_eq!(names.key, Algorithm::Ed25519);
+        assert_eq!(names.key, test_keys::ALGORITHM);
     }
 
     /// `host_key_certificates` is client-only: a server has no certificate to
     /// present, so its negotiation must ignore the field entirely.
     #[test]
     fn server_ignores_certificate_preferences() {
-        let buf = build_kexinit_keys(KEX_FIRST, &[ED25519_CERT, "ssh-ed25519"], false);
+        let buf = build_kexinit_keys(KEX_FIRST, &[CERT, PLAIN], false);
         let names = Server::read_kex(
             &buf,
-            &cert_prefs(&[Algorithm::Ed25519]),
+            &cert_prefs(&[test_keys::ALGORITHM]),
             None,
             None,
             &KexCause::Initial,
         )
         .unwrap();
         assert!(!names.host_key_is_certificate);
-        assert_eq!(names.key, Algorithm::Ed25519);
+        assert_eq!(names.key, test_keys::ALGORITHM);
     }
 
     /// Certificates are advertised ahead of plain keys, so a peer guess that
     /// matches the certificate is a correct guess…
     #[test]
     fn certificate_correct_guess_not_ignored() {
-        let buf = build_kexinit_keys(KEX_FIRST, &[ED25519_CERT, "ssh-ed25519"], true);
+        let buf = build_kexinit_keys(KEX_FIRST, &[CERT, PLAIN], true);
         let names = Client::read_kex(
             &buf,
-            &cert_prefs(&[Algorithm::Ed25519]),
+            &cert_prefs(&[test_keys::ALGORITHM]),
             None,
             None,
             &KexCause::Initial,
@@ -840,10 +849,10 @@ mod tests {
     /// always the certificate.
     #[test]
     fn plain_first_choice_with_certificates_enabled_is_wrong_guess() {
-        let buf = build_kexinit_keys(KEX_FIRST, &["ssh-ed25519", ED25519_CERT], true);
+        let buf = build_kexinit_keys(KEX_FIRST, &[PLAIN, CERT], true);
         let names = Client::read_kex(
             &buf,
-            &cert_prefs(&[Algorithm::Ed25519]),
+            &cert_prefs(&[test_keys::ALGORITHM]),
             None,
             None,
             &KexCause::Initial,
@@ -855,10 +864,10 @@ mod tests {
         );
         assert!(names.ignore_guessed);
 
-        let buf = build_kexinit_keys(KEX_FIRST, &["ssh-ed25519"], true);
+        let buf = build_kexinit_keys(KEX_FIRST, &[PLAIN], true);
         let names = Client::read_kex(
             &buf,
-            &cert_prefs(&[Algorithm::Ed25519]),
+            &cert_prefs(&[test_keys::ALGORITHM]),
             None,
             None,
             &KexCause::Initial,
@@ -933,16 +942,16 @@ mod tests {
             .cert_type(ssh_key::certificate::CertType::Host)
             .unwrap();
         builder.valid_principal("localhost").unwrap();
-        builder.sign(ca).unwrap()
+        test_keys::certify(builder, ca)
     }
 
     /// A certificate without a matching private key can never be honored and
     /// must not be advertised.
     #[test]
     fn certificate_without_matching_key_is_not_advertised() {
-        let ca = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
-        let stale_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
-        let good_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let ca = test_keys::key(0);
+        let stale_key = test_keys::key(1);
+        let good_key = test_keys::key(2);
         let stale_cert = host_cert(&stale_key, &ca);
         let good_cert = host_cert(&good_key, &ca);
 
@@ -953,7 +962,7 @@ mod tests {
         );
         assert_eq!(
             server_certificate_names(&Preferred::DEFAULT, &[good_cert], &keys),
-            vec![ED25519_CERT.to_string()]
+            vec![CERT.to_string()]
         );
     }
 
@@ -961,24 +970,24 @@ mod tests {
     /// advertised: the preference list gates certificates like plain keys.
     #[test]
     fn certificate_for_banned_algorithm_is_not_advertised() {
-        let ca = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
-        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let ca = test_keys::key(0);
+        let key = test_keys::key(1);
         let cert = host_cert(&key, &ca);
         let keys = vec![key];
 
-        let no_ed25519 = Preferred {
+        let rsa_only = Preferred {
             key: Cow::Owned(vec![Algorithm::Rsa {
                 hash: Some(HashAlg::Sha512),
             }]),
             ..Preferred::DEFAULT
         };
         assert_eq!(
-            server_certificate_names(&no_ed25519, std::slice::from_ref(&cert), &keys),
+            server_certificate_names(&rsa_only, std::slice::from_ref(&cert), &keys),
             Vec::<String>::new()
         );
         assert_eq!(
             server_certificate_names(&Preferred::DEFAULT, &[cert], &keys),
-            vec![ED25519_CERT.to_string()]
+            vec![CERT.to_string()]
         );
     }
 

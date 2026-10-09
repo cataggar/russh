@@ -2151,7 +2151,7 @@ mod tests {
         let enc = session.common.encrypted.as_mut().unwrap();
         enc.state = EncryptedState::Authenticated;
         enc.session_id = CryptoVec::from(HOSTKEYS_SESSION_ID);
-        let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let host_key = crate::tests::test_keys::key(0);
         let (reply_channel, reply) = oneshot::channel();
         session
             .request_hostkeys_prove(reply_channel, vec![host_key.public_key().clone()])
@@ -2170,7 +2170,7 @@ mod tests {
             .unwrap()
             .encode(&mut signed)
             .unwrap();
-        let signature: ssh_key::Signature = signature::Signer::try_sign(host_key, &signed).unwrap();
+        let signature = crate::crypto::sign(host_key, None, &signed).unwrap();
 
         let mut packet = vec![crate::msg::REQUEST_SUCCESS];
         signature.encoded().unwrap().encode(&mut packet).unwrap();

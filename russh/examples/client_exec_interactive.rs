@@ -1,3 +1,5 @@
+// termion and tokio-fd only support Unix, so on Windows the example just says so.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 ///
 /// Run this example with:
 /// cargo run --example client_exec_interactive -- -k <private key path> <host> <command>
@@ -13,10 +15,17 @@ use clap::Parser;
 use log::info;
 use russh::keys::*;
 use russh::*;
+#[cfg(not(windows))]
 use termion::raw::IntoRawMode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::ToSocketAddrs;
 
+#[cfg(windows)]
+fn main() {
+    eprintln!("This example needs a Unix terminal.");
+}
+
+#[cfg(not(windows))]
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::builder()
@@ -135,6 +144,7 @@ impl Session {
         Ok(Self { session })
     }
 
+    #[cfg(not(windows))]
     async fn call(&mut self, command: &str) -> Result<u32> {
         let mut channel = self.session.channel_open_session().await?;
 
