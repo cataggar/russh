@@ -1,0 +1,29 @@
+//! Interop of the SymCrypt backend's key exchanges with OpenSSH, one forced
+//! method at a time: `cargo test -p russh --no-default-features --features
+//! symcrypt --test symcrypt_kex`. `mlkem768x25519-sha256` is skipped when
+//! the local OpenSSH is older than 9.9.
+#![cfg(all(
+    feature = "symcrypt",
+    not(feature = "aws-lc-rs"),
+    not(feature = "ring")
+))]
+
+mod common;
+
+use common::openssh::{self, Case};
+use russh::kex;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kex() {
+    openssh::check_kex(
+        Case::default(),
+        &[
+            kex::MLKEM768X25519_SHA256,
+            kex::CURVE25519,
+            kex::CURVE25519_PRE_RFC_8731,
+            kex::ECDH_SHA2_NISTP256,
+            kex::ECDH_SHA2_NISTP384,
+        ],
+    )
+    .await;
+}

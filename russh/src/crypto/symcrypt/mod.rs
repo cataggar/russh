@@ -13,7 +13,7 @@
 //! | Category | File | Issue |
 //! |---|---|---|
 //! | `hash`: SHA-1, SHA-2 | `hash.rs` | #2 |
-//! | `kex`: X25519, ECDH, ML-KEM-768 hybrid, DH groups | `kex.rs` | #2 |
+//! | `kex`: X25519, ECDH P-256/P-384, ML-KEM-768 hybrid (no P-521, no finite-field DH) | `kex.rs` | #2 |
 //! | `sign`: host key, certificate and user signatures | `sign.rs` | #3 |
 //! | `cipher`: AEADs, AES-CTR/CBC | `cipher.rs` | #4 |
 //! | `mac`: HMAC-SHA1/SHA2 | `mac.rs` | #4 |
