@@ -61,11 +61,17 @@ jobs:
 
   Build-WASM:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
       RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
 
     steps:
+      - name: Install job dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates clang curl git
+
       - uses: actions/checkout@v2
       - uses: dtolnay/rust-toolchain@1.91.0
 
@@ -141,7 +147,7 @@ jobs:
       - name: Test (no features enabled)
         run: |
           eval `ssh-agent`
-          cargo test --verbose
+          cargo test --verbose -- --test-threads=1
         env:
           RUST_BACKTRACE: 1
 
@@ -151,7 +157,7 @@ jobs:
       - name: Test (all features enabled)
         run: |
           eval `ssh-agent`
-          cargo test --verbose --all-features
+          cargo test --verbose --all-features -- --test-threads=1
         env:
           RUST_BACKTRACE: 1
 
