@@ -31,6 +31,34 @@
 //! * [Writing SSH clients - the `russh::client` module](client)
 //! * [Writing SSH servers - the `russh::server` module](server)
 //!
+//! # Crypto backends
+//!
+//! Russh needs a crypto backend, selected with a crate feature:
+//!
+//! - `aws-lc-rs` (default): AES-GCM and ChaCha20-Poly1305 from aws-lc-rs.
+//!   Everything else comes from pure-Rust crates (RustCrypto,
+//!   `curve25519-dalek`, `ssh-key`), with randomness from `rand`.
+//! - `ring`: the same, with ring instead of aws-lc-rs.
+//! - `symcrypt`: all of the SSH protocol's cryptography and randomness from
+//!   Microsoft's [SymCrypt](https://github.com/microsoft/SymCrypt) library,
+//!   which must be installed both to build and to run. It offers fewer
+//!   algorithms (no Ed25519, P-521, finite-field Diffie-Hellman or security
+//!   keys, and none of the legacy SHA-1, CBC, 3DES or DSA ones) and loads
+//!   only unencrypted private keys.
+//!
+//! If several backend features are enabled, the first of `aws-lc-rs`, `ring`
+//! and `symcrypt` is used, so selecting `ring` or `symcrypt` needs
+//! `default-features = false`. `symcrypt` is not in a crates.io release:
+//!
+//! ```toml
+//! [dependencies]
+//! russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "flate2"] }
+//! ```
+//!
+//! The [README](https://github.com/cataggar/russh/blob/main/README.md#crypto-backends)
+//! lists the algorithms of each backend, and how to install SymCrypt on Linux
+//! and Windows.
+//!
 //! # Using non-socket IO / writing tunnels
 //!
 //! The easy way to implement SSH tunnels, like `ProxyCommand` for

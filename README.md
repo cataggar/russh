@@ -33,7 +33,11 @@ API documentation is on [docs.rs](https://docs.rs/russh)
 
 ## Crypto backends
 
-Russh requires exactly one crypto backend. Enable the `aws-lc-rs` or `ring` crate feature.
+Russh needs a crypto backend, selected with a crate feature:
+
+- `aws-lc-rs` (default): AES-GCM and ChaCha20-Poly1305 from [aws-lc-rs](https://github.com/aws/aws-lc-rs). Everything else comes from pure-Rust crates (RustCrypto, `curve25519-dalek`, `ssh-key`), with randomness from `rand`.
+- `ring`: the same, with [ring](https://github.com/briansmith/ring) instead of aws-lc-rs.
+- `symcrypt`: all of the SSH protocol's cryptography and randomness from Microsoft's [SymCrypt](https://github.com/microsoft/SymCrypt) library, through the [`symcrypt`](https://github.com/microsoft/rust-symcrypt) crate. It offers fewer algorithms and needs the native library installed: see [The `symcrypt` backend](#the-symcrypt-backend).
 
 ```toml
 # aws-lc-rs (default in most setups)
@@ -41,55 +45,92 @@ russh = { version = "0.63", features = ["aws-lc-rs"] }
 
 # or ring (keep `flate2` and `rsa` when disabling default features)
 russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
+
+# or symcrypt, which is not in a crates.io release (keep `flate2`; RSA works without `rsa`)
+russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "flate2"] }
 ```
+
+If several backend features are enabled, russh uses the first of `aws-lc-rs`, `ring` and `symcrypt`. `aws-lc-rs` is a default feature, so `ring` and `symcrypt` need `default-features = false`. Builds with `--all-features` use aws-lc-rs, but they also compile the `symcrypt` crate, so they need the native SymCrypt library too.
+
+### The `symcrypt` backend
+
+This backend is for deployments that must do their cryptography in SymCrypt and must not link `ring` or `aws-lc-rs`. With `symcrypt` as the only backend:
+
+- SymCrypt does all of the SSH protocol's cryptography: key exchange, exchange hashes and key derivation, ciphers, MACs, and the signatures of host keys, user keys and certificates. It also provides the randomness: packet padding, KEXINIT cookies and ephemeral keys.
+- Only algorithms that this backend implements are negotiated. Russh removes the others from `Preferred`, so they are neither advertised nor accepted.
+- Dependencies (in progress): the goal is a dependency graph with no `ring`, `aws-lc-rs`, `rand`, `getrandom` or RustCrypto primitive crates (such as `aes`, `ctr`, `cbc`, `hmac`, `sha1`, `p256`, `curve25519-dalek`, `ed25519-dalek`, `rsa`, `ml-kem` or `bcrypt-pbkdf`), enforced in CI by a `cargo tree` ban check. The one exception is `sha2`, which `ssh-key` always depends on to compute key fingerprints; russh doesn't use it for protocol cryptography. Until this lands, those crates are still compiled in, and a few helpers outside the SSH transport, such as matching hashed `known_hosts` entries (HMAC-SHA1), still use them.
+
+Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to this backend, only RustCrypto crates.
+
+**Requirements.** The `symcrypt` crate links the native SymCrypt library dynamically, so the library must be present both when you build and when you run your program. It needs SymCrypt 103.8.0 or newer, and supports Windows, Ubuntu and Azure Linux 3, on x86-64 and ARM64. Russh's CI tests this backend on Ubuntu 24.04 (x86-64 and ARM64) and Windows (x86-64). The `symcrypt` crate's [install guide](https://github.com/microsoft/rust-symcrypt/blob/7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb/rust-symcrypt/INSTALL.md) has the details.
+
+- **Linux:** install the `symcrypt` package from [packages.microsoft.com](https://learn.microsoft.com/en-us/linux/packages); it is normally preinstalled on Azure Linux 3. The package puts the library in the standard paths, so no environment variables are needed. Otherwise, extract a Linux archive from the [SymCrypt releases](https://github.com/microsoft/SymCrypt/releases), set `SYMCRYPT_LIB_PATH` to its `lib` directory when building, and let the loader find `libsymcrypt.so` at run time (`LD_LIBRARY_PATH`, `ldconfig` or an rpath).
+- **Windows:** download the Windows archive from the [SymCrypt releases](https://github.com/microsoft/SymCrypt/releases), and set `SYMCRYPT_LIB_PATH` to its `dll` directory, which has `symcrypt.lib` and `symcrypt.dll`; the build fails without it. Ship `symcrypt.dll` in the same directory as your executable: Windows may have its own `C:\Windows\System32\symcrypt.dll`, whose version need not match the `symcrypt.lib` you linked against, and the loader searches the system directory before `PATH` (but after the executable's directory). For `cargo test`, copy the DLL into `target/debug/deps`; doctests run from temporary directories, so they load the System32 copy if there is one.
+
+**Algorithms.** [Supported algorithms](#supported-algorithms) has the full lists. Unlike the other backends, `symcrypt` doesn't offer:
+
+- `ssh-ed25519`: SymCrypt has no EdDSA.
+- `ecdh-sha2-nistp521` and `ecdsa-sha2-nistp521`: not implemented in this backend yet.
+- Finite-field Diffie-Hellman (`diffie-hellman-group*` and `diffie-hellman-group-exchange-*`): the `symcrypt` crate has no API for it.
+- Legacy algorithms, which this backend doesn't implement: SHA-1 signatures and MACs (`ssh-rsa`, `hmac-sha1`, `hmac-sha1-etm@openssh.com`), the CBC modes, `3des-cbc` and `ssh-dss`.
+- Security key signatures (`sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`): not implemented in this backend.
+
+**Private keys.** `keys::decode_secret_key`, `keys::load_secret_key` and `keys::pkcs8::decode_pkcs8` read unencrypted keys in the OpenSSH, PKCS#8 (PEM or DER), SEC1 (`BEGIN EC PRIVATE KEY`) and PKCS#1 (`BEGIN RSA PRIVATE KEY`) formats, and SymCrypt checks the ECDSA and RSA key material. They fail with `keys::Error::UnsupportedKeyType`, whose message names the symcrypt backend, for:
+
+- encrypted keys, with or without a password: decrypting them needs password-based key derivation (such as bcrypt-pbkdf, PBKDF2 or scrypt), which the `symcrypt` crate doesn't provide;
+- PuTTY (PPK) keys;
+- multi-prime RSA keys;
+- Ed25519 PKCS#8 v1 keys, which hold only the seed.
+
+Other Ed25519 keys and P-521 keys load, but signing with them fails with `ssh_key::Error::AlgorithmUnsupported`. A password given with an unencrypted key is ignored, and `keys::pkcs8::encode_pkcs8_encrypted` always fails. Russh has no SymCrypt key generation, and `PrivateKey::random` (from `ssh-key`) doesn't use SymCrypt, so create keys with a tool such as `ssh-keygen`.
+
+**Releases.** The backend depends on `symcrypt` 0.6, for ML-KEM, and on `symcrypt-sys` 0.5. Neither version is on crates.io yet, so russh pins both to a commit of [microsoft/rust-symcrypt](https://github.com/microsoft/rust-symcrypt). crates.io doesn't accept git dependencies, even optional ones, so russh can't be published there with the `symcrypt` feature until these versions are. Until then, use russh as a git dependency, as shown above.
 
 ## Supported algorithms
 
 Russh aims for broad interoperability, so it supports both algorithms currently considered safe and a set of older ones that allow connections to older switches etc. Legacy algorithms are opt in.
 
+The available algorithms depend on the [crypto backend](#crypto-backends); `aws-lc-rs` and `ring` offer the same ones. In the tables below:
+
+- **default**: in `Preferred::default()`, so offered unless you change `Preferred`;
+- **opt-in**: supported, but not in `Preferred::default()`; add it to `Preferred` in the client or server `Config` to offer it;
+- **—**: not available with that backend.
+
 ### Key exchange
 
-**Recommended**
+| Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
+|---|---|---|
+| `mlkem768x25519-sha256` (post-quantum hybrid) | default | default |
+| `curve25519-sha256`, `curve25519-sha256@libssh.org` | default | default |
+| `diffie-hellman-group-exchange-sha256` (GEX) | default | — |
+| `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512` | default | — |
+| `diffie-hellman-group14-sha256` | default | — |
+| `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384` | opt-in | default |
+| `ecdh-sha2-nistp521` | opt-in | — |
+| `diffie-hellman-group14-sha1` | opt-in | — |
+| `diffie-hellman-group1-sha1` | opt-in | — |
+| `diffie-hellman-group-exchange-sha1` (GEX) | opt-in | — |
 
-- `mlkem768x25519-sha256` (post-quantum hybrid)
-- `curve25519-sha256`, `curve25519-sha256@libssh.org`
-- `diffie-hellman-group-exchange-sha256` (GEX)
-- `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512`
-- `diffie-hellman-group14-sha256`
-- OpenSSH strict key exchange (Terrapin mitigation)
-- Programmatic group choice support for DH-GEX
-
-**Legacy**
-
-- `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521`
-- `diffie-hellman-group14-sha1`
-- `diffie-hellman-group1-sha1`
-- `diffie-hellman-group-exchange-sha1` (GEX)
+All backends support OpenSSH strict key exchange (Terrapin mitigation). `aws-lc-rs` and `ring` also support programmatic group choice for DH-GEX.
 
 ### Ciphers
 
-**Recommended**
-
-- `chacha20-poly1305@openssh.com`
-- `aes256-gcm@openssh.com`, `aes128-gcm@openssh.com`
-- `aes256-ctr`, `aes192-ctr`, `aes128-ctr`
-
-**Legacy**
-
-- `aes256-cbc`, `aes192-cbc`, `aes128-cbc`
-- `3des-cbc` (requires the `des` crate feature)
+| Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
+|---|---|---|
+| `chacha20-poly1305@openssh.com` | default | default |
+| `aes256-gcm@openssh.com` | default | default |
+| `aes128-gcm@openssh.com` | opt-in | opt-in |
+| `aes256-ctr`, `aes192-ctr`, `aes128-ctr` | default | default |
+| `aes256-cbc`, `aes192-cbc`, `aes128-cbc` | opt-in | — |
+| `3des-cbc` (requires the `des` crate feature) | opt-in | — |
 
 ### MACs
 
-**Recommended**
-
-- `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com`
-- `hmac-sha2-256`, `hmac-sha2-512`
-
-**Legacy**
-
-- `hmac-sha1-etm@openssh.com`
-- `hmac-sha1`
+| Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
+|---|---|---|
+| `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com` | default | default |
+| `hmac-sha2-256`, `hmac-sha2-512` | default | default |
+| `hmac-sha1-etm@openssh.com`, `hmac-sha1` | opt-in | — |
 
 ### Compression
 
@@ -98,13 +139,19 @@ Russh aims for broad interoperability, so it supports both algorithms currently 
 
 ### Host keys & public-key authentication
 
-**Recommended**
+| Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
+|---|---|---|
+| `ssh-ed25519` | default | — |
+| `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384` | default | default |
+| `ecdsa-sha2-nistp521` | default | — |
+| `rsa-sha2-256`, `rsa-sha2-512` | default | default |
+| `ssh-rsa` (SHA-1) | default | — |
+| `ssh-dss` (requires the `dsa` crate feature) | opt-in | — |
+| `sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com` (security keys) | opt-in | — |
 
-- `ssh-ed25519`
-- `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`
-- `rsa-sha2-256`, `rsa-sha2-512`
-- `ssh-rsa` (SHA-1)
-- OpenSSH certificates
+With `aws-lc-rs` and `ring`, RSA requires the `rsa` crate feature, which is on by default; `symcrypt` implements RSA itself and doesn't need it.
+
+OpenSSH certificates work with every backend. With `symcrypt`, both the certified key and the CA's signature must use one of its algorithms.
 
 ### Authentication methods
 
