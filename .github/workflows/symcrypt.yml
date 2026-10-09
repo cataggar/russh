@@ -78,6 +78,9 @@ jobs:
       - name: Build
         run: cargo build -p russh --no-default-features --features symcrypt
 
+      - name: Install Clippy
+        run: rustup component add clippy
+
       - name: Clippy
         run: cargo clippy -p russh --no-default-features --features symcrypt -- -D warnings
 
