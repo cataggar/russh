@@ -363,6 +363,7 @@ pub(crate) fn verify(key: &KeyData, message: &[u8], signature: &Signature) -> si
 
 /// Verify the CA signature of an OpenSSH certificate (not its validity
 /// period, principals or CA trust).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn verify_certificate(certificate: &Certificate) -> signature::Result<()> {
     // The signed data is the certificate encoding up to, and including, the
     // signature key: everything but the trailing signature field.
@@ -392,7 +393,7 @@ pub(crate) fn sign(
 
 /// The body of the SSH mpint encoding (RFC 4251) of an unsigned big-endian
 /// integer: no leading zero bytes, but a zero byte prepended when the high
-/// bit is set.
+/// bit is set. Zero gives a single zero byte, as russh always encoded it.
 pub(crate) fn mpint_body(unsigned_be: &[u8]) -> Vec<u8> {
     let start = unsigned_be
         .iter()
@@ -491,6 +492,37 @@ mod tests {
         assert_eq!(mpint_body(&[0, 0x12, 0x34]), [0x12, 0x34]);
         assert_eq!(mpint_body(&[0x80]), [0, 0x80]);
         assert_eq!(mpint_body(&[0, 0, 0xff, 1]), [0, 0xff, 1]);
+    }
+
+    /// `verify_certificate` accepts exactly what `ssh-key` accepts.
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    fn verify_certificate_matches_ssh_key() {
+        use ssh_key::certificate::{Builder, CertType};
+
+        let ca = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let subject = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let mut builder =
+            Builder::new_with_random_nonce(&mut rand::rng(), subject.public_key(), 0, u64::MAX)
+                .unwrap();
+        builder.key_id("test").unwrap();
+        builder.cert_type(CertType::User).unwrap();
+        builder.valid_principal("user").unwrap();
+        let cert = builder.sign(&ca).unwrap();
+        assert!(cert.verify_signature().is_ok());
+        assert!(verify_certificate(&cert).is_ok());
+
+        let encoded = cert.encode_vec().unwrap();
+        // A byte of the nonce (after the type string and the nonce length),
+        // and the last byte of the signature.
+        let nonce = 4 + cert.algorithm().to_certificate_type().len() + 4;
+        for offset in [nonce, encoded.len() - 1] {
+            let mut tampered = encoded.clone();
+            tampered[offset] ^= 1;
+            let tampered = Certificate::from_bytes(&tampered).unwrap();
+            assert!(tampered.verify_signature().is_err());
+            assert!(verify_certificate(&tampered).is_err());
+        }
     }
 
     #[test]
