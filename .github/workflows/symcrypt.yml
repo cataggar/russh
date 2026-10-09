@@ -60,20 +60,29 @@ jobs:
   # editing this workflow: unit tests under `crypto::symcrypt` (russh/src/crypto/symcrypt/) and
   # integration tests named russh/tests/symcrypt_*.rs.
   russh-symcrypt-only:
-    name: russh (symcrypt only)
-    runs-on: ubuntu-24.04
+    name: russh (symcrypt only, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install OpenSSH
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y openssh-client openssh-server
           sudo mkdir -p /run/sshd
 
+      # On Windows, put the pinned symcrypt.dll next to the test executables so
+      # they load it instead of C:\Windows\System32\symcrypt.dll.
       - name: Set up SymCrypt
         uses: ./.github/actions/setup-symcrypt
+        with:
+          copy-dll-to: target/debug/deps
 
       - name: Build
         run: cargo build -p russh --no-default-features --features symcrypt
@@ -93,5 +102,6 @@ jobs:
         run: cargo test -p russh --no-default-features --features symcrypt --test 'symcrypt_*'
         env:
           RUST_BACKTRACE: 1
-          # Fail rather than skip the OpenSSH interop checks if sshd can't be started.
-          RUSSH_REQUIRE_SSHD: 1
+          # Fail rather than skip the OpenSSH interop checks if sshd can't be
+          # started. The harness needs a Unix sshd, so Windows only skips them.
+          RUSSH_REQUIRE_SSHD: ${{ runner.os == 'Linux' && '1' || '0' }}
