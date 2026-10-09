@@ -13,6 +13,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # symcrypt with each opt-in feature, and ring alone, must compile for every target. The opt-ins may
+  # pull their own crates (`rsa` does), but the symcrypt backend never uses them for protocol crypto.
+  russh-symcrypt-features:
+    name: russh (symcrypt feature combinations)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
+
+      - name: Check symcrypt with each opt-in feature
+        shell: bash
+        run: |
+          for feature in async-trait des dsa flate2 rsa serde; do
+            echo "::group::symcrypt,$feature"
+            cargo check -p russh --all-targets --no-default-features --features "symcrypt,$feature"
+            echo "::endgroup::"
+          done
+
+      - name: Check ring alone
+        run: cargo check -p russh --all-targets --no-default-features --features ring
+
   smoke:
     name: SymCrypt smoke (${{ matrix.os }})
     strategy:
@@ -86,6 +110,12 @@ jobs:
 
       - name: Build
         run: cargo build -p russh --no-default-features --features symcrypt
+
+      # Fails if the build depends on another crypto implementation or on rand/getrandom (see the
+      # ban list in the script). Checks the host target, so Windows also covers pageant.
+      - name: Check the dependency graph
+        shell: bash
+        run: ci/symcrypt-ban-check.sh
 
       - name: Install Clippy
         run: rustup component add clippy

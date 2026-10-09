@@ -275,8 +275,11 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         writebuf: &mut Vec<u8>,
     ) -> Result<bool, Error> {
         let (blob, key_pair) = {
-            let private_key =
-                ssh_key::private::PrivateKey::new(ssh_key::private::KeypairData::decode(r)?, "")?;
+            #[cfg(not(russh_backend = "symcrypt"))]
+            let keypair = ssh_key::private::KeypairData::decode(r)?;
+            #[cfg(russh_backend = "symcrypt")]
+            let keypair = crate::keys::format::openssh::decode_keypair(r)?;
+            let private_key = ssh_key::private::PrivateKey::new(keypair, "")?;
             let _comment = String::decode(r)?;
 
             (private_key.public_key().key_data().encoded()?, private_key)
@@ -361,7 +364,23 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         writebuf.push(msg::SIGN_RESPONSE);
         let data = Bytes::decode(r)?;
 
-        sign_with_hash_alg(&PrivateKeyWithHashAlg::new(key, None), &data)?.encode(writebuf)?;
+        // SymCrypt has no SHA-1 RSA signatures (`ssh-rsa`): sign RSA with the
+        // SHA-2 hash that the flags ask for, as OpenSSH's agent does.
+        #[cfg(russh_backend = "symcrypt")]
+        let hash_alg = {
+            let flags = u32::decode(r).unwrap_or(0);
+            if flags & msg::RSA_SHA2_256 != 0 {
+                Some(crate::keys::HashAlg::Sha256)
+            } else if flags & msg::RSA_SHA2_512 != 0 {
+                Some(crate::keys::HashAlg::Sha512)
+            } else {
+                None
+            }
+        };
+        #[cfg(not(russh_backend = "symcrypt"))]
+        let hash_alg = None;
+
+        sign_with_hash_alg(&PrivateKeyWithHashAlg::new(key, hash_alg), &data)?.encode(writebuf)?;
 
         let len = writebuf.len();
         BigEndian::write_u32(writebuf, (len - 4) as u32);
@@ -409,6 +428,59 @@ mod tests {
             Ok::<(), std::io::Error>(())
         })?;
 
+        Ok(())
+    }
+
+    /// With SymCrypt, keys added to the agent are decoded with SymCrypt's
+    /// checks (a short ECDSA scalar too), and RSA keys sign with the SHA-2
+    /// hash that the request's flags select.
+    #[cfg(russh_backend = "symcrypt")]
+    #[tokio::test]
+    async fn symcrypt_agent_adds_keys_and_signs() -> Result<(), Box<dyn std::error::Error>> {
+        use ssh_encoding::Decode;
+
+        use crate::keys::agent::AgentIdentity;
+        use crate::keys::agent::client::AgentClient;
+        use crate::keys::{HashAlg, decode_secret_key};
+
+        let (server, client) = tokio::io::duplex(1 << 16);
+        let connection = Connection {
+            lock: Lock(std::sync::Arc::new(std::sync::RwLock::new(
+                crate::CryptoVec::new(),
+            ))),
+            keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ))),
+            agent: Some(()),
+            s: server,
+            buf: Vec::new(),
+        };
+        tokio::spawn(async move { connection.run().await });
+        let mut client = AgentClient::connect(client);
+
+        for (key, hash_alg) in [
+            (include_str!("../../../tests/data/keys/ecdsa-p256"), None),
+            (include_str!("../../../tests/data/keys/ecdsa-p256-short"), None),
+            (include_str!("../../../tests/data/keys/ecdsa-p384"), None),
+            (
+                include_str!("../../../tests/data/keys/rsa-2048"),
+                Some(HashAlg::Sha256),
+            ),
+            (
+                include_str!("../../../tests/data/keys/rsa-2048"),
+                Some(HashAlg::Sha512),
+            ),
+        ] {
+            let key = decode_secret_key(key, None)?;
+            client.add_identity(&key, &[]).await?;
+            let data = b"signed by the agent".to_vec();
+            let identity = AgentIdentity::from(key.public_key().clone());
+            let signed = client.sign_request(&identity, hash_alg, data.clone()).await?;
+            let mut signature = signed.strip_prefix(&data[..]).ok_or("no data")?;
+            u32::decode(&mut signature)?;
+            let signature = ssh_key::Signature::decode(&mut signature)?;
+            crate::crypto::verify(key.public_key().key_data(), &data, &signature)?;
+        }
         Ok(())
     }
 }

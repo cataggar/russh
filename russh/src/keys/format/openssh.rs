@@ -49,6 +49,67 @@ pub fn decode_openssh(secret: &[u8], _password: Option<&str>) -> Result<PrivateK
     Ok(key)
 }
 
+/// Decodes a key pair as OpenSSH encodes it in a private key and in the
+/// agent protocol (`SSH_AGENTC_ADD_IDENTITY`): the algorithm name, then the
+/// key's fields.
+///
+/// SymCrypt checks ECDSA and RSA keys (see [`crate::crypto::symcrypt::keys`]):
+/// the private scalar must be the one of the public point, and it may be
+/// shorter than ssh-key reads (see [`raw::pad_short_ecdsa_scalar`]) or have
+/// leading zeros, as ssh-key writes it; `iqmp` is recomputed. ssh-key reads
+/// the other key types.
+#[cfg(russh_backend = "symcrypt")]
+pub(crate) fn decode_keypair(
+    reader: &mut impl ssh_encoding::Reader,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Decode;
+    use ssh_key::private::KeypairData;
+    use ssh_key::{Algorithm, EcdsaCurve, Mpint};
+    use zeroize::Zeroizing;
+
+    use crate::crypto::symcrypt::keys;
+
+    fn positive(mpint: &Mpint) -> Result<&[u8], Error> {
+        mpint.as_positive_bytes().ok_or(Error::KeyIsCorrupt)
+    }
+
+    match Algorithm::decode(reader)? {
+        Algorithm::Ecdsa { curve } => {
+            if EcdsaCurve::decode(reader)? != curve {
+                return Err(ssh_key::Error::AlgorithmUnknown.into());
+            }
+            let point = Vec::<u8>::decode(reader)?;
+            // An `mpint`, read as an unsigned integer like ssh-key reads it:
+            // ssh-key writes the curve's size, so leading zeros are kept.
+            let scalar = Zeroizing::new(Vec::<u8>::decode(reader)?);
+            // Uncompressed, as OpenSSH requires: the key is stored with the
+            // point that SymCrypt derives, which is uncompressed.
+            if point.first() != Some(&0x04) {
+                return Err(Error::KeyIsCorrupt);
+            }
+            let keypair = keys::ecdsa_keypair(curve, &scalar, Some(&point))?;
+            Ok(KeypairData::Ecdsa(keypair))
+        }
+        Algorithm::Rsa { .. } => {
+            let n = Mpint::decode(reader)?;
+            let e = Mpint::decode(reader)?;
+            let d = Zeroizing::new(Mpint::decode(reader)?);
+            let _iqmp = Zeroizing::new(Mpint::decode(reader)?);
+            let p = Zeroizing::new(Mpint::decode(reader)?);
+            let q = Zeroizing::new(Mpint::decode(reader)?);
+            let keypair = keys::rsa_keypair(
+                positive(&n)?,
+                positive(&e)?,
+                positive(&d)?,
+                positive(&p)?,
+                positive(&q)?,
+            )?;
+            Ok(KeypairData::Rsa(keypair))
+        }
+        algorithm => Ok(KeypairData::decode_as(reader, algorithm)?),
+    }
+}
+
 /// The binary OpenSSH private key format (`PROTOCOL.key` in OpenSSH).
 #[cfg(russh_backend = "symcrypt")]
 mod raw {

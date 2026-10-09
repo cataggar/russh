@@ -1,11 +1,10 @@
 #![allow(clippy::unwrap_used)]
 use criterion::*;
-use rand_core::TryRng;
 use std::hint;
 
-pub fn bench(c: &mut Criterion) {
-    let mut rand_generator = hint::black_box(rand::rng());
+use crate::crypto::fill_random;
 
+pub fn bench(c: &mut Criterion) {
     let mut packet_length = hint::black_box(vec![0u8; 4]);
 
     for cipher_name in [super::CHACHA20_POLY1305, super::AES_256_GCM] {
@@ -15,9 +14,9 @@ pub fn bench(c: &mut Criterion) {
         };
 
         let mut key = vec![0; cipher.key_len()];
-        rand_generator.try_fill_bytes(&mut key).unwrap();
+        fill_random(&mut key);
         let mut nonce = vec![0; cipher.nonce_len()];
-        rand_generator.try_fill_bytes(&mut nonce).unwrap();
+        fill_random(&mut nonce);
 
         let mut sk = cipher.make_sealing_key(&key, &nonce, &[], &crate::mac::_NONE);
         let mut ok = cipher.make_opening_key(&key, &nonce, &[], &crate::mac::_NONE);
@@ -31,8 +30,8 @@ pub fn bench(c: &mut Criterion) {
                 b.iter_with_setup(
                     || {
                         let mut in_out = hint::black_box(vec![0u8; size]);
-                        rand_generator.try_fill_bytes(&mut in_out).unwrap();
-                        rand_generator.try_fill_bytes(&mut packet_length).unwrap();
+                        fill_random(&mut in_out);
+                        fill_random(&mut packet_length);
                         in_out
                     },
                     |mut in_out| {

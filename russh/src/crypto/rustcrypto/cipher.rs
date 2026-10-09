@@ -11,7 +11,6 @@ use ctr::Ctr128BE;
 
 use super::cbc::CbcWrapper;
 use crate::cipher::block::SshBlockCipher;
-use crate::cipher::{self, Cipher};
 use crate::crypto::{BlockStream, CryptoError, Result};
 
 /// Cloneable wrapper for `Ctr128BE<>`
@@ -108,28 +107,6 @@ pub(crate) static AES_256_CBC: SshBlockCipher<CbcWrapper<Aes256>> = SshBlockCiph
 #[cfg(feature = "des")]
 pub(crate) static TRIPLE_DES_CBC: SshBlockCipher<CbcWrapper<des::TdesEde3>> =
     SshBlockCipher::new();
-
-/// Every cipher of this module (`clear`/`none` are shared by all providers).
-/// The `aws_lc` and `ring` backends list these statics next to their AEADs.
-#[cfg_attr(not(russh_backend = "symcrypt"), allow(dead_code))]
-pub(crate) static ALGORITHMS: &[(&cipher::Name, &(dyn Cipher + Send + Sync))] = &[
-    (&cipher::AES_128_CTR, &AES_128_CTR),
-    (&cipher::AES_192_CTR, &AES_192_CTR),
-    (&cipher::AES_256_CTR, &AES_256_CTR),
-    (&cipher::AES_128_CBC, &AES_128_CBC),
-    (&cipher::AES_192_CBC, &AES_192_CBC),
-    (&cipher::AES_256_CBC, &AES_256_CBC),
-    #[cfg(feature = "des")]
-    (&cipher::TRIPLE_DES_CBC, &TRIPLE_DES_CBC),
-];
-
-/// Default cipher preference without AEADs.
-#[cfg_attr(not(russh_backend = "symcrypt"), allow(dead_code))]
-pub(crate) const DEFAULT_ORDER: &[cipher::Name] = &[
-    cipher::AES_256_CTR,
-    cipher::AES_192_CTR,
-    cipher::AES_128_CTR,
-];
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

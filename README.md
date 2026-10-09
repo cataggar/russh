@@ -58,7 +58,7 @@ This backend is for deployments that must do their cryptography in SymCrypt and 
 
 - SymCrypt does all of the SSH protocol's cryptography: key exchange, exchange hashes and key derivation, ciphers, MACs, and the signatures of host keys, user keys and certificates. It also provides the randomness: packet padding, KEXINIT cookies and ephemeral keys.
 - Only algorithms that this backend implements are negotiated. Russh removes the others from `Preferred`, so they are neither advertised nor accepted.
-- Dependencies (in progress): the goal is a dependency graph with no `ring`, `aws-lc-rs`, `rand`, `getrandom` or RustCrypto primitive crates (such as `aes`, `ctr`, `cbc`, `hmac`, `sha1`, `p256`, `curve25519-dalek`, `ed25519-dalek`, `rsa`, `ml-kem` or `bcrypt-pbkdf`), enforced in CI by a `cargo tree` ban check. The one exception is `sha2`, which `ssh-key` always depends on to compute key fingerprints; russh doesn't use it for protocol cryptography. Until this lands, those crates are still compiled in, and a few helpers outside the SSH transport, such as matching hashed `known_hosts` entries (HMAC-SHA1), still use them.
+- Dependencies: the dependency graph has no `ring`, `aws-lc-rs`, `rand`, `getrandom` or RustCrypto primitive crates (such as `aes`, `ctr`, `cbc`, `hmac`, `sha1`, `p256`, `curve25519-dalek`, `ed25519-dalek`, `rsa`, `ml-kem` or `bcrypt-pbkdf`), which CI enforces with a `cargo tree` ban check (`ci/symcrypt-ban-check.sh`). The one exception is `sha2`, which `ssh-key` always depends on to compute key fingerprints; russh doesn't use it for protocol cryptography. Helpers outside the SSH transport use SymCrypt too, such as matching hashed `known_hosts` entries (HMAC-SHA1).
 
 Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to this backend, only RustCrypto crates.
 
@@ -82,7 +82,7 @@ Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to th
 - multi-prime RSA keys;
 - Ed25519 PKCS#8 v1 keys, which hold only the seed.
 
-Other Ed25519 keys and P-521 keys load, but signing with them fails with `ssh_key::Error::AlgorithmUnsupported`. A password given with an unencrypted key is ignored, and `keys::pkcs8::encode_pkcs8_encrypted` always fails. Russh has no SymCrypt key generation, and `PrivateKey::random` (from `ssh-key`) doesn't use SymCrypt, so create keys with a tool such as `ssh-keygen`.
+Other Ed25519 keys and P-521 keys load, but signing with them fails with `ssh_key::Error::AlgorithmUnsupported`. A password given with an unencrypted key is ignored, and `keys::pkcs8::encode_pkcs8_encrypted` always fails. Russh has no SymCrypt key generation, and with `symcrypt` as the only backend it doesn't enable ssh-key's RustCrypto features: `PrivateKey::random` (from `ssh-key`) fails with `ssh_key::Error::AlgorithmUnknown`, and `PrivateKey::encrypt` and `decrypt` don't exist, unless another crate in your build enables those features. Create keys with a tool such as `ssh-keygen`.
 
 **Releases.** The backend depends on `symcrypt` 0.6, for ML-KEM, and on `symcrypt-sys` 0.5. Neither version is on crates.io yet, so russh pins both to a commit of [microsoft/rust-symcrypt](https://github.com/microsoft/rust-symcrypt). crates.io doesn't accept git dependencies, even optional ones, so russh can't be published there with the `symcrypt` feature until these versions are. Until then, use russh as a git dependency, as shown above.
 

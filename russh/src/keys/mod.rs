@@ -61,6 +61,7 @@ use std::io::Read;
 use std::path::Path;
 use std::string::FromUtf8Error;
 
+#[cfg(not(russh_backend = "symcrypt"))]
 use aes::cipher::inout::PadError;
 use data_encoding::BASE64_MIME;
 use thiserror::Error;
@@ -100,9 +101,11 @@ pub enum Error {
         key_type_raw: Vec<u8>,
     },
     /// The type of the key is unsupported
+    #[cfg(not(russh_backend = "symcrypt"))]
     #[error("Invalid Ed25519 key data")]
     Ed25519KeyError(#[from] ed25519_dalek::SignatureError),
     /// The type of the key is unsupported
+    #[cfg(not(russh_backend = "symcrypt"))]
     #[error("Invalid ECDSA key data")]
     EcdsaKeyError(#[from] p256::elliptic_curve::Error),
     /// The key is encrypted (should supply a password?)
@@ -142,9 +145,11 @@ pub enum Error {
     #[error("Rsa: {0}")]
     Rsa(#[from] rsa::Error),
 
+    #[cfg(not(russh_backend = "symcrypt"))]
     #[error(transparent)]
     Pad(#[from] PadError),
 
+    #[cfg(not(russh_backend = "symcrypt"))]
     #[error(transparent)]
     Unpad(#[from] aes::cipher::block_padding::Error),
 

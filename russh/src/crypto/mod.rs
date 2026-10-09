@@ -13,7 +13,7 @@
 //! | `kex` | [`KeyAgreement`], [`Kem`], [`FfDh`] | X25519, NIST P-256/384/521 ECDH, ML-KEM-768 (hybrid with X25519), finite-field DH groups |
 //! | `sign` | [`Signer`], [`Verifier`] | host-key, certificate and user-auth signatures |
 //! | `cipher` | [`Aead`], [`ChaCha20Poly1305`], [`BlockStream`] | AES-GCM, `chacha20-poly1305@openssh.com`, AES-CTR (and CBC/3DES) |
-//! | `mac` | [`Mac`] | HMAC-SHA1/SHA2 (plain and encrypt-then-MAC) |
+//! | `mac` | [`Mac`] | HMAC-SHA1/SHA2 (plain and encrypt-then-MAC); [`hmac_sha1`] for hashed `known_hosts` host names |
 //! | `rng` | [`Rng`] | padding, KEXINIT cookies, ephemeral keys, `safe_rng()` |
 //!
 //! The SSH framing around each primitive (packet layout, sequence-number
@@ -34,9 +34,11 @@
 //! - `aws_lc` and `ring`: AES-GCM and chacha20-poly1305 from that library
 //!   (shared code in `ring_aead`), every other category from `rustcrypto`.
 //! - `rustcrypto`: pure-Rust implementations of every non-AEAD category. It
-//!   is not a backend of its own, but the shared base the others re-export.
-//! - `symcrypt`: Microsoft SymCrypt (see its module docs for the status of
-//!   each category).
+//!   is not a backend of its own, but the shared base of `aws_lc` and
+//!   `ring`, and is only compiled for them: its crates (and `rand`) come
+//!   with the private `_rustcrypto` feature that those backends enable.
+//! - `symcrypt`: Microsoft SymCrypt for every category, with no other
+//!   crypto library (see its module docs).
 //!
 //! # Provider contract
 //!
@@ -61,7 +63,10 @@
 //! - `mac`: `ALGORITHMS: &[(&mac::Name, &(dyn MacAlgorithm + Send + Sync))]`
 //!   (`CryptoMacAlgorithm::<MyHmacSha256>::new()` and
 //!   `CryptoEtmMacAlgorithm::<MyHmacSha256>::new()`) and
-//!   `DEFAULT_ORDER: &[mac::Name]`.
+//!   `DEFAULT_ORDER: &[mac::Name]`; also
+//!   `hmac_sha1(key: &[u8], data: &[u8]) -> Result<[u8; 20]>`, HMAC-SHA1 with
+//!   a key of any length for hashed `known_hosts` host names (see
+//!   [`hmac_sha1`]), even if the backend does not offer the SHA-1 MACs.
 //! - `rng`: a `SystemRng` type implementing [`Rng`].
 //!
 //! The `ALGORITHMS` lists fill the registries (`kex::KEXES`,
@@ -111,8 +116,9 @@ pub(crate) use self::symcrypt as provider;
 #[cfg(any(russh_backend = "aws_lc", russh_backend = "ring"))]
 pub(crate) mod ring_aead;
 
-// Parts of it go unused once a backend replaces a category.
-#[cfg_attr(russh_backend = "symcrypt", allow(dead_code, unused_imports))]
+// Only for the backends that build on it: its crates come with the private
+// `_rustcrypto` feature, which `symcrypt` does not enable.
+#[cfg(not(russh_backend = "symcrypt"))]
 pub(crate) mod rustcrypto;
 
 /// Error from a crypto primitive. Deliberately opaque: the protocol code maps
@@ -322,6 +328,14 @@ impl FfDh for Unsupported {
 /// Fill `dest` with random bytes from the provider's RNG.
 pub(crate) fn fill_random(dest: &mut [u8]) {
     <provider::rng::SystemRng as Rng>::fill_bytes(dest)
+}
+
+/// HMAC-SHA1 of `data` with a key of any length, from the provider. Not a
+/// negotiated MAC: it hashes host names in `known_hosts` files
+/// (`|1|salt|hash`, OpenSSH's `HashKnownHosts`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<[u8; 20]> {
+    provider::mac::hmac_sha1(key, data)
 }
 
 /// The provider's RNG as a [`rand_core`] RNG, for APIs that take one.

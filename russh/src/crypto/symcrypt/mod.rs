@@ -8,37 +8,40 @@
 //!
 //! # Categories
 //!
-//! Each category lives in its own file and is implemented independently:
+//! SymCrypt implements every category, each in its own file:
 //!
-//! | Category | File | Issue |
-//! |---|---|---|
-//! | `hash`: SHA-1, SHA-2 | `hash.rs` | #2 |
-//! | `kex`: X25519, ECDH P-256/P-384, ML-KEM-768 hybrid (no P-521, no finite-field DH) | `kex.rs` | #2 |
-//! | `sign`: ECDSA P-256/P-384, RSA SHA-2 host key, certificate and user signatures (no Ed25519, P-521, SHA-1 RSA) | `sign.rs` | done |
-//! | `cipher`: AES-GCM, ChaCha20-Poly1305, AES-CTR | `cipher.rs` | done |
-//! | `mac`: HMAC-SHA2 | `mac.rs` | done |
-//! | `rng`: protocol randomness | `rng.rs` | done |
+//! | Category | File |
+//! |---|---|
+//! | `hash`: SHA-1, SHA-2 | `hash.rs` |
+//! | `kex`: X25519, ECDH P-256/P-384, ML-KEM-768 hybrid (no P-521, no finite-field DH) | `kex.rs` |
+//! | `sign`: ECDSA P-256/P-384, RSA SHA-2 host key, certificate and user signatures (no Ed25519, P-521, SHA-1 RSA) | `sign.rs` |
+//! | `cipher`: AES-GCM, ChaCha20-Poly1305, AES-CTR | `cipher.rs` |
+//! | `mac`: HMAC-SHA2; HMAC-SHA1 only for hashed `known_hosts` host names | `mac.rs` |
+//! | `rng`: all of russh's randomness | `rng.rs` |
+//! | Private key loading: SymCrypt checks the keys that format crates parse | `keys.rs` |
 //!
-//! A file that still re-exports the [`rustcrypto`](super::rustcrypto)
-//! implementation (exactly like the `aws_lc` and `ring` backends do for
-//! their non-AEAD categories) says so with a `TODO(#issue)` comment. With
-//! those re-exports this backend already interoperates with OpenSSH using
-//! its own ciphers and MACs, `curve25519-sha256`/`mlkem768x25519-sha256`
-//! and ECDSA P-256/P-384 or RSA (`rsa-sha2-256`/`rsa-sha2-512`) keys.
+//! Nothing comes from the `crypto::rustcrypto` code of the `aws_lc` and
+//! `ring` backends, which is not even compiled: its crates and `rand` come
+//! with the private `_rustcrypto` feature, which `symcrypt` does not enable.
+//! `ci/symcrypt-ban-check.sh` checks that no other crypto implementation is
+//! in the dependency graph (`sha2` is, for ssh-key's key fingerprints only).
 //!
-//! # Swapping a category
+//! A primitive SymCrypt lacks is `crate::crypto::Unsupported` (`NistP521`
+//! and `Dh` in `kex`), and the algorithms that need it are left out of
+//! `ALGORITHMS`, so they are neither offered nor accepted.
+//!
+//! # Changing a category
 //!
 //! Edit only that category's file (the shared code in `crate::cipher`,
 //! `crate::mac`, `crate::kex`, `crate::negotiation` and this `mod.rs` need no
 //! change):
 //!
-//! 1. Replace the re-export with types that implement the category's traits
-//!    from [`crate::crypto`] with SymCrypt, keeping the names of the provider
-//!    contract (see the `crate::crypto` docs): `hash`: `Sha1`..`Sha512`;
-//!    `kex`: `X25519`, `NistP256`/`384`/`521`, `MlKem768`, `Dh` (set a
-//!    primitive SymCrypt lacks to `crate::crypto::Unsupported`, or keep
-//!    re-exporting the rustcrypto one); `sign`: `Signatures`; `rng`:
-//!    `SystemRng`.
+//! 1. Implement the category's traits from [`crate::crypto`] with SymCrypt,
+//!    keeping the names of the provider contract (see the `crate::crypto`
+//!    docs): `hash`: `Sha1`..`Sha512`; `kex`: `X25519`,
+//!    `NistP256`/`384`/`521`, `MlKem768`, `Dh` (`Unsupported` if SymCrypt
+//!    lacks the primitive); `mac`: also `hmac_sha1`; `sign`: `Signatures`;
+//!    `rng`: `SystemRng`.
 //! 2. Define the category's `ALGORITHMS` (what the backend implements, with
 //!    entries such as `GcmCipher::<SymCryptAes256Gcm>::new()`,
 //!    `SshBlockCipher::<SymCryptAes256Ctr>::new()`,
@@ -51,7 +54,7 @@
 //!    `cargo test -p russh --no-default-features --features symcrypt --lib -- crypto::symcrypt`;
 //!    OpenSSH interoperability tests go in `russh/tests/symcrypt_*.rs` and run
 //!    with `cargo test -p russh --no-default-features --features symcrypt --test 'symcrypt_*'`.
-//!    CI (`.github/workflows/symcrypt.yml`) runs both filters.
+//!    CI (`.github/workflows/symcrypt.yml`) runs them.
 
 pub(crate) mod cipher;
 pub(crate) mod hash;

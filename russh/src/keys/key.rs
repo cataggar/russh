@@ -42,7 +42,7 @@ pub fn parse_public_key(mut p: &[u8]) -> Result<PublicKey, Error> {
 
 /// Obtain a cryptographic-safe random number generator (the crypto
 /// backend's).
-pub fn safe_rng() -> impl rand::CryptoRng {
+pub fn safe_rng() -> impl rand_core::CryptoRng {
     crate::crypto::ProviderRng
 }
 
@@ -98,6 +98,7 @@ mod private_key_with_hash_alg {
 
 pub use private_key_with_hash_alg::PrivateKeyWithHashAlg;
 
+#[cfg(not(russh_backend = "symcrypt"))]
 pub const ALL_KEY_TYPES: &[Algorithm] = &[
     Algorithm::Dsa,
     Algorithm::Ecdsa {
@@ -122,4 +123,23 @@ pub const ALL_KEY_TYPES: &[Algorithm] = &[
     },
     Algorithm::SkEcdsaSha2NistP256,
     Algorithm::SkEd25519,
+];
+
+/// The key types the SymCrypt backend signs and verifies with (no Ed25519,
+/// P-521, DSA, SHA-1 RSA or security keys); RSA does not need the `rsa`
+/// feature.
+#[cfg(russh_backend = "symcrypt")]
+pub const ALL_KEY_TYPES: &[Algorithm] = &[
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP256,
+    },
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP384,
+    },
+    Algorithm::Rsa {
+        hash: Some(ssh_key::HashAlg::Sha256),
+    },
+    Algorithm::Rsa {
+        hash: Some(ssh_key::HashAlg::Sha512),
+    },
 ];

@@ -7,13 +7,13 @@ use std::time::Duration;
 use base16ct::lower;
 use delegate::delegate;
 use log::debug;
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 use windows::Win32::Security::Authentication::Identity::{GetUserNameExA, NameUserPrincipal};
 use windows::Win32::Security::Cryptography::{
-    CRYPTPROTECTMEMORY_BLOCK_SIZE, CRYPTPROTECTMEMORY_CROSS_PROCESS, CryptProtectMemory,
+    BCRYPT_SHA256_ALG_HANDLE, BCryptHash, CRYPTPROTECTMEMORY_BLOCK_SIZE,
+    CRYPTPROTECTMEMORY_CROSS_PROCESS, CryptProtectMemory,
 };
 use windows::Win32::System::WindowsProgramming::GetUserNameA;
 use windows_strings::PSTR;
@@ -117,11 +117,18 @@ impl PageantStream {
             );
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update((cryptdata.len() as u32).to_be_bytes());
-        hasher.update(&cryptdata);
-        Ok(lower::encode_string(&hasher.finalize()))
+        let mut hashed = Vec::with_capacity(4 + cryptdata.len());
+        hashed.extend_from_slice(&(cryptdata.len() as u32).to_be_bytes());
+        hashed.extend_from_slice(&cryptdata);
+        Ok(lower::encode_string(&sha256(&hashed)?))
     }
+}
+
+/// SHA-256 with Windows CNG.
+fn sha256(data: &[u8]) -> Result<[u8; 32], Error> {
+    let mut digest = [0; 32];
+    unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, data, &mut digest) }.ok()?;
+    Ok(digest)
 }
 
 impl AsyncRead for PageantStream {
@@ -159,6 +166,36 @@ impl AsyncWrite for PageantStream {
 
         to Pin::new(&self.stream) {
             fn is_write_vectored(&self) -> bool;
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use base16ct::lower;
+
+    /// FIPS 180-2 test vectors.
+    #[test]
+    fn sha256_matches_known_answers() {
+        for (data, expected) in [
+            (
+                &b""[..],
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+        ] {
+            assert_eq!(
+                lower::encode_string(&super::sha256(data).unwrap()),
+                expected
+            );
         }
     }
 }

@@ -1,6 +1,7 @@
 //! MACs for the SymCrypt backend: `hmac-sha2-256` and `hmac-sha2-512`, and
 //! their `-etm@openssh.com` forms, with `symcrypt::hmac`. The SHA-1 MACs are
-//! not offered.
+//! not offered; HMAC-SHA1 is only used for hashed `known_hosts` host names
+//! ([`hmac_sha1`]).
 
 use std::mem::ManuallyDrop;
 
@@ -51,6 +52,11 @@ macro_rules! hmac {
 
 hmac!(SymCryptHmacSha256, HmacSha256State, 32);
 hmac!(SymCryptHmacSha512, HmacSha512State, 64);
+
+/// HMAC-SHA1 with a key of any length (see [`crate::crypto::hmac_sha1`]).
+pub(crate) fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<[u8; 20]> {
+    ::symcrypt::hmac::hmac_sha1(key, data).map_err(|_| CryptoError)
+}
 
 // SAFETY: `symcrypt` declares the SHA-256 and SHA-384 states `Send` but not
 // this one, which has the same layout: an owned allocation whose only
@@ -183,6 +189,33 @@ mod tests {
         }
         for len in [0, 32, 63, 65, 128] {
             assert!(SymCryptHmacSha512::new(&vec![0; len]).is_err(), "{len}");
+        }
+    }
+
+    /// RFC 2202 test cases 1, 2 and 6 (keys shorter and longer than the
+    /// digest and the block), and an empty key.
+    #[test]
+    fn hmac_sha1_matches_rfc2202() {
+        let cases: [(&[u8], &[u8], [u8; 20]); 4] = [
+            (
+                &[0x0b; 20],
+                b"Hi There",
+                hex!("b617318655057264e28bc0b6fb378c8ef146be00"),
+            ),
+            (
+                b"Jefe",
+                b"what do ya want for nothing?",
+                hex!("effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"),
+            ),
+            (
+                &[0xaa; 80],
+                b"Test Using Larger Than Block-Size Key - Hash Key First",
+                hex!("aa4ae5e15272d00e95705637ce8a3b55ed402112"),
+            ),
+            (b"", b"", hex!("fbdb1d1b18aa6c08324b7d64b71fb76370690e1d")),
+        ];
+        for (key, data, expected) in cases {
+            assert_eq!(hmac_sha1(key, data).unwrap(), expected);
         }
     }
 }
