@@ -17,6 +17,10 @@ pub const UNLOCK: u8 = 23;
 pub const ADD_SMARTCARD_KEY_CONSTRAINED: u8 = 26;
 pub const EXTENSION: u8 = 27;
 
+// Sign request flags.
+pub const RSA_SHA2_256: u32 = 2;
+pub const RSA_SHA2_512: u32 = 4;
+
 pub const CONSTRAIN_LIFETIME: u8 = 1;
 pub const CONSTRAIN_CONFIRM: u8 = 2;
 // pub const CONSTRAIN_MAXSIGN: u8 = 3;

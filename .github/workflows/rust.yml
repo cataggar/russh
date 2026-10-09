@@ -43,6 +43,10 @@ jobs:
       - name: Build (no features enabled)
         run: cargo build --verbose
 
+      # Its CNG calls only run on Windows.
+      - name: Test pageant
+        run: cargo test -p pageant
+
       - name: Set up SymCrypt
         uses: ./.github/actions/setup-symcrypt
 

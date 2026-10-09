@@ -2,7 +2,8 @@
 //! `num-bigint`, `rsa`, `ssh-key`) of every category except the AEADs.
 //!
 //! Not a backend of its own: `aws_lc` and `ring` re-export all of it but the
-//! AEADs, and `symcrypt` delegates the categories it does not implement yet.
+//! AEADs. It is only compiled for them: its crates come with the private
+//! `_rustcrypto` feature, which `symcrypt` does not enable.
 
 mod cbc;
 pub(crate) mod cipher;

@@ -9,6 +9,7 @@ use delegate::delegate;
 use log::debug;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, WPARAM};
+use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
@@ -30,7 +31,7 @@ impl PageantStream {
     pub async fn new() -> Result<Self, Error> {
         let (one, mut two) = tokio::io::duplex(_AGENT_MAX_MSGLEN * 100);
 
-        let cookie = rand::random::<u64>().to_string();
+        let cookie = random_cookie()?;
         tokio::spawn(async move {
             let mut buf = BytesMut::new();
             while let Ok(n) = two.read_buf(&mut buf).await {
@@ -58,6 +59,13 @@ impl PageantStream {
 
         Ok(Self { stream: one })
     }
+}
+
+/// A random number, in decimal, from the system's preferred RNG.
+fn random_cookie() -> Result<String, Error> {
+    let mut bytes = [0; 8];
+    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }.ok()?;
+    Ok(u64::from_le_bytes(bytes).to_string())
 }
 
 impl AsyncRead for PageantStream {
@@ -237,4 +245,15 @@ pub fn query_pageant_direct(cookie: String, msg: &[u8]) -> Result<Vec<u8>, Error
     buf.extend(map.read(size)?);
 
     Ok(buf)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    #[test]
+    fn cookies_are_random() {
+        let cookie = super::random_cookie().unwrap();
+        assert!(cookie.parse::<u64>().is_ok());
+        assert_ne!(cookie, super::random_cookie().unwrap());
+    }
 }

@@ -15,13 +15,11 @@ thiserror.workspace = true
 [target.'cfg(windows)'.dependencies]
 base16ct = { workspace = true, features = ["alloc"] }
 futures.workspace = true
-rand.workspace = true
 byteorder.workspace = true
 log.workspace = true
 tokio = { workspace = true }
 bytes.workspace = true
 delegate.workspace = true
-sha2 = { workspace = true, optional = true }
 windows = { version = "0.62", features = ["Win32_Security"] }
 windows-strings = { version = "0.5", optional = true }
 
@@ -35,13 +33,13 @@ wmmessage = [
     "windows/Win32_System_Memory",
     "windows/Win32_System_Threading",
     "windows/Win32_System_DataExchange",
+    "windows/Win32_Security_Cryptography",
 ]
 
 # Since PuTTY 0.75 Pageant switched to a more robust named pipes bases communication
 namedpipes = [
     "tokio/net",
     "tokio/time",
-    "dep:sha2",
     "dep:windows-strings",
     "windows/Win32_Security_Authentication_Identity",
     "windows/Win32_Security_Cryptography",

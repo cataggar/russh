@@ -389,8 +389,8 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         // Calculate hash flag for RSA certificates (same logic as prepare_sign_request)
         let hash = match cert.algorithm() {
             Algorithm::Rsa { .. } => match hash_alg {
-                Some(HashAlg::Sha256) => 2,
-                Some(HashAlg::Sha512) => 4,
+                Some(HashAlg::Sha256) => msg::RSA_SHA2_256,
+                Some(HashAlg::Sha512) => msg::RSA_SHA2_512,
                 _ => 0,
             },
             _ => 0,
@@ -431,8 +431,8 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
 
         let hash = match public.algorithm() {
             Algorithm::Rsa { .. } => match hash_alg {
-                Some(HashAlg::Sha256) => 2,
-                Some(HashAlg::Sha512) => 4,
+                Some(HashAlg::Sha256) => msg::RSA_SHA2_256,
+                Some(HashAlg::Sha512) => msg::RSA_SHA2_512,
                 _ => 0,
             },
             _ => 0,
@@ -452,7 +452,10 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
     ) -> Result<(), Error> {
         let mut resp = &Bytes::decode(r)?[..];
         let t = String::decode(&mut resp)?;
-        if (hash == 2 && t == "rsa-sha2-256") || (hash == 4 && t == "rsa-sha2-512") || hash == 0 {
+        if (hash == msg::RSA_SHA2_256 && t == "rsa-sha2-256")
+            || (hash == msg::RSA_SHA2_512 && t == "rsa-sha2-512")
+            || hash == 0
+        {
             let sig = Bytes::decode(&mut resp)?;
             let is_sk_signature = t.starts_with("sk-");
             (t.len() + sig.len() + 8 + if is_sk_signature { 5 } else { 0 }).encode(data)?;
