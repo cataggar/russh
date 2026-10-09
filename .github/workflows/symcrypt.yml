@@ -93,6 +93,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -p russh --no-default-features --features symcrypt -- -D warnings
 
+      - name: Check the cipher benchmarks
+        run: cargo check -p russh --no-default-features --features symcrypt,_bench --bench ciphers
+
       - name: Unit tests (crypto::symcrypt)
         run: cargo test -p russh --no-default-features --features symcrypt --lib -- crypto::symcrypt
         env:

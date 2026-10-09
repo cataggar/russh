@@ -33,10 +33,8 @@ use crate::mac::MacAlgorithm;
 use crate::sshbuffer::SSHBuffer;
 
 pub(crate) mod block;
-#[cfg_attr(russh_backend = "symcrypt", allow(dead_code))]
 pub(crate) mod chacha20poly1305;
 pub(crate) mod clear;
-#[cfg_attr(russh_backend = "symcrypt", allow(dead_code))]
 pub(crate) mod gcm;
 
 use clear::Clear;
