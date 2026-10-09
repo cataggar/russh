@@ -191,38 +191,14 @@ pub(crate) mod macros {
     pub(crate) use map_err;
 }
 
-#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
+#[allow(unused_imports)]
 pub(crate) use macros::map_err;
 
+/// Sign `data` with `key` (with the negotiated hash for RSA) through the
+/// crypto backend, returning the encoded signature.
 #[doc(hidden)]
 pub fn sign_with_hash_alg(key: &PrivateKeyWithHashAlg, data: &[u8]) -> ssh_key::Result<Vec<u8>> {
-    Ok(match key.key_data() {
-        #[cfg(feature = "rsa")]
-        ssh_key::private::KeypairData::Rsa(rsa_keypair) => {
-            let ssh_key::Algorithm::Rsa { hash } = key.algorithm() else {
-                unreachable!();
-            };
-            signature::Signer::try_sign(&(rsa_keypair, hash), data)?.encoded()?
-        }
-        // With the `rsa` feature off the RSA arm above is compiled out. The
-        // catch-all cannot honour the negotiated hash, so it fails with
-        // `Rsa { hash: None }` only after the peer has accepted the key
-        // (USERAUTH_PK_OK) -- a confusing error that points at the credential,
-        // not the build. Fail here instead, naming the missing feature and
-        // reporting the algorithm that was actually negotiated.
-        // See https://github.com/Eugeny/russh/issues/758.
-        #[cfg(not(feature = "rsa"))]
-        ssh_key::private::KeypairData::Rsa(_) => {
-            log::error!(
-                "cannot sign with an RSA key: russh was built without the `rsa` \
-                 feature (enable it, e.g. `features = [\"rsa\"]`)"
-            );
-            return Err(ssh_key::Error::AlgorithmUnsupported {
-                algorithm: key.algorithm(),
-            });
-        }
-        keypair => signature::Signer::try_sign(keypair, data)?.encoded()?,
-    })
+    crate::crypto::sign(key, key.hash_alg(), data)?.encoded()
 }
 
 mod algorithm {
@@ -270,7 +246,7 @@ pub use algorithm::AlgorithmExt;
 
 use crate::keys::key::PrivateKeyWithHashAlg;
 
-#[cfg(all(test, not(feature = "rsa"), any(feature = "ring", feature = "aws-lc-rs")))]
+#[cfg(all(test, not(feature = "rsa")))]
 mod tests {
     use std::sync::Arc;
 

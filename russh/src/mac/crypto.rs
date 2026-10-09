@@ -1,63 +1,59 @@
 use std::marker::PhantomData;
 
-use byteorder::{BigEndian, ByteOrder};
-use digest::typenum::Unsigned;
-use digest::{KeyInit, OutputSizeUser};
-use generic_array::{ArrayLength, GenericArray};
 use subtle::ConstantTimeEq;
 
 use super::{Mac, MacAlgorithm};
+use crate::crypto;
 
-pub struct CryptoMacAlgorithm<
-    M: digest::Mac + KeyInit + Send + 'static,
-    KL: ArrayLength + 'static,
->(pub PhantomData<M>, pub PhantomData<KL>);
+/// The largest `crypto::Mac::OUTPUT_LEN` (HMAC-SHA-512).
+const MAX_MAC_LEN: usize = 64;
 
-pub struct CryptoMac<M: digest::Mac + KeyInit + Send + 'static, KL: ArrayLength + 'static> {
-    pub(crate) key: GenericArray<u8, KL>,
-    pub(crate) p: PhantomData<M>,
+/// A MAC computed over the sequence number and the packet, with the
+/// primitive `M` of the crypto backend.
+pub struct CryptoMacAlgorithm<M>(PhantomData<fn() -> M>);
+
+impl<M> CryptoMacAlgorithm<M> {
+    pub(crate) const fn new() -> Self {
+        Self(PhantomData)
+    }
 }
 
-impl<M: digest::Mac + KeyInit + Send + 'static, KL: ArrayLength + 'static> MacAlgorithm
-    for CryptoMacAlgorithm<M, KL>
-where
-    <M as OutputSizeUser>::OutputSize: ArrayLength,
-{
+pub struct CryptoMac<M>(M);
+
+impl<M: crypto::Mac> CryptoMac<M> {
+    pub(crate) fn new(key: &[u8]) -> Self {
+        // Key exchange derives exactly `key_len()` bytes.
+        #[allow(clippy::expect_used)]
+        Self(M::new(key).expect("MAC key of key_len() bytes"))
+    }
+}
+
+impl<M: crypto::Mac> MacAlgorithm for CryptoMacAlgorithm<M> {
     fn key_len(&self) -> usize {
-        KL::to_usize()
+        M::KEY_LEN
     }
 
     fn make_mac(&self, mac_key: &[u8]) -> Box<dyn Mac + Send> {
-        let mut key = GenericArray::<u8, KL>::default();
-        key.copy_from_slice(mac_key);
-        Box::new(CryptoMac::<M, KL> {
-            key,
-            p: PhantomData,
-        }) as Box<dyn Mac + Send>
+        Box::new(CryptoMac::<M>::new(mac_key))
     }
 }
 
-impl<M: digest::Mac + KeyInit + Send + 'static, KL: ArrayLength + 'static> Mac for CryptoMac<M, KL>
-where
-    <M as OutputSizeUser>::OutputSize: ArrayLength,
-{
+impl<M: crypto::Mac> Mac for CryptoMac<M> {
     fn mac_len(&self) -> usize {
-        M::OutputSize::to_usize()
+        M::OUTPUT_LEN
     }
 
     fn compute(&self, sequence_number: u32, payload: &[u8], output: &mut [u8]) {
-        #[allow(clippy::unwrap_used)]
-        let mut hmac = <M as KeyInit>::new_from_slice(&self.key).unwrap();
-        let mut seqno_buf = [0; 4];
-        BigEndian::write_u32(&mut seqno_buf, sequence_number);
-        hmac.update(&seqno_buf);
-        hmac.update(payload);
-        output.copy_from_slice(&hmac.finalize().into_bytes());
+        self.0
+            .compute(&[&sequence_number.to_be_bytes(), payload], output)
     }
 
     fn verify(&self, sequence_number: u32, payload: &[u8], mac: &[u8]) -> bool {
-        let mut buf = GenericArray::<u8, M::OutputSize>::default();
-        self.compute(sequence_number, payload, &mut buf);
-        buf.ct_eq(mac).into()
+        let mut buf = [0; MAX_MAC_LEN];
+        let Some(expected) = buf.get_mut(..M::OUTPUT_LEN) else {
+            return false;
+        };
+        self.compute(sequence_number, payload, expected);
+        expected.ct_eq(mac).into()
     }
 }

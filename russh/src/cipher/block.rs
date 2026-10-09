@@ -14,98 +14,33 @@
 use std::convert::TryInto;
 use std::marker::PhantomData;
 
-use aes::cipher::{
-    InOutBuf, Iv, IvSizeUser, Key, KeyIvInit, KeySizeUser, StreamCipher, StreamCipherError,
-    StreamCipherSeek,
-};
-#[allow(deprecated)]
-use rand_core::Rng;
-
 use super::super::Error;
 use super::PACKET_LENGTH_LEN;
-use crate::keys::key::safe_rng;
+use crate::crypto::{self, BlockStream};
 use crate::mac::{Mac, MacAlgorithm};
 
-fn new_cipher_from_slices<C: KeyIvInit>(k: &[u8], n: &[u8]) -> C {
+/// A stateful cipher with a separate MAC (AES-CTR and CBC modes), generic
+/// over the backend's [`BlockStream`].
+pub struct SshBlockCipher<B>(PhantomData<fn() -> B>);
+
+impl<B> SshBlockCipher<B> {
+    pub(crate) const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+fn new_block_stream<B: BlockStream>(k: &[u8], n: &[u8]) -> B {
     #[allow(clippy::expect_used)]
-    C::new(
-        <&Key<C>>::try_from(k).expect("key length matches"),
-        <&Iv<C>>::try_from(n).expect("iv length matches"),
-    )
+    B::new(k, n).expect("key and iv lengths match")
 }
 
-/// Cloneable wrapper for `Ctr128BE<>`
-pub struct CtrWrapper<C>
-where
-    C: KeyIvInit,
-{
-    key: Key<C>,
-    initial_iv: Iv<C>,
-    pos: u64,
-}
-
-impl<C: KeyIvInit> Clone for CtrWrapper<C> {
-    fn clone(&self) -> Self {
-        Self {
-            key: self.key.clone(),
-            initial_iv: self.initial_iv.clone(),
-            pos: self.pos,
-        }
-    }
-}
-
-impl<C: KeyIvInit> KeySizeUser for CtrWrapper<C> {
-    type KeySize = <C as KeySizeUser>::KeySize;
-}
-
-impl<C: KeyIvInit> IvSizeUser for CtrWrapper<C> {
-    type IvSize = <C as IvSizeUser>::IvSize;
-}
-
-impl<C: KeyIvInit> KeyIvInit for CtrWrapper<C> {
-    fn new(key: &Key<Self>, iv: &Iv<Self>) -> Self {
-        Self {
-            key: key.clone(),
-            initial_iv: iv.clone(),
-            pos: 0,
-        }
-    }
-}
-
-impl<C: KeyIvInit + StreamCipher + StreamCipherSeek> StreamCipher for CtrWrapper<C> {
-    fn check_remaining(&self, _data_len: usize) -> Result<(), StreamCipherError> {
-        Ok(())
-    }
-
-    fn unchecked_apply_keystream_inout(&mut self, buf: InOutBuf<'_, '_, u8>) {
-        let mut cipher = C::new(&self.key, &self.initial_iv);
-        cipher.seek(self.pos);
-        cipher.unchecked_apply_keystream_inout(buf);
-        self.pos = cipher.current_pos();
-    }
-
-    fn unchecked_write_keystream(&mut self, buf: &mut [u8]) {
-        let mut cipher = C::new(&self.key, &self.initial_iv);
-        cipher.seek(self.pos);
-        cipher.unchecked_write_keystream(buf);
-        self.pos = cipher.current_pos();
-    }
-}
-
-pub struct SshBlockCipher<C: BlockStreamCipher + PacketLengthProbe + KeySizeUser + IvSizeUser>(
-    pub PhantomData<C>,
-);
-
-impl<
-    C: BlockStreamCipher + PacketLengthProbe + KeySizeUser + IvSizeUser + KeyIvInit + Send + 'static,
-> super::Cipher for SshBlockCipher<C>
-{
+impl<B: BlockStream> super::Cipher for SshBlockCipher<B> {
     fn key_len(&self) -> usize {
-        C::key_size()
+        B::KEY_LEN
     }
 
     fn nonce_len(&self) -> usize {
-        C::iv_size()
+        B::IV_LEN
     }
 
     fn needs_mac(&self) -> bool {
@@ -120,7 +55,7 @@ impl<
         mac: &dyn MacAlgorithm,
     ) -> Box<dyn super::OpeningKey + Send> {
         Box::new(OpeningKey {
-            cipher: new_cipher_from_slices::<C>(k, n),
+            cipher: new_block_stream::<B>(k, n),
             mac: mac.make_mac(m),
         })
     }
@@ -133,25 +68,23 @@ impl<
         mac: &dyn MacAlgorithm,
     ) -> Box<dyn super::SealingKey + Send> {
         Box::new(SealingKey {
-            cipher: new_cipher_from_slices::<C>(k, n),
+            cipher: new_block_stream::<B>(k, n),
             mac: mac.make_mac(m),
         })
     }
 }
 
-pub struct OpeningKey<C: BlockStreamCipher + PacketLengthProbe> {
-    pub(crate) cipher: C,
+pub struct OpeningKey<B> {
+    pub(crate) cipher: B,
     pub(crate) mac: Box<dyn Mac + Send>,
 }
 
-pub struct SealingKey<C: BlockStreamCipher> {
-    pub(crate) cipher: C,
+pub struct SealingKey<B> {
+    pub(crate) cipher: B,
     pub(crate) mac: Box<dyn Mac + Send>,
 }
 
-impl<C: BlockStreamCipher + PacketLengthProbe + KeySizeUser + IvSizeUser> super::OpeningKey
-    for OpeningKey<C>
-{
+impl<B: BlockStream> super::OpeningKey for OpeningKey<B> {
     fn packet_length_to_read_for_block_length(&self) -> usize {
         16
     }
@@ -171,7 +104,7 @@ impl<C: BlockStreamCipher + PacketLengthProbe + KeySizeUser + IvSizeUser> super:
             #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
             encrypted_packet_length[..4].try_into().unwrap()
         } else {
-            self.cipher.decrypt_packet_length_block(&mut first_block);
+            self.cipher.peek_decrypt(&mut first_block);
 
             // Fine because of self.packet_length_to_read_for_block_length()
             #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
@@ -199,9 +132,9 @@ impl<C: BlockStreamCipher + PacketLengthProbe + KeySizeUser + IvSizeUser> super:
             }
             #[allow(clippy::indexing_slicing)]
             self.cipher
-                .decrypt_data(&mut ciphertext_in_plaintext_out[PACKET_LENGTH_LEN..]);
+                .decrypt(&mut ciphertext_in_plaintext_out[PACKET_LENGTH_LEN..]);
         } else {
-            self.cipher.decrypt_data(ciphertext_in_plaintext_out);
+            self.cipher.decrypt(ciphertext_in_plaintext_out);
 
             if !self
                 .mac
@@ -216,7 +149,7 @@ impl<C: BlockStreamCipher + PacketLengthProbe + KeySizeUser + IvSizeUser> super:
     }
 }
 
-impl<C: BlockStreamCipher + KeySizeUser + IvSizeUser> super::SealingKey for SealingKey<C> {
+impl<B: BlockStream> super::SealingKey for SealingKey<B> {
     fn padding_length(&self, payload: &[u8]) -> usize {
         let block_size = 16;
 
@@ -241,7 +174,7 @@ impl<C: BlockStreamCipher + KeySizeUser + IvSizeUser> super::SealingKey for Seal
     }
 
     fn fill_padding(&self, padding_out: &mut [u8]) {
-        safe_rng().fill_bytes(padding_out);
+        crypto::fill_random(padding_out);
     }
 
     fn tag_len(&self) -> usize {
@@ -257,88 +190,37 @@ impl<C: BlockStreamCipher + KeySizeUser + IvSizeUser> super::SealingKey for Seal
         if self.mac.is_etm() {
             #[allow(clippy::indexing_slicing)]
             self.cipher
-                .encrypt_data(&mut plaintext_in_ciphertext_out[PACKET_LENGTH_LEN..]);
+                .encrypt(&mut plaintext_in_ciphertext_out[PACKET_LENGTH_LEN..]);
             self.mac
                 .compute(sequence_number, plaintext_in_ciphertext_out, tag_out);
         } else {
             self.mac
                 .compute(sequence_number, plaintext_in_ciphertext_out, tag_out);
-            self.cipher.encrypt_data(plaintext_in_ciphertext_out);
+            self.cipher.encrypt(plaintext_in_ciphertext_out);
         }
-    }
-}
-
-pub trait BlockStreamCipher {
-    fn encrypt_data(&mut self, data: &mut [u8]);
-    fn decrypt_data(&mut self, data: &mut [u8]);
-}
-
-pub(crate) trait PacketLengthProbe {
-    fn decrypt_packet_length_block(&self, first_block: &mut [u8; 16]);
-}
-
-impl<T: StreamCipher> BlockStreamCipher for T {
-    fn encrypt_data(&mut self, data: &mut [u8]) {
-        self.apply_keystream(data);
-    }
-
-    fn decrypt_data(&mut self, data: &mut [u8]) {
-        self.apply_keystream(data);
-    }
-}
-
-impl<T: StreamCipher + Clone> PacketLengthProbe for T {
-    fn decrypt_packet_length_block(&self, first_block: &mut [u8; 16]) {
-        let mut cipher = self.clone();
-        cipher.apply_keystream(first_block);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use aes::Aes128;
-    use aes::cipher::KeyIvInit;
-    use aes::cipher::StreamCipher;
-    use aes::cipher::{IvSizeUser, KeySizeUser};
-    use ctr::Ctr128BE;
-    use digest::typenum::U16;
     use tokio::io::AsyncWriteExt;
 
-    use super::{BlockStreamCipher, CtrWrapper, OpeningKey, PacketLengthProbe};
+    use super::OpeningKey;
+    use crate::crypto::{self, BlockStream};
     use crate::mac::MacAlgorithm;
     use crate::sshbuffer::SSHBuffer;
-
-    #[test]
-    fn stream_cipher_probe_does_not_advance_cipher_state() {
-        let plaintext = *b"0123456789ABCDEF";
-        let key = fixture_bytes::<16>(7);
-        let iv = fixture_bytes::<16>(3);
-
-        let mut encryptor = CtrWrapper::<Ctr128BE<Aes128>>::new(&key.into(), &iv.into());
-        let mut ciphertext = plaintext;
-        encryptor.apply_keystream(&mut ciphertext);
-
-        let cipher = CtrWrapper::<Ctr128BE<Aes128>>::new(&key.into(), &iv.into());
-        let mut probed_block = ciphertext;
-        cipher.decrypt_packet_length_block(&mut probed_block);
-        assert_eq!(probed_block, plaintext);
-
-        let mut decrypted = ciphertext;
-        let mut cipher_after_probe = cipher;
-        cipher_after_probe.decrypt_data(&mut decrypted);
-        assert_eq!(decrypted, plaintext);
-    }
 
     #[test]
     fn decrypt_packet_length_uses_independent_cipher_state() -> std::io::Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let opening = OpeningKey {
-            cipher: OwnedStateCipher::new(),
+        let mut opening = OpeningKey {
+            cipher: OwnedStateCipher {
+                packet_length: Box::new([0, 0, 0, 13]),
+            },
             mac: crate::mac::_NONE.make_mac(&[]),
         };
-        let mut opening = opening;
         let mut buffer = SSHBuffer::new();
         let bytes_read = runtime
             .block_on(async {
@@ -353,57 +235,32 @@ mod tests {
         Ok(())
     }
 
+    /// Decrypts every packet length to 13, but peeks 12: the probe must not
+    /// share state with the cipher that decrypts the packet.
     struct OwnedStateCipher {
         packet_length: Box<[u8; 4]>,
     }
 
-    impl OwnedStateCipher {
-        fn new() -> Self {
-            Self {
-                packet_length: Box::new([0, 0, 0, 13]),
-            }
+    impl BlockStream for OwnedStateCipher {
+        const KEY_LEN: usize = 16;
+        const IV_LEN: usize = 16;
+
+        fn new(_: &[u8], _: &[u8]) -> crypto::Result<Self> {
+            Err(crypto::CryptoError)
         }
-    }
 
-    impl Clone for OwnedStateCipher {
-        fn clone(&self) -> Self {
-            Self {
-                packet_length: Box::new([0, 0, 0, 12]),
-            }
-        }
-    }
+        fn encrypt(&mut self, _data: &mut [u8]) {}
 
-    impl KeySizeUser for OwnedStateCipher {
-        type KeySize = U16;
-    }
-
-    impl IvSizeUser for OwnedStateCipher {
-        type IvSize = U16;
-    }
-
-    impl BlockStreamCipher for OwnedStateCipher {
-        fn encrypt_data(&mut self, _data: &mut [u8]) {}
-
-        fn decrypt_data(&mut self, data: &mut [u8]) {
+        fn decrypt(&mut self, data: &mut [u8]) {
             if let Some(prefix) = data.get_mut(..4) {
                 prefix.copy_from_slice(&self.packet_length[..]);
             }
         }
-    }
 
-    impl PacketLengthProbe for OwnedStateCipher {
-        fn decrypt_packet_length_block(&self, first_block: &mut [u8; 16]) {
+        fn peek_decrypt(&self, first_block: &mut [u8; 16]) {
             if let Some(prefix) = first_block.get_mut(..4) {
                 prefix.copy_from_slice(&[0, 0, 0, 12]);
             }
         }
-    }
-
-    fn fixture_bytes<const N: usize>(seed: u8) -> [u8; N] {
-        let mut bytes = [0; N];
-        for (i, byte) in bytes.iter_mut().enumerate() {
-            *byte = seed.wrapping_add(i as u8);
-        }
-        bytes
     }
 }

@@ -1545,6 +1545,7 @@ impl Session {
                         .preferred
                         .key
                         .iter()
+                        .filter(|x| crate::crypto::is_supported_signature_algorithm(x))
                         .map(|x| x.to_string())
                         .collect(),
                 )

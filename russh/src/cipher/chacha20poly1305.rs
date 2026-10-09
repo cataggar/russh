@@ -15,19 +15,30 @@
 
 // http://cvsweb.openbsd.org/cgi-bin/cvsweb/src/usr.bin/ssh/PROTOCOL.chacha20poly1305?annotate=HEAD
 
-#[cfg(feature = "aws-lc-rs")]
-use aws_lc_rs::aead::chacha20_poly1305_openssh;
-#[cfg(all(not(feature = "aws-lc-rs"), feature = "ring"))]
-use ring::aead::chacha20_poly1305_openssh;
+use std::marker::PhantomData;
 
 use super::super::Error;
+use crate::crypto::{AEAD_TAG_LEN, CHACHA20_POLY1305_KEY_LEN, ChaCha20Poly1305};
 use crate::mac::MacAlgorithm;
 
-pub struct SshChacha20Poly1305Cipher {}
+/// `chacha20-poly1305@openssh.com`, generic over the backend's
+/// [`ChaCha20Poly1305`].
+pub struct SshChacha20Poly1305Cipher<C>(PhantomData<fn() -> C>);
 
-impl super::Cipher for SshChacha20Poly1305Cipher {
+impl<C> SshChacha20Poly1305Cipher<C> {
+    pub(crate) const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+fn new_key<C: ChaCha20Poly1305>(k: &[u8]) -> C {
+    #[allow(clippy::expect_used)]
+    C::new(k.try_into().expect("key length matches")).expect("valid key")
+}
+
+impl<C: ChaCha20Poly1305> super::Cipher for SshChacha20Poly1305Cipher<C> {
     fn key_len(&self) -> usize {
-        chacha20_poly1305_openssh::KEY_LEN
+        CHACHA20_POLY1305_KEY_LEN
     }
 
     fn make_opening_key(
@@ -37,10 +48,7 @@ impl super::Cipher for SshChacha20Poly1305Cipher {
         _: &[u8],
         _: &dyn MacAlgorithm,
     ) -> Box<dyn super::OpeningKey + Send> {
-        Box::new(OpeningKey(chacha20_poly1305_openssh::OpeningKey::new(
-            #[allow(clippy::unwrap_used)]
-            k.try_into().unwrap(),
-        )))
+        Box::new(OpeningKey(new_key::<C>(k)))
     }
 
     fn make_sealing_key(
@@ -50,18 +58,15 @@ impl super::Cipher for SshChacha20Poly1305Cipher {
         _: &[u8],
         _: &dyn MacAlgorithm,
     ) -> Box<dyn super::SealingKey + Send> {
-        Box::new(SealingKey(chacha20_poly1305_openssh::SealingKey::new(
-            #[allow(clippy::unwrap_used)]
-            k.try_into().unwrap(),
-        )))
+        Box::new(SealingKey(new_key::<C>(k)))
     }
 }
 
-pub struct OpeningKey(chacha20_poly1305_openssh::OpeningKey);
+pub struct OpeningKey<C>(C);
 
-pub struct SealingKey(chacha20_poly1305_openssh::SealingKey);
+pub struct SealingKey<C>(C);
 
-impl super::OpeningKey for OpeningKey {
+impl<C: ChaCha20Poly1305> super::OpeningKey for OpeningKey<C> {
     fn decrypt_packet_length(
         &self,
         sequence_number: u32,
@@ -75,7 +80,7 @@ impl super::OpeningKey for OpeningKey {
     }
 
     fn tag_len(&self) -> usize {
-        chacha20_poly1305_openssh::TAG_LEN
+        AEAD_TAG_LEN
     }
 
     fn open<'a>(
@@ -85,19 +90,19 @@ impl super::OpeningKey for OpeningKey {
     ) -> Result<&'a [u8], Error> {
         let ciphertext_len = ciphertext_and_tag.len() - self.tag_len();
         let (ciphertext_in_plaintext_out, tag) = ciphertext_and_tag.split_at_mut(ciphertext_len);
+        let tag: &[u8; AEAD_TAG_LEN] = (&*tag).try_into().map_err(|_| Error::DecryptionError)?;
 
         self.0
-            .open_in_place(
-                sequence_number,
-                ciphertext_in_plaintext_out,
-                #[allow(clippy::unwrap_used)]
-                &tag.try_into().unwrap(),
-            )
-            .map_err(|_| Error::DecryptionError)
+            .open_in_place(sequence_number, ciphertext_in_plaintext_out, tag)
+            .map_err(|_| Error::DecryptionError)?;
+        let plaintext: &'a [u8] = ciphertext_in_plaintext_out;
+        plaintext
+            .get(super::PACKET_LENGTH_LEN..)
+            .ok_or(Error::DecryptionError)
     }
 }
 
-impl super::SealingKey for SealingKey {
+impl<C: ChaCha20Poly1305> super::SealingKey for SealingKey<C> {
     fn padding_length(&self, payload: &[u8]) -> usize {
         let block_size = 8;
         let extra_len = super::PACKET_LENGTH_LEN + super::PADDING_LENGTH_LEN;
@@ -124,7 +129,7 @@ impl super::SealingKey for SealingKey {
     }
 
     fn tag_len(&self) -> usize {
-        chacha20_poly1305_openssh::TAG_LEN
+        AEAD_TAG_LEN
     }
 
     fn seal(
@@ -133,11 +138,13 @@ impl super::SealingKey for SealingKey {
         plaintext_in_ciphertext_out: &mut [u8],
         tag: &mut [u8],
     ) {
-        self.0.seal_in_place(
-            sequence_number,
-            plaintext_in_ciphertext_out,
-            #[allow(clippy::unwrap_used)]
-            tag.try_into().unwrap(),
-        );
+        #[allow(clippy::expect_used)]
+        self.0
+            .seal_in_place(
+                sequence_number,
+                plaintext_in_ciphertext_out,
+                tag.try_into().expect("tag length matches"),
+            )
+            .expect("AEAD sealing succeeds");
     }
 }

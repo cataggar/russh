@@ -60,7 +60,7 @@ impl KexAlgorithmImplementor for NoneKexAlgorithm {
         local_to_remote_mac: crate::mac::Name,
         is_server: bool,
     ) -> Result<crate::cipher::CipherPair, crate::Error> {
-        super::compute_keys::<sha2::Sha256>(
+        super::compute_keys::<crate::crypto::provider::hash::Sha256>(
             None,
             session_id,
             exchange_hash,

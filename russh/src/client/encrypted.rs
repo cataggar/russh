@@ -13,7 +13,6 @@
 // limitations under the License.
 //
 use std::convert::TryInto;
-use std::ops::Deref;
 use std::str::FromStr;
 
 use bytes::Bytes;
@@ -52,7 +51,7 @@ fn verify_hostkeys_proof(
         "hostkeys-prove-00@openssh.com".encode(&mut signed)?;
         session_id.encode(&mut signed)?;
         key.to_bytes()?.encode(&mut signed)?;
-        signature::Verifier::verify(key, &signed, &signature)
+        crate::crypto::verify(key.key_data(), &signed, &signature)
             .map_err(|_| crate::Error::WrongServerSig)?;
     }
     ensure_end(&r)?;
@@ -1574,7 +1573,8 @@ impl Encrypted {
                 )?;
 
                 // Extend with self-signature.
-                signature::Signer::try_sign(key.deref(), buffer)?
+                // As `ssh-key` does for a bare RSA key: rsa-sha2-512.
+                crate::crypto::sign(key, Some(ssh_key::HashAlg::Sha512), buffer)?
                     .encoded()?
                     .encode(&mut *buffer)?;
 

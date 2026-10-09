@@ -2,12 +2,7 @@ pub mod groups;
 use std::marker::PhantomData;
 
 use byteorder::{BigEndian, ByteOrder};
-use digest::Digest;
-use groups::DH;
 use log::{error, trace};
-use num_bigint::BigUint;
-use sha1::Sha1;
-use sha2::{Sha256, Sha512};
 use ssh_encoding::{Decode, Encode, Reader, Writer};
 
 use self::groups::{
@@ -15,6 +10,9 @@ use self::groups::{
 };
 use super::{compute_keys, KexAlgorithm, KexAlgorithmImplementor, KexType, SharedSecret};
 use crate::client::GexParams;
+use crate::crypto::provider::hash::{Sha1, Sha256, Sha512};
+use crate::crypto::provider::kex::Dh;
+use crate::crypto::{mpint_body, FfDh, Hash};
 use crate::session::Exchange;
 use crate::{cipher, mac, msg, CryptoVec, Error};
 
@@ -91,17 +89,21 @@ impl KexType for DhGroup16Sha512KexType {
 }
 
 #[doc(hidden)]
-pub(crate) struct DhGroupKex<D: Digest> {
-    dh: Option<DH>,
+pub(crate) struct DhGroupKex<H> {
+    group: Option<DhGroup>,
+    /// The client's key pair, between `client_dh` and `compute_shared_secret`.
+    dh: Option<Dh>,
+    /// The shared secret as an mpint body.
     shared_secret: Option<Vec<u8>>,
     is_dh_gex: bool,
-    _digest: PhantomData<D>,
+    _digest: PhantomData<fn() -> H>,
 }
 
-impl<D: Digest> DhGroupKex<D> {
-    pub(crate) fn new(group: Option<&DhGroup>) -> DhGroupKex<D> {
+impl<H> DhGroupKex<H> {
+    pub(crate) fn new(group: Option<&DhGroup>) -> DhGroupKex<H> {
         DhGroupKex {
-            dh: group.map(DH::new),
+            group: group.cloned(),
+            dh: None,
             shared_secret: None,
             is_dh_gex: group.is_none(),
             _digest: PhantomData,
@@ -109,7 +111,7 @@ impl<D: Digest> DhGroupKex<D> {
     }
 }
 
-impl<D: Digest> std::fmt::Debug for DhGroupKex<D> {
+impl<H> std::fmt::Debug for DhGroupKex<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
@@ -118,19 +120,7 @@ impl<D: Digest> std::fmt::Debug for DhGroupKex<D> {
     }
 }
 
-pub(crate) fn biguint_to_mpint(biguint: &BigUint) -> Vec<u8> {
-    let mut mpint = Vec::new();
-    let bytes = biguint.to_bytes_be();
-    if let Some(b) = bytes.first()
-        && b > &0x7f
-    {
-        mpint.push(0);
-    }
-    mpint.extend(&bytes);
-    mpint
-}
-
-impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
+impl<H: Hash> KexAlgorithmImplementor for DhGroupKex<H> {
     fn skip_exchange(&self) -> bool {
         false
     }
@@ -153,13 +143,13 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
 
     #[allow(dead_code)]
     fn dh_gex_set_group(&mut self, group: DhGroup) -> Result<(), crate::Error> {
-        self.dh = Some(DH::new(&group));
+        self.group = Some(group);
         Ok(())
     }
 
     #[doc(hidden)]
     fn server_dh(&mut self, exchange: &mut Exchange, payload: &[u8]) -> Result<(), Error> {
-        let Some(dh) = self.dh.as_mut() else {
+        let Some(group) = self.group.as_ref() else {
             error!("DH kex sequence error, dh is None in server_dh");
             return Err(Error::Inconsistent);
         };
@@ -185,28 +175,16 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
 
         trace!("client_pubkey: {client_pubkey:?}");
 
-        dh.generate_private_key(true);
-        let server_pubkey = &dh.generate_public_key();
-        if !dh.validate_public_key(server_pubkey) {
-            return Err(Error::Inconsistent);
-        }
-
-        let encoded_server_pubkey = biguint_to_mpint(server_pubkey);
+        let (dh, server_pubkey) = Dh::generate(group, true).map_err(|_| Error::Inconsistent)?;
 
         // fill exchange.
         exchange.server_ephemeral.clear();
-        exchange.server_ephemeral.extend_from_slice(&encoded_server_pubkey);
+        exchange
+            .server_ephemeral
+            .extend_from_slice(&mpint_body(&server_pubkey));
 
-        let decoded_client_pubkey = DH::decode_public_key(client_pubkey);
-        if !dh.validate_public_key(&decoded_client_pubkey) {
-            return Err(Error::Inconsistent);
-        }
-
-        let shared = dh.compute_shared_secret(decoded_client_pubkey);
-        if !dh.validate_shared_secret(&shared) {
-            return Err(Error::Inconsistent);
-        }
-        self.shared_secret = Some(biguint_to_mpint(&shared));
+        let shared = dh.agree(client_pubkey).map_err(|_| Error::Inconsistent)?;
+        self.shared_secret = Some(mpint_body(&shared));
         Ok(())
     }
 
@@ -216,20 +194,16 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
         client_ephemeral: &mut Vec<u8>,
         writer: &mut impl Writer,
     ) -> Result<(), Error> {
-        let Some(dh) = self.dh.as_mut() else {
+        let Some(group) = self.group.as_ref() else {
             error!("DH kex sequence error, dh is None in client_dh");
             return Err(Error::Inconsistent);
         };
 
-        dh.generate_private_key(false);
-        let client_pubkey = &dh.generate_public_key();
-
-        if !dh.validate_public_key(client_pubkey) {
-            return Err(Error::Inconsistent);
-        }
+        let (dh, client_pubkey) = Dh::generate(group, false).map_err(|_| Error::Inconsistent)?;
+        self.dh = Some(dh);
 
         // fill exchange.
-        let encoded_pubkey = biguint_to_mpint(client_pubkey);
+        let encoded_pubkey = mpint_body(&client_pubkey);
         client_ephemeral.clear();
         client_ephemeral.extend_from_slice(&encoded_pubkey);
 
@@ -245,22 +219,13 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
     }
 
     fn compute_shared_secret(&mut self, remote_pubkey_: &[u8]) -> Result<(), Error> {
-        let Some(dh) = self.dh.as_mut() else {
+        let Some(dh) = self.dh.as_ref() else {
             error!("DH kex sequence error, dh is None in compute_shared_secret");
             return Err(Error::Inconsistent);
         };
 
-        let remote_pubkey = DH::decode_public_key(remote_pubkey_);
-
-        if !dh.validate_public_key(&remote_pubkey) {
-            return Err(Error::Inconsistent);
-        }
-
-        let shared = dh.compute_shared_secret(remote_pubkey);
-        if !dh.validate_shared_secret(&shared) {
-            return Err(Error::Inconsistent);
-        }
-        self.shared_secret = Some(biguint_to_mpint(&shared));
+        let shared = dh.agree(remote_pubkey_).map_err(|_| Error::Inconsistent)?;
+        self.shared_secret = Some(mpint_body(&shared));
         Ok(())
     }
 
@@ -285,8 +250,8 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
 
         if let Some((gex_params, dh_group)) = &exchange.gex {
             gex_params.encode(buffer)?;
-            biguint_to_mpint(&BigUint::from_bytes_be(&dh_group.prime)).encode(buffer)?;
-            biguint_to_mpint(&BigUint::from_bytes_be(&dh_group.generator)).encode(buffer)?;
+            mpint_body(&dh_group.prime).encode(buffer)?;
+            mpint_body(&dh_group.generator).encode(buffer)?;
         }
 
         exchange.client_ephemeral.encode(buffer)?;
@@ -296,10 +261,7 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
             shared.encode(buffer)?;
         }
 
-        let mut hasher = D::new();
-        hasher.update(&buffer);
-
-        Ok(hasher.finalize().to_vec())
+        Ok(H::digest_to_vec(&buffer[..]))
     }
 
     fn compute_keys(
@@ -317,7 +279,7 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
             .map(SharedSecret::from_mpint)
             .transpose()?;
 
-        compute_keys::<D>(
+        compute_keys::<H>(
             shared_secret.as_ref(),
             session_id,
             exchange_hash,

@@ -333,9 +333,11 @@ impl ClientKex {
                 ensure_end(&signature_reader)?;
                 ensure_end(r)?;
 
-                if let Err(e) =
-                    signature::Verifier::verify(&server_host_key, hash.as_ref(), &signature)
-                {
+                if let Err(e) = crate::crypto::verify(
+                    server_host_key.key_data(),
+                    hash.as_ref(),
+                    &signature,
+                ) {
                     debug!("wrong server sig: {e:?}");
                     return Err(Error::WrongServerSig);
                 }
