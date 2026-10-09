@@ -4,8 +4,9 @@
 //!
 //! * The russh **client** against `sshd`, through `common::openssh`. It
 //!   verifies host key signatures, signs publickey authentication with plain
-//!   keys and with user certificates, and fails clearly with the key types
-//!   the backend lacks (Ed25519, ECDSA P-521).
+//!   keys (loaded from OpenSSH, PKCS#8 and PEM files) and with user
+//!   certificates, and fails clearly with the algorithms the backend lacks
+//!   (Ed25519, ECDSA P-521 and `ssh-rsa`).
 //! * The OpenSSH `ssh` client against an in-process russh **server**. The
 //!   server signs with host keys and host certificates, verifies user key
 //!   signatures, and verifies the CA signature of user certificates. Its
@@ -33,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail, ensure};
-use common::openssh::{self, Case, KeyAlg, KeyType, OpenSsh, Query, Sshd};
+use common::openssh::{self, Case, KeyAlg, KeyFormat, KeyType, OpenSsh, Query, Refused, Sshd};
 use russh::keys::ssh_key::public::KeyData;
 use russh::keys::{Certificate, HashAlg, PrivateKey, PublicKey};
 use russh::{ChannelId, Preferred, server};
@@ -76,6 +77,33 @@ async fn client_verifies_host_keys() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_signs_user_keys() {
     openssh::check_user_keys(Case::default().with_round_trip(0), &ALGORITHMS).await;
+}
+
+/// Each ECDSA or RSA host key with each ECDSA or RSA user key. The 12 cases
+/// cycle through the user key file formats, so that each user key algorithm
+/// is loaded from an OpenSSH, a PKCS#8 and a PEM file once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_with_each_host_and_user_key() {
+    const HOST_KEYS: [KeyAlg; 3] = [KeyAlg::ECDSA_P256, KeyAlg::ECDSA_P384, KeyAlg::RSA_SHA2_512];
+    const USER_KEYS: [KeyAlg; 4] = [
+        KeyAlg::ECDSA_P256,
+        KeyAlg::ECDSA_P384,
+        KeyAlg::RSA_SHA2_256,
+        KeyAlg::RSA_SHA2_512,
+    ];
+    const FORMATS: [KeyFormat; 3] = [KeyFormat::OpenSsh, KeyFormat::Pkcs8, KeyFormat::Pem];
+    let cases = HOST_KEYS
+        .into_iter()
+        .flat_map(|host_key| USER_KEYS.map(|user_key| (host_key, user_key)))
+        .zip(FORMATS.into_iter().cycle())
+        .map(|((host_key, user_key), format)| {
+            Case::default()
+                .with_round_trip(0)
+                .with_host_key(host_key)
+                .with_user_key(user_key)
+                .with_user_key_format(format)
+        });
+    openssh::check_cases("host and user keys", cases).await;
 }
 
 /// The client authenticates to sshd with ECDSA user certificates. RSA user
@@ -135,35 +163,66 @@ async fn certificate_login(openssh: &'static OpenSsh, key_type: KeyType) -> anyh
     client.disconnect().await
 }
 
-/// With Ed25519 and ECDSA P-521, authentication fails with an error naming
-/// the algorithm, and sshd with only such a host key has no host key
-/// algorithm in common with the client.
+/// With Ed25519, ECDSA P-521 and `ssh-rsa` (SHA-1) user keys,
+/// authentication fails with an error naming the algorithm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_refuses_unsupported_keys() {
     let Some(openssh) = openssh::available() else {
         return;
     };
     let _ = env_logger::try_init();
+    let mut user_keys: Vec<KeyAlg> = supported_by(openssh, &UNSUPPORTED)
+        .into_iter()
+        .map(KeyAlg::new)
+        .collect();
+    let ssh_rsa = KeyAlg::rsa(KeyType::Rsa3072, None);
+    if openssh.supports(Query::Sig, &ssh_rsa.name()) {
+        user_keys.push(ssh_rsa);
+    } else {
+        note(&format!(
+            "skipped: {} does not support {}",
+            openssh.short_version(),
+            ssh_rsa.name()
+        ));
+    }
     let mut failures = Vec::new();
-    for key_type in supported_by(openssh, &UNSUPPORTED) {
-        if let Err(error) = refused_user_key(key_type).await {
+    for user_key in user_keys {
+        if let Err(error) = refused_user_key(user_key).await {
             failures.push(format!(
-                "===== FAILED: {key_type} user key =====\n{error:#}"
-            ));
-        }
-        if let Err(error) = refused_host_key(key_type).await {
-            failures.push(format!(
-                "===== FAILED: {key_type} host key =====\n{error:#}"
+                "===== FAILED: {user_key} user key =====\n{error:#}"
             ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-async fn refused_user_key(key_type: KeyType) -> anyhow::Result<()> {
-    let sshd = Sshd::builder().user_key(key_type).start().await?;
+/// sshd with only a host key algorithm the backend lacks (Ed25519, ECDSA
+/// P-521, or `ssh-rsa` with SHA-1) has none in common with the client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_refuses_unsupported_host_keys() {
+    openssh::check_refused(
+        "unsupported host keys",
+        Refused::Key,
+        [
+            KeyAlg::ED25519,
+            KeyAlg::ECDSA_P521,
+            KeyAlg::rsa(KeyType::Rsa3072, None),
+        ]
+        .map(|host_key| Case::default().with_host_key(host_key)),
+    )
+    .await;
+}
+
+/// Authenticates with `user_key` to sshd, which accepts its algorithm, so
+/// that the client gets to sign.
+async fn refused_user_key(user_key: KeyAlg) -> anyhow::Result<()> {
+    let sshd = Sshd::builder()
+        .user_key(user_key.key)
+        .pubkey_accepted_algorithms(user_key.name())
+        .start()
+        .await?;
     let mut client = sshd.connect(Preferred::default()).await?;
-    let error = match client.authenticate(None).await {
+    let error = match client.authenticate(user_key.rsa_hash).await {
         Ok(()) => bail!("authentication succeeded\n{}", sshd.diagnostics()),
         Err(error) => error,
     };
@@ -182,30 +241,11 @@ async fn refused_user_key(key_type: KeyType) -> anyhow::Result<()> {
             ),
         }
     };
-    let expected = format!("unsupported algorithm: {}", key_type.openssh_name());
+    let expected = format!("unsupported algorithm: {}", user_key.name());
     ensure!(
         reason.contains(&expected),
         "the session ended with {reason:?}, which does not contain {expected:?}\n{}",
         sshd.diagnostics()
-    );
-    Ok(())
-}
-
-async fn refused_host_key(key_type: KeyType) -> anyhow::Result<()> {
-    let sshd = Sshd::builder().host_key(key_type).start().await?;
-    let error = match sshd.connect(Preferred::default()).await {
-        Ok(client) => {
-            let _ = client.disconnect().await;
-            bail!(
-                "the key exchange with only a {key_type} host key succeeded\n{}",
-                sshd.diagnostics()
-            );
-        }
-        Err(error) => format!("{error:#}"),
-    };
-    ensure!(
-        error.contains("No common Key algorithm") && error.contains(key_type.openssh_name()),
-        "connecting failed with {error:?} instead of finding no common host key algorithm"
     );
     Ok(())
 }

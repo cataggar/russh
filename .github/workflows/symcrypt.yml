@@ -148,3 +148,76 @@ jobs:
         run: cargo test -p russh --no-default-features --features symcrypt --all-targets
         env:
           RUST_BACKTRACE: 1
+
+  # A crate outside the workspace that depends on russh the way a downstream user does:
+  # `default-features = false, features = ["symcrypt"]`, resolved from scratch (the lock file is not
+  # committed). Its dependency graph must pass the ban check, it prints `Preferred::default()`, and
+  # on Linux it runs a command on a stock OpenSSH server with an ECDSA P-256 host key and an RSA
+  # 3072 user key.
+  consumer:
+    name: SymCrypt consumer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSH
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client openssh-server
+          sudo mkdir -p /run/sshd
+
+      # The consumer crate is its own workspace, so its executable is built in
+      # ci/symcrypt-consumer/target.
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
+        with:
+          copy-dll-to: ci/symcrypt-consumer/target/debug
+
+      - name: Check the dependency graph
+        shell: bash
+        run: ci/symcrypt-ban-check.sh --manifest-path ci/symcrypt-consumer/Cargo.toml -p symcrypt-consumer
+
+      - name: Build
+        run: cargo build --manifest-path ci/symcrypt-consumer/Cargo.toml
+
+      - name: Print the default algorithms
+        run: cargo run --manifest-path ci/symcrypt-consumer/Cargo.toml
+
+      # An unprivileged sshd, which can only log in the user running it.
+      - name: Run a command on a local OpenSSH server
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/symcrypt-consumer-sshd"
+          mkdir -p "$dir"
+          ssh-keygen -q -t ecdsa -b 256 -N "" -C "" -f "$dir/host_key"
+          ssh-keygen -q -t rsa -b 3072 -N "" -C "" -f "$dir/user_key"
+          cp "$dir/user_key.pub" "$dir/authorized_keys"
+          port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          cat > "$dir/sshd_config" <<EOF
+          ListenAddress 127.0.0.1
+          Port $port
+          HostKey $dir/host_key
+          AuthorizedKeysFile $dir/authorized_keys
+          PidFile $dir/sshd.pid
+          UsePAM no
+          StrictModes no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          EOF
+          trap 'if [ -f "$dir/sshd.pid" ]; then kill "$(cat "$dir/sshd.pid")" || true; fi; echo "----- sshd log -----"; cat "$dir/sshd.log" || true' EXIT
+          ssh -V
+          /usr/sbin/sshd -f "$dir/sshd_config" -E "$dir/sshd.log"
+          for _ in $(seq 100); do
+            if grep -q "Server listening" "$dir/sshd.log"; then break; fi
+            sleep 0.1
+          done
+          output="$(ci/symcrypt-consumer/target/debug/symcrypt-consumer 127.0.0.1 "$port" "$(id -un)" "$dir/user_key" "$dir/host_key.pub" echo hello)"
+          echo "output: $output"
+          test "$output" = hello

@@ -56,9 +56,16 @@
 //! * [`check_cases`] runs any list of cases and panics on failure, after
 //!   printing a summary. [`run_cases`] and [`run_case`] return [`Outcome`]s
 //!   instead, and [`report`] prints and checks them.
+//! * [`check_refused`] is the opposite check, for algorithms the crypto
+//!   backend lacks: sshd offers the case's algorithm of one kind, and the
+//!   key exchange must fail with no common algorithm of that kind, both with
+//!   a client restricted to the case and with the default algorithms.
+//!   [`check_no_common`] does that check for one client and any sshd.
 //! * [`Case`] is one combination of host key, user key, and (optionally)
 //!   kex, cipher and MAC. [`Case::sshd`] returns the matching server
 //!   configuration and [`Case::preferred`] the matching client [`Preferred`].
+//!   [`Case::with_user_key_format`] makes the client load the user key from
+//!   a PKCS#8 or PEM copy instead of the OpenSSH file.
 //! * [`Sshd::builder`] → [`SshdBuilder::start`] → [`Sshd`] is a running
 //!   sshd for custom scenarios. [`Sshd::connect`] returns a [`Client`] with
 //!   [`Client::authenticate`], [`Client::negotiated`], [`Client::exec`],
@@ -80,7 +87,7 @@
 //! | `cipher`     | `Ciphers`                         | `Preferred::cipher`                              |
 //! | `mac`        | `MACs`                            | `Preferred::mac`                                 |
 //! | `host_key`   | `HostKey` + `HostKeyAlgorithms`   | `Preferred::key`                                 |
-//! | `user_key`   | `AuthorizedKeysFile` + `PubkeyAcceptedAlgorithms` | key + RSA hash given to `authenticate_publickey` |
+//! | `user_key`   | `AuthorizedKeysFile` + `PubkeyAcceptedAlgorithms` | key (from a `user_key_format` file) + RSA hash given to `authenticate_publickey` |
 //!
 //! A `kex`, `cipher` or `mac` of `None` leaves both sides at their defaults.
 //! Host and user keys are always forced. Their default, ECDSA P-256, is
@@ -270,7 +277,7 @@ pub fn skip(reason: &str) {
 }
 
 /// Writes straight to the process's stderr, bypassing libtest's capture.
-fn log_line(message: &str) {
+pub fn log_line(message: &str) {
     let _ = writeln!(std::io::stderr().lock(), "[openssh-interop] {message}");
 }
 
@@ -507,6 +514,45 @@ impl fmt::Display for KeyAlg {
         } else {
             f.write_str(&self.name())
         }
+    }
+}
+
+/// A private key file format `ssh-keygen` writes. See
+/// [`Case::with_user_key_format`] and [`Sshd::user_key_file`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyFormat {
+    /// `-----BEGIN OPENSSH PRIVATE KEY-----`, what `ssh-keygen` generates.
+    #[default]
+    OpenSsh,
+    /// PKCS#8 (`ssh-keygen -m PKCS8`): `-----BEGIN PRIVATE KEY-----`.
+    Pkcs8,
+    /// `ssh-keygen -m PEM`: SEC1 for ECDSA keys (`-----BEGIN EC PRIVATE
+    /// KEY-----`) and PKCS#1 for RSA keys (`-----BEGIN RSA PRIVATE KEY-----`).
+    Pem,
+}
+
+impl KeyFormat {
+    /// The `ssh-keygen -m` format and the PEM label of a `key_type` key in
+    /// this format, or `None` for the OpenSSH format.
+    fn keygen_format(self, key_type: KeyType) -> Option<(&'static str, &'static str)> {
+        match self {
+            KeyFormat::OpenSsh => None,
+            KeyFormat::Pkcs8 => Some(("PKCS8", "PRIVATE KEY")),
+            KeyFormat::Pem => Some(match key_type {
+                KeyType::Rsa2048 | KeyType::Rsa3072 => ("PEM", "RSA PRIVATE KEY"),
+                _ => ("PEM", "EC PRIVATE KEY"),
+            }),
+        }
+    }
+}
+
+impl fmt::Display for KeyFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            KeyFormat::OpenSsh => "OpenSSH",
+            KeyFormat::Pkcs8 => "PKCS#8",
+            KeyFormat::Pem => "PEM",
+        })
     }
 }
 
@@ -1016,6 +1062,35 @@ impl Sshd {
         load_user_key(&self.user_key_path, rsa_hash)
     }
 
+    /// The private key file of the user key in `format`: the generated file,
+    /// or a copy rewritten by `ssh-keygen -p -m PKCS8|PEM`.
+    pub fn user_key_file(&self, format: KeyFormat) -> anyhow::Result<PathBuf> {
+        let Some((keygen_format, label)) = format.keygen_format(self.user_key) else {
+            return Ok(self.user_key_path.clone());
+        };
+        let path = self.root.join(format!("user_key.{keygen_format}"));
+        fs::copy(&self.user_key_path, &path).context("copying the user key")?;
+        let output = Command::new(&self.openssh.ssh_keygen)
+            .args(["-q", "-p", "-P", "", "-N", "", "-m", keygen_format, "-f"])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("running {}", self.openssh.ssh_keygen.display()))?;
+        ensure!(
+            output.status.success(),
+            "ssh-keygen -p -m {keygen_format} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let text = fs::read_to_string(&path).context("reading the converted user key")?;
+        ensure!(
+            text.starts_with(&format!("-----BEGIN {label}-----")),
+            "ssh-keygen -p -m {keygen_format} wrote {:?}",
+            text.lines().next().unwrap_or_default()
+        );
+        Ok(path)
+    }
+
     /// The generated `sshd_config`.
     pub fn config(&self) -> &str {
         &self.config
@@ -1380,6 +1455,8 @@ pub struct Case {
     pub host_key: KeyAlg,
     /// User key and the algorithm it signs with.
     pub user_key: KeyAlg,
+    /// The format of the user key file the client loads.
+    pub user_key_format: KeyFormat,
     pub kex: Option<kex::Name>,
     pub cipher: Option<cipher::Name>,
     pub mac: Option<mac::Name>,
@@ -1393,6 +1470,7 @@ impl Default for Case {
         Case {
             host_key: KeyAlg::ECDSA_P256,
             user_key: KeyAlg::ECDSA_P256,
+            user_key_format: KeyFormat::OpenSsh,
             kex: None,
             cipher: None,
             mac: None,
@@ -1409,6 +1487,13 @@ impl Case {
 
     pub fn with_user_key(mut self, user_key: KeyAlg) -> Self {
         self.user_key = user_key;
+        self
+    }
+
+    /// Makes the client load the user key from a copy in `format` (see
+    /// [`Sshd::user_key_file`]).
+    pub fn with_user_key_format(mut self, format: KeyFormat) -> Self {
+        self.user_key_format = format;
         self
     }
 
@@ -1551,8 +1636,10 @@ impl Case {
 
     /// The client side of [`run_case`].
     pub async fn run_client(&self, sshd: &Sshd) -> anyhow::Result<()> {
+        let user_key = sshd.user_key_file(self.user_key_format)?;
+        let user_key = load_user_key(&user_key, self.user_key.rsa_hash)?;
         let mut client = sshd.connect(self.preferred()).await?;
-        client.authenticate(self.user_key.rsa_hash).await?;
+        client.authenticate_with(user_key).await?;
         self.check_negotiated(client.negotiated().as_ref())?;
         client.check_echo().await?;
         if self.round_trip > 0 {
@@ -1573,7 +1660,11 @@ impl fmt::Display for Case {
         if let Some(mac) = self.mac {
             write!(f, "mac={} ", mac.as_ref())?;
         }
-        write!(f, "host-key={} user-key={}", self.host_key, self.user_key)
+        write!(f, "host-key={} user-key={}", self.host_key, self.user_key)?;
+        if self.user_key_format != KeyFormat::OpenSsh {
+            write!(f, " ({})", self.user_key_format)?;
+        }
+        Ok(())
     }
 }
 
@@ -1593,6 +1684,15 @@ pub enum Outcome {
 /// disconnects. Never panics, except through [`available`] when OpenSSH is
 /// missing and [`REQUIRE_ENV`] is set.
 pub async fn run_case(case: &Case) -> Outcome {
+    run_with_sshd(case, async |sshd| case.run_client(sshd).await).await
+}
+
+/// Starts the sshd of `case` and runs `client` against it, within
+/// [`CASE_TIMEOUT`].
+async fn run_with_sshd(
+    case: &Case,
+    client: impl AsyncFnOnce(&Sshd) -> anyhow::Result<()>,
+) -> Outcome {
     let _ = env_logger::try_init();
     let Some(openssh) = available() else {
         return Outcome::Skipped("OpenSSH is not available".into());
@@ -1605,7 +1705,7 @@ pub async fn run_case(case: &Case) -> Outcome {
         Ok(sshd) => sshd,
         Err(error) => return Outcome::Failed(format!("starting sshd failed: {error:#}")),
     };
-    match timeout(CASE_TIMEOUT, case.run_client(&sshd)).await {
+    match timeout(CASE_TIMEOUT, client(&sshd)).await {
         Ok(Ok(())) => Outcome::Passed(started.elapsed()),
         Ok(Err(error)) => Outcome::Failed(format!("{error:#}\n{}", sshd.diagnostics())),
         Err(_) => Outcome::Failed(format!(
@@ -1618,6 +1718,19 @@ pub async fn run_case(case: &Case) -> Outcome {
 /// Runs cases concurrently (see [`JOBS_ENV`]) and returns their outcomes
 /// in order. If OpenSSH is not [`available`], all of them are skipped.
 pub async fn run_cases(cases: impl IntoIterator<Item = Case>) -> Vec<(Case, Outcome)> {
+    run_concurrently(cases, |case| async move { run_case(&case).await }).await
+}
+
+/// Runs `run` on each case concurrently (see [`JOBS_ENV`]) and returns the
+/// outcomes in order. If OpenSSH is not [`available`], all of them are
+/// skipped.
+async fn run_concurrently<F>(
+    cases: impl IntoIterator<Item = Case>,
+    run: impl Fn(Case) -> F,
+) -> Vec<(Case, Outcome)>
+where
+    F: Future<Output = Outcome> + Send + 'static,
+{
     let cases: Vec<Case> = cases.into_iter().collect();
     if available().is_none() {
         let reason = || Outcome::Skipped("OpenSSH is not available".into());
@@ -1629,9 +1742,10 @@ pub async fn run_cases(cases: impl IntoIterator<Item = Case>) -> Vec<(Case, Outc
         .cloned()
         .map(|case| {
             let jobs = jobs.clone();
+            let running = run(case);
             tokio::spawn(async move {
                 let _permit = jobs.acquire_owned().await;
-                run_case(&case).await
+                running.await
             })
         })
         .collect();
@@ -1758,4 +1872,93 @@ pub async fn check_user_keys(base: Case, algorithms: &[KeyAlg]) {
         .iter()
         .map(|&user_key| base.clone().with_user_key(user_key));
     check_cases("user keys", cases).await;
+}
+
+// ---------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------
+
+/// The kind of algorithm [`check_refused`] and [`check_no_common`] expect
+/// no common algorithm of, named like russh's `AlgorithmKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    Kex,
+    /// The host key algorithm.
+    Key,
+    Cipher,
+    Mac,
+}
+
+impl Refused {
+    /// The algorithm of this kind that `case` forces.
+    fn forced_by(self, case: &Case) -> Option<String> {
+        match self {
+            Refused::Kex => case.kex.map(|kex| kex.as_ref().to_owned()),
+            Refused::Key => Some(case.host_key.name()),
+            Refused::Cipher => case.cipher.map(|cipher| cipher.as_ref().to_owned()),
+            Refused::Mac => case.mac.map(|mac| mac.as_ref().to_owned()),
+        }
+    }
+}
+
+/// Checks that the client refuses algorithms the crypto backend does not
+/// implement, and [`report`]s the results under `name`. For each case, an
+/// sshd restricted to the case's algorithms offers the case's `refused`
+/// algorithm, and the key exchange must fail for lack of a common algorithm
+/// of that kind (see [`check_no_common`]) both for a client restricted to
+/// the case's algorithms, which must then offer none of that kind, and for a
+/// client with the default algorithms.
+pub async fn check_refused(name: &str, refused: Refused, cases: impl IntoIterator<Item = Case>) {
+    let results = run_concurrently(cases, move |case| async move {
+        let Some(algorithm) = refused.forced_by(&case) else {
+            return Outcome::Failed(format!("the case forces no {refused:?} algorithm"));
+        };
+        run_with_sshd(&case, async |sshd| {
+            let error = check_no_common(sshd, case.preferred(), refused, &algorithm)
+                .await
+                .context("with a client restricted to the case's algorithms")?;
+            ensure!(
+                error.contains(" - ours: [], "),
+                "the client restricted to the case's algorithms offered some: {error}"
+            );
+            check_no_common(sshd, Preferred::default(), refused, &algorithm)
+                .await
+                .context("with a client with the default algorithms")?;
+            Ok(())
+        })
+        .await
+    })
+    .await;
+    report(name, &results);
+}
+
+/// Connects a client offering `preferred` to `sshd`, which offers
+/// `algorithm`, and checks that the key exchange fails because they have no
+/// `refused` algorithm in common. Returns and logs russh's error message.
+pub async fn check_no_common(
+    sshd: &Sshd,
+    preferred: Preferred,
+    refused: Refused,
+    algorithm: &str,
+) -> anyhow::Result<String> {
+    let error = match sshd.connect(preferred).await {
+        Ok(client) => {
+            let _ = client.disconnect().await;
+            bail!("the key exchange succeeded, although sshd offers {algorithm}");
+        }
+        Err(error) => format!("{error:#}"),
+    };
+    let offered = error
+        .split_once(", theirs: ")
+        .is_some_and(|(_, theirs)| theirs.contains(&format!("{algorithm:?}")));
+    ensure!(
+        error.contains(&format!("No common {refused:?} algorithm - ours: ")) && offered,
+        "the key exchange failed with {error:?}, not for lack of a common {refused:?} \
+         algorithm with sshd's {algorithm}"
+    );
+    log_line(&format!(
+        "{}: refused, as expected: {error}",
+        env!("CARGO_CRATE_NAME")
+    ));
+    Ok(error)
 }
