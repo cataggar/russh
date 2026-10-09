@@ -4,27 +4,27 @@
 //! kex.  This test ensures that strict_kex sequence number checking is
 //! only applied to the initial key exchange, not to rekey operations.
 
+mod common;
+
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use common::test_keys;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::*;
-use ssh_key::PrivateKey;
 
 #[tokio::test]
 async fn test_rekey_with_strict_kex() {
     let _ = env_logger::try_init();
 
     // Generate keys
-    let client_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+    let client_key = test_keys::key(1);
 
     // Server config with strict kex enabled
     let mut server_config = server::Config::default();
     server_config.inactivity_timeout = None;
     server_config.auth_rejection_time = std::time::Duration::from_secs(3);
-    server_config
-        .keys
-        .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+    server_config.keys.push(test_keys::key(0));
 
     // Enable strict kex by including the strict kex extension
     server_config.preferred = {

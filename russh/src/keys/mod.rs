@@ -23,6 +23,7 @@
 //!
 //! const PKCS8_ENCRYPTED: &'static str = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIGjMF8GCSqGSIb3DQEFDTBSMDEGCSqGSIb3DQEFDDAkBBAWQiUHKoocuxfoZ/hF\nYTjkAgIIADAMBggqhkiG9w0CCQUAMB0GCWCGSAFlAwQBKgQQ83d1d5/S2wz475uC\nCUrE7QRAvdVpD5e3zKH/MZjilWrMOm6cyI1LKBCssLztPyvOALtroLAPlp7WYWfu\n9Sncmm7u14n2lia7r1r5I3VBsVuH0g==\n-----END ENCRYPTED PRIVATE KEY-----\n";
 //!
+//! # #[cfg(not(russh_backend = "symcrypt"))]
 //! #[cfg(unix)]
 //! fn main() {
 //!    env_logger::try_init().unwrap_or(());
@@ -53,6 +54,9 @@
 //!
 //! #[cfg(not(unix))]
 //! fn main() {}
+//! # // The SymCrypt backend does not decrypt private keys.
+//! # #[cfg(all(unix, russh_backend = "symcrypt"))]
+//! # fn main() {}
 //!
 //! ```
 
@@ -855,8 +859,11 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
             ssh_key::public::KeyData::Ed25519 { .. } => {
                 let sig = &b[b.len() - 64..];
                 let sig = ssh_key::Signature::new(key.algorithm(), sig)?;
-                use signature::Verifier;
-                assert!(Verifier::verify(public, a, &sig).is_ok());
+                // The SymCrypt backend has no Ed25519 to verify it with.
+                if cfg!(not(russh_backend = "symcrypt")) {
+                    use signature::Verifier;
+                    assert!(Verifier::verify(public, a, &sig).is_ok());
+                }
             }
             ssh_key::public::KeyData::Ecdsa { .. } => {}
             _ => {}
@@ -1053,7 +1060,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         builder.key_id("test-cert").unwrap();
         builder.cert_type(certificate::CertType::User).unwrap();
         builder.valid_principal("testuser").unwrap();
-        builder.sign(ca_key).unwrap()
+        crate::tests::test_keys::certify(builder, ca_key)
     }
 
     #[tokio::test]
@@ -1068,9 +1075,9 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         let (mut agent, agent_path, dir) = spawn_agent().await.unwrap();
 
         // Create a CA key and user key
-        let ca_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let user_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let plain_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let ca_key = crate::tests::test_keys::key(0);
+        let user_key = crate::tests::test_keys::key(1);
+        let plain_key = crate::tests::test_keys::key(2);
 
         // Create a certificate
         let cert = create_test_cert(&ca_key, &user_key);
@@ -1194,8 +1201,8 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         let (mut agent, agent_path, dir) = spawn_agent().await.unwrap();
 
         // Create a CA key and user key
-        let ca_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let user_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let ca_key = crate::tests::test_keys::key(0);
+        let user_key = crate::tests::test_keys::key(1);
 
         // Create a certificate
         let cert = create_test_cert(&ca_key, &user_key);
@@ -1241,7 +1248,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         let buf = data_to_sign.to_vec();
         let len = buf.len();
 
-        // Sign using the certificate (None for hash_alg since Ed25519 doesn't need it)
+        // Sign using the certificate (None for hash_alg: the key is not RSA)
         let signed_buf = client.sign_request(&cert.into(), None, buf).await.unwrap();
 
         // Verify the signature is appended to the original data
@@ -1269,8 +1276,8 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         let (mut agent, agent_path, _dir) = spawn_agent().await.unwrap();
 
         // Create a CA key and user key, but DON'T add them to the agent
-        let ca_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let user_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let ca_key = crate::tests::test_keys::key(0);
+        let user_key = crate::tests::test_keys::key(1);
 
         // Create a certificate
         let cert = create_test_cert(&ca_key, &user_key);
@@ -1321,7 +1328,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         let (mut agent, agent_path, _dir) = spawn_agent().await.unwrap();
 
         // Create a key but DON'T add it to the agent
-        let key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let key = crate::tests::test_keys::key(0);
 
         // Connect to agent WITHOUT adding any keys
         let stream = tokio::net::UnixStream::connect(&agent_path).await.unwrap();

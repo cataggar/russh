@@ -1,15 +1,17 @@
+mod common;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use common::test_keys;
 use rand::Rng;
 use russh::Channel;
 use russh::client::{self, ChannelOpenHandle, Msg, Session};
 use russh::keys::PublicKeyOrCertificate;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::server::{self, Auth, Server as _};
-use ssh_key::PrivateKey;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -30,7 +32,7 @@ async fn test_contention() -> Result<(), anyhow::Error> {
     }
 
     let config = Arc::new(client::Config::default());
-    let key = Arc::new(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+    let key = Arc::new(test_keys::key(1));
     let mut data = vec![0u8; DATA_SIZE];
     rand::rng().fill_bytes(&mut data);
 
@@ -98,7 +100,7 @@ struct Server(SocketAddr);
 impl Server {
     async fn run(ssh_addr: SocketAddr, tcp_addr: SocketAddr) {
         let config = Arc::new(server::Config {
-            keys: vec![PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap()],
+            keys: vec![test_keys::key(0)],
             preferred: russh::Preferred {
                 cipher: std::borrow::Cow::Borrowed(&[russh::cipher::CHACHA20_POLY1305]),
                 ..Default::default()

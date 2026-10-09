@@ -1,11 +1,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use common::test_keys;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::*;
-use ssh_key::PrivateKey;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 const MAX_CHANNEL_PACKET_SIZE: u32 = 256 * 1024;
@@ -28,16 +30,14 @@ async fn test_aes256_gcm_with_zlib_allows_full_256k_channel_packet() {
 async fn run_max_channel_packet_size_test(compression: Option<&'static [compression::Name]>) {
     let _ = env_logger::try_init();
 
-    let client_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+    let client_key = test_keys::key(1);
 
     let mut server_config = server::Config::default();
     server_config.inactivity_timeout = None;
     server_config.auth_rejection_time = std::time::Duration::from_secs(3);
     server_config.maximum_packet_size = MAX_CHANNEL_PACKET_SIZE;
     server_config.window_size = MAX_CHANNEL_PACKET_SIZE * 4;
-    server_config
-        .keys
-        .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+    server_config.keys.push(test_keys::key(0));
     server_config.preferred = {
         let mut preferred = Preferred::default();
         preferred.cipher = Cow::Borrowed(&[cipher::AES_256_GCM]);

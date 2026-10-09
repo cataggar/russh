@@ -181,6 +181,7 @@ mod tests {
         raw_auth_request_signal, raw_channel_request_signal, raw_service_request_signal,
         read_packet, timeout,
     };
+    use crate::tests::test_keys;
 
     #[tokio::test]
     async fn auth_attempts_capped_at_max() {
@@ -235,7 +236,7 @@ mod tests {
             }
         }
 
-        let private = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let private = test_keys::key(0);
         let public = private.public_key().clone();
 
         let mut session = test_auth_session();
@@ -449,10 +450,8 @@ mod tests {
             }
         }
 
-        let pk_ok_private =
-            PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let signed_private =
-            PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let pk_ok_private = test_keys::key(0);
+        let signed_private = test_keys::key(1);
         let pk_ok_key = pk_ok_private.public_key().clone();
         let signed_key = signed_private.public_key().clone();
 
@@ -683,7 +682,7 @@ mod tests {
         config.preferred = Preferred {
             host_key_certificates: Cow::Borrowed(&[]),
             kex: Cow::Owned(vec![KEX_NONE]),
-            key: Cow::Owned(vec![ssh_key::Algorithm::Ed25519]),
+            key: Cow::Owned(vec![test_keys::ALGORITHM]),
             cipher: Cow::Owned(vec![cipher::NONE]),
             mac: Cow::Owned(vec![mac::NONE]),
             compression: Cow::Owned(vec![compression::NONE]),

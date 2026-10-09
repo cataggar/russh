@@ -6,3 +6,4 @@
 #![allow(dead_code)]
 
 pub mod openssh;
+pub mod test_keys;

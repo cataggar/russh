@@ -1,6 +1,8 @@
 //! Regression test for <https://github.com/Eugeny/russh/issues/774>
 #![cfg(unix)]
 
+mod common;
+
 use std::io::Write;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
@@ -10,6 +12,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::test_keys;
 use russh::keys::ssh_key::{self, LineEnding};
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, client, server};
@@ -79,9 +82,7 @@ async fn reply_is_channel_scoped(mut channel: russh::Channel<client::Msg>) -> bo
 impl Server {
     async fn spawn_and_connect() -> (JoinHandle<()>, client::Handle<Client>) {
         let mut config = server::Config::default();
-        config
-            .keys
-            .push(PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap());
+        config.keys.push(test_keys::key(0));
         let config = Arc::new(config);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -94,7 +95,7 @@ impl Server {
         let mut handle = client::connect(Arc::new(client::Config::default()), addr, Client)
             .await
             .unwrap();
-        let key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let key = test_keys::key(1);
         handle
             .authenticate_publickey("user", PrivateKeyWithHashAlg::new(Arc::new(key), None))
             .await
@@ -115,8 +116,8 @@ struct Sshd {
 
 impl Sshd {
     async fn spawn(dir: &Path) -> Self {
-        let host_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let client_key = PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
+        let host_key = test_keys::key(0);
+        let client_key = test_keys::key(1);
 
         let host_path = dir.join("host_key");
         std::fs::write(

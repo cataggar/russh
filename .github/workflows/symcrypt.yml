@@ -80,9 +80,11 @@ jobs:
           # copy next to the executable rather than C:\Windows\System32\symcrypt.dll.
           SYMCRYPT_SMOKE_EXPECTED_LIBRARY: ${{ runner.os == 'Windows' && format('{0}\ci\symcrypt-smoke\target\debug\symcrypt.dll', github.workspace) || format('{0}/libsymcrypt.so.{1}', steps.symcrypt.outputs.lib-dir, steps.symcrypt.outputs.version) }}
 
-  # russh with SymCrypt as its only crypto backend. The test filters pick up new tests without
-  # editing this workflow: unit tests under `crypto::symcrypt` (russh/src/crypto/symcrypt/) and
-  # integration tests named russh/tests/symcrypt_*.rs.
+  # russh with SymCrypt as its only crypto backend, through its whole test suite. With this
+  # backend, tests that use keys only incidentally load the ECDSA and RSA keys of
+  # russh/tests/data/test-keys instead of generating Ed25519 keys, and checks of what SymCrypt
+  # does not implement (Ed25519 signatures, DH group exchange, private key decryption) are
+  # skipped.
   russh-symcrypt-only:
     name: russh (symcrypt only, ${{ matrix.os }})
     strategy:
@@ -101,12 +103,15 @@ jobs:
           sudo apt-get install -y openssh-client openssh-server
           sudo mkdir -p /run/sshd
 
-      # On Windows, put the pinned symcrypt.dll next to the test executables so
-      # they load it instead of C:\Windows\System32\symcrypt.dll.
+      # On Windows, put the pinned symcrypt.dll next to the test executables and
+      # the examples (which `--all-targets` runs as tests) so they load it instead
+      # of C:\Windows\System32\symcrypt.dll.
       - name: Set up SymCrypt
         uses: ./.github/actions/setup-symcrypt
         with:
-          copy-dll-to: target/debug/deps
+          copy-dll-to: |
+            target/debug/deps
+            target/debug/examples
 
       - name: Build
         run: cargo build -p russh --no-default-features --features symcrypt
@@ -126,15 +131,20 @@ jobs:
       - name: Check the cipher benchmarks
         run: cargo check -p russh --no-default-features --features symcrypt,_bench --bench ciphers
 
-      - name: Unit tests (crypto::symcrypt)
-        run: cargo test -p russh --no-default-features --features symcrypt --lib -- crypto::symcrypt
+      # Unit, integration and doc tests; the examples are only built.
+      - name: Tests
+        if: runner.os == 'Linux'
+        run: cargo test -p russh --no-default-features --features symcrypt
         env:
           RUST_BACKTRACE: 1
+          # Fail rather than skip the OpenSSH interop checks if sshd can't be started.
+          RUSSH_REQUIRE_SSHD: "1"
 
-      - name: Integration tests (tests/symcrypt_*.rs)
-        run: cargo test -p russh --no-default-features --features symcrypt --test 'symcrypt_*'
+      # `--all-targets` leaves out the doctests: rustdoc builds them in temporary directories, where
+      # they would load the System32 symcrypt.dll. The OpenSSH interop checks need a Unix sshd, so
+      # they are skipped.
+      - name: Tests (without doctests)
+        if: runner.os == 'Windows'
+        run: cargo test -p russh --no-default-features --features symcrypt --all-targets
         env:
           RUST_BACKTRACE: 1
-          # Fail rather than skip the OpenSSH interop checks if sshd can't be
-          # started. The harness needs a Unix sshd, so Windows only skips them.
-          RUSSH_REQUIRE_SSHD: ${{ runner.os == 'Linux' && '1' || '0' }}
