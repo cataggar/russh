@@ -246,7 +246,9 @@ pub use algorithm::AlgorithmExt;
 
 use crate::keys::key::PrivateKeyWithHashAlg;
 
-#[cfg(all(test, not(feature = "rsa")))]
+// The symcrypt backend signs RSA without the `rsa` feature
+// (crypto/symcrypt/sign.rs).
+#[cfg(all(test, not(feature = "rsa"), not(russh_backend = "symcrypt")))]
 mod tests {
     use std::sync::Arc;
 

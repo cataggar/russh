@@ -14,7 +14,7 @@
 //! |---|---|---|
 //! | `hash`: SHA-1, SHA-2 | `hash.rs` | #2 |
 //! | `kex`: X25519, ECDH P-256/P-384, ML-KEM-768 hybrid (no P-521, no finite-field DH) | `kex.rs` | #2 |
-//! | `sign`: host key, certificate and user signatures | `sign.rs` | #3 |
+//! | `sign`: ECDSA P-256/P-384, RSA SHA-2 host key, certificate and user signatures (no Ed25519, P-521, SHA-1 RSA) | `sign.rs` | done |
 //! | `cipher`: AES-GCM, ChaCha20-Poly1305, AES-CTR | `cipher.rs` | done |
 //! | `mac`: HMAC-SHA2 | `mac.rs` | done |
 //! | `rng`: protocol randomness | `rng.rs` | done |
@@ -24,7 +24,7 @@
 //! their non-AEAD categories) says so with a `TODO(#issue)` comment. With
 //! those re-exports this backend already interoperates with OpenSSH using
 //! its own ciphers and MACs, `curve25519-sha256`/`mlkem768x25519-sha256`
-//! and Ed25519/ECDSA keys (RSA too with the `rsa` feature).
+//! and ECDSA P-256/P-384 or RSA (`rsa-sha2-256`/`rsa-sha2-512`) keys.
 //!
 //! # Swapping a category
 //!

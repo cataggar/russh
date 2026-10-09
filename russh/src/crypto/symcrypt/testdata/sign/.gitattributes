@@ -1,0 +1,2 @@
+# Keys and certificates are parsed byte for byte: keep LF line endings.
+* text eol=lf

@@ -495,7 +495,10 @@ mod tests {
     }
 
     /// `verify_certificate` accepts exactly what `ssh-key` accepts.
+    // The symcrypt backend has no Ed25519; its certificate tests are in
+    // symcrypt/sign.rs.
     #[test]
+    #[cfg(not(russh_backend = "symcrypt"))]
     #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
     fn verify_certificate_matches_ssh_key() {
         use ssh_key::certificate::{Builder, CertType};

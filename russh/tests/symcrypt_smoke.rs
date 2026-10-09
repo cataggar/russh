@@ -45,12 +45,14 @@ fn rng_works() {
 }
 
 /// The client connects to OpenSSH with the default algorithms, for each
-/// host key type (RSA needs the `rsa` feature until SymCrypt does RSA).
+/// host key type the backend implements.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openssh_with_default_algorithms() {
-    let mut host_keys = vec![KeyAlg::ED25519, KeyAlg::ECDSA_P256];
-    if cfg!(feature = "rsa") {
-        host_keys.extend([KeyAlg::RSA_SHA2_256, KeyAlg::RSA_SHA2_512]);
-    }
+    let host_keys = [
+        KeyAlg::ECDSA_P256,
+        KeyAlg::ECDSA_P384,
+        KeyAlg::RSA_SHA2_256,
+        KeyAlg::RSA_SHA2_512,
+    ];
     openssh::check_host_keys(Case::default(), &host_keys).await;
 }
