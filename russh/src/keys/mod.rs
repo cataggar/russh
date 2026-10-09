@@ -276,6 +276,7 @@ mod test {
     use crate::keys::agent::AgentIdentity;
     use crate::keys::key::PublicKeyExt;
 
+    #[cfg(not(russh_backend = "symcrypt"))]
     const ED25519_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jYmMAAAAGYmNyeXB0AAAAGAAAABDLGyfA39
 J2FcJygtYqi5ISAAAAEAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIN+Wjn4+4Fcvl2Jl
@@ -285,7 +286,13 @@ e+JpiSq66Z6GIt0801skPh20jxOO3F52SoX1IeO5D5PXfZrfSZlw6S8c7bwyp2FHxDewRx
 7/wNsnDM0T7nLv/Q==
 -----END OPENSSH PRIVATE KEY-----";
 
+    // The symcrypt backend does not decrypt private keys, so its tests use an
+    // unencrypted key instead of the one above.
+    #[cfg(russh_backend = "symcrypt")]
+    const ED25519_KEY: &str = include_str!("../../tests/data/keys/ed25519");
+
     // password is 'test'
+    #[cfg(not(russh_backend = "symcrypt"))]
     const ED25519_AESCTR_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABD1phlku5
 A2G7Q9iP+DcOc9AAAAEAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIHeLC1lWiCYrXsf/
@@ -330,6 +337,7 @@ QR+u0AypRPmzHnOPAAAAEXJvb3RAMTQwOTExNTQ5NDBkAQ==
         decode_secret_key(ED25519_KEY, Some("blabla")).unwrap();
     }
 
+    #[cfg(not(russh_backend = "symcrypt"))]
     #[test]
     fn test_decode_ed25519_aesctr_secret_key() {
         env_logger::try_init().unwrap_or(());
@@ -337,10 +345,13 @@ QR+u0AypRPmzHnOPAAAAEXJvb3RAMTQwOTExNTQ5NDBkAQ==
     }
 
     // Key from RFC 8410 Section 10.3. This is a key using PrivateKeyInfo structure.
+    // The symcrypt backend cannot compute the missing Ed25519 public key.
+    #[cfg(not(russh_backend = "symcrypt"))]
     const RFC8410_ED25519_PRIVATE_ONLY_KEY: &str = "-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC
 -----END PRIVATE KEY-----";
 
+    #[cfg(not(russh_backend = "symcrypt"))]
     #[test]
     fn test_decode_rfc8410_ed25519_private_only_key() {
         env_logger::try_init().unwrap_or(());
@@ -650,7 +661,8 @@ Ow==
         assert_eq!(original_key_bytes, encoded_key_bytes);
     }
 
-    #[cfg(feature = "rsa")]
+    // The symcrypt backend does not decrypt private keys.
+    #[cfg(all(feature = "rsa", not(russh_backend = "symcrypt")))]
     #[test]
     fn test_o01eg() {
         env_logger::try_init().unwrap_or(());
@@ -727,7 +739,7 @@ xV/JrzLAwPoKk3bkqys3bUmgo6DxVC/6RmMwPQ0rmpw78kOgEej90g==
         decode_secret_key(PKCS8_RSA, Some("blabla")).unwrap();
     }
 
-    #[cfg(feature = "rsa")]
+    #[cfg(all(feature = "rsa", not(russh_backend = "symcrypt")))]
     const PKCS8_ENCRYPTED: &str = "-----BEGIN ENCRYPTED PRIVATE KEY-----
 MIIFLTBXBgkqhkiG9w0BBQ0wSjApBgkqhkiG9w0BBQwwHAQITo1O0b8YrS0CAggA
 MAwGCCqGSIb3DQIJBQAwHQYJYIZIAWUDBAEqBBBtLH4T1KOfo1GGr7salhR8BIIE
@@ -789,7 +801,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         ssh_key::PublicKey::decode(&key).unwrap();
     }
 
-    #[cfg(feature = "rsa")]
+    #[cfg(all(feature = "rsa", not(russh_backend = "symcrypt")))]
     #[test]
     fn test_pkcs8_encrypted() {
         env_logger::try_init().unwrap_or(());
@@ -859,7 +871,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     }
 
     #[tokio::test]
-    #[cfg(all(unix, feature = "rsa"))]
+    #[cfg(all(unix, feature = "rsa", not(russh_backend = "symcrypt")))]
     async fn test_client_agent_rsa() {
         let key = decode_secret_key(PKCS8_ENCRYPTED, Some("blabla")).unwrap();
         test_client_agent(key).await.expect("ssh-agent test failed")
@@ -873,7 +885,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     }
 
     #[test]
-    #[cfg(all(unix, feature = "rsa"))]
+    #[cfg(all(unix, feature = "rsa", not(russh_backend = "symcrypt")))]
     fn test_agent() {
         env_logger::try_init().unwrap_or(());
         let dir = tempfile::tempdir().unwrap();

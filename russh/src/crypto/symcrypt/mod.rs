@@ -56,6 +56,7 @@
 pub(crate) mod cipher;
 pub(crate) mod hash;
 pub(crate) mod kex;
+pub(crate) mod keys;
 pub(crate) mod mac;
 pub(crate) mod rng;
 pub(crate) mod sign;
