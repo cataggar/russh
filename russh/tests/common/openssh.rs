@@ -408,7 +408,8 @@ impl KeyType {
         }
     }
 
-    fn keygen_args(self) -> [&'static str; 4] {
+    /// The `ssh-keygen` options that generate this key type.
+    pub fn keygen_args(self) -> [&'static str; 4] {
         match self {
             KeyType::Ed25519 => ["-t", "ed25519", "-b", "256"],
             KeyType::EcdsaP256 => ["-t", "ecdsa", "-b", "256"],
