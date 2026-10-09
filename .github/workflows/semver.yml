@@ -11,10 +11,14 @@ env:
 
 jobs:
   Semver:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
 
     steps:
       - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Build (no features enabled)
         run: cargo build --verbose
