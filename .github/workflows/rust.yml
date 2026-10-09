@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# `--all-features` includes the `symcrypt` backend, so the steps that use it are preceded by
+# setup-symcrypt, which provides the native SymCrypt library (and SYMCRYPT_LIB_PATH, which the
+# symcrypt-sys build script requires on Windows). A Windows job that runs symcrypt-linked
+# executables must also pass `copy-dll-to` (see .github/actions/setup-symcrypt/action.yml).
 jobs:
   Build:
     runs-on: ubuntu-24.04
@@ -18,6 +22,9 @@ jobs:
 
       - name: Build (no features enabled)
         run: cargo build --verbose
+
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
 
       - name: Build (all features enabled)
         run: cargo build --verbose --all-features
@@ -35,6 +42,9 @@ jobs:
 
       - name: Build (no features enabled)
         run: cargo build --verbose
+
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
 
       - name: Build (all features enabled)
         run: cargo build --verbose --all-features
@@ -77,6 +87,9 @@ jobs:
       - name: Clippy (no features enabled)
         run: cargo clippy -- -D warnings
 
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
+
       - name: Clippy (all features enabled)
         run: cargo clippy --all-features -- -D warnings
 
@@ -99,6 +112,9 @@ jobs:
         env:
           RUST_BACKTRACE: 1
 
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
+
       - name: Test (all features enabled)
         run: |
           eval `ssh-agent`
@@ -114,6 +130,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@cargo-hack
       - uses: taiki-e/install-action@cargo-minimal-versions
+
+      - name: Set up SymCrypt
+        uses: ./.github/actions/setup-symcrypt
 
       - name: Check with minimal dependency versions
         run: |
