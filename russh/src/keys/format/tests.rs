@@ -1,6 +1,4 @@
-use ssh_key::{Algorithm, PrivateKey};
-
-use crate::keys::pkcs8::{decode_pkcs8, encode_pkcs8_encrypted};
+use ssh_key::Algorithm;
 
 use super::decode_secret_key;
 
@@ -15,8 +13,14 @@ lpQg5vf23Fc9fFrQ9AnQKrb1dgTkoxQ=
     decode_secret_key(key, None).unwrap();
 }
 
+// The symcrypt backend does not encrypt or decrypt private keys.
+#[cfg(not(russh_backend = "symcrypt"))]
 #[test]
 fn test_pkcs8_roundtrip() {
+    use ssh_key::PrivateKey;
+
+    use crate::keys::pkcs8::{decode_pkcs8, encode_pkcs8_encrypted};
+
     let password = b"SomePassword";
     let original_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
 

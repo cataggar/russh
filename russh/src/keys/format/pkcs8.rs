@@ -1,17 +1,32 @@
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryInto;
 
+#[cfg(not(russh_backend = "symcrypt"))]
 use p256::NistP256;
+#[cfg(not(russh_backend = "symcrypt"))]
 use p384::NistP384;
+#[cfg(not(russh_backend = "symcrypt"))]
 use p521::NistP521;
-use pkcs8::{AssociatedOid, EncodePrivateKey, PrivateKeyInfoRef, SecretDocument};
+use pkcs8::PrivateKeyInfoRef;
+#[cfg(not(russh_backend = "symcrypt"))]
+use pkcs8::{AssociatedOid, EncodePrivateKey, SecretDocument};
 use spki::ObjectIdentifier;
 use ssh_key::PrivateKey;
-use ssh_key::private::{EcdsaKeypair, Ed25519Keypair, Ed25519PrivateKey, KeypairData};
+#[cfg(not(russh_backend = "symcrypt"))]
+use ssh_key::private::Ed25519PrivateKey;
+use ssh_key::private::{EcdsaKeypair, Ed25519Keypair, KeypairData};
 
 use crate::keys::Error;
+#[cfg(not(russh_backend = "symcrypt"))]
 use crate::keys::key::safe_rng;
 
+const NIST_P256: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+const NIST_P384: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
+const NIST_P521: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.35");
+#[cfg(russh_backend = "symcrypt")]
+const ED25519: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
+
 /// Decode a PKCS#8-encoded private key (ASN.1 or X9.62)
+#[cfg(not(russh_backend = "symcrypt"))]
 pub fn decode_pkcs8(
     ciphertext: &[u8],
     password: Option<&[u8]>,
@@ -42,6 +57,136 @@ pub fn decode_pkcs8(
     Ok(pkcs8_pki_into_keypair_data(doc.decode_msg::<PrivateKeyInfoRef<'_>>()?)?.try_into()?)
 }
 
+/// Decode a PKCS#8-encoded private key (ASN.1 or X9.62)
+///
+/// The symcrypt backend does not decrypt keys: an encrypted key
+/// (`EncryptedPrivateKeyInfo`) fails with [`Error::UnsupportedKeyType`], and
+/// `password` is ignored.
+#[cfg(russh_backend = "symcrypt")]
+pub fn decode_pkcs8(
+    ciphertext: &[u8],
+    _password: Option<&[u8]>,
+) -> Result<ssh_key::PrivateKey, Error> {
+    use der::Decode;
+
+    if is_encrypted_private_key_info(ciphertext) {
+        return Err(super::encrypted("PKCS#8"));
+    }
+
+    if let Ok(key) = sec1::EcPrivateKey::from_der(ciphertext) {
+        // X9.62 EC private key
+        let Some(curve) = key.parameters.and_then(|x| x.named_curve()) else {
+            return Err(Error::CouldNotReadKey);
+        };
+        let kp = sec1_into_keypair(ecdsa_curve(curve)?, &key)?;
+        return Ok(PrivateKey::new(KeypairData::Ecdsa(kp), "")?);
+    }
+
+    // SEC1 key with full domain parameters (not a named curve OID)
+    if let Ok(kp) = explicit_curve_params::decode_sec1_with_full_domain_params(ciphertext) {
+        return Ok(PrivateKey::new(KeypairData::Ecdsa(kp), "")?);
+    }
+
+    // ASN.1 key (PKCS#8)
+    let pki = PrivateKeyInfoRef::from_der(ciphertext)?;
+    let key_data = match pki.algorithm.oid {
+        pkcs1::ALGORITHM_OID => {
+            KeypairData::Rsa(super::decode_rsa_pkcs1_der(pki.private_key.as_bytes())?)
+        }
+        ED25519 => KeypairData::Ed25519(ed25519_into_keypair(&pki)?),
+        sec1::ALGORITHM_OID => {
+            let curve = ecdsa_curve(pki.algorithm.parameters_oid()?)?;
+            let key = sec1::EcPrivateKey::from_der(pki.private_key.as_bytes())?;
+            KeypairData::Ecdsa(sec1_into_keypair(curve, &key)?)
+        }
+        oid => return Err(Error::UnknownAlgorithm(oid)),
+    };
+    Ok(key_data.try_into()?)
+}
+
+/// Whether `der` is an `EncryptedPrivateKeyInfo` (RFC 5208): the encryption
+/// algorithm and the encrypted key.
+#[cfg(russh_backend = "symcrypt")]
+fn is_encrypted_private_key_info(der: &[u8]) -> bool {
+    use der::asn1::OctetStringRef;
+    use der::{Decode, Reader, SliceReader};
+    use spki::AlgorithmIdentifierRef;
+
+    let Ok(mut reader) = SliceReader::new(der) else {
+        return false;
+    };
+    reader
+        .sequence(|seq| {
+            AlgorithmIdentifierRef::decode(seq)?;
+            <&OctetStringRef>::decode(seq)?;
+            Ok::<_, der::Error>(())
+        })
+        .and_then(|()| reader.finish())
+        .is_ok()
+}
+
+#[cfg(russh_backend = "symcrypt")]
+fn ecdsa_curve(oid: ObjectIdentifier) -> Result<ssh_key::EcdsaCurve, Error> {
+    use ssh_key::EcdsaCurve;
+
+    match oid {
+        NIST_P256 => Ok(EcdsaCurve::NistP256),
+        NIST_P384 => Ok(EcdsaCurve::NistP384),
+        NIST_P521 => Ok(EcdsaCurve::NistP521),
+        oid => Err(Error::UnknownAlgorithm(oid)),
+    }
+}
+
+/// Like the other backends: the curve of `key`, if any, must be `curve`, and
+/// the public key, if any, must be the one of the private key.
+#[cfg(russh_backend = "symcrypt")]
+fn sec1_into_keypair(
+    curve: ssh_key::EcdsaCurve,
+    key: &sec1::EcPrivateKey<'_>,
+) -> Result<EcdsaKeypair, Error> {
+    if let Some(oid) = key.parameters.and_then(|x| x.named_curve())
+        && ecdsa_curve(oid).ok() != Some(curve)
+    {
+        return Err(der::Error::from(der::Tag::ObjectIdentifier.value_error()).into());
+    }
+    crate::crypto::symcrypt::keys::ecdsa_keypair(curve, key.private_key, key.public_key)
+}
+
+/// An RFC 8410 Ed25519 key. Unlike the other backends, the symcrypt backend
+/// needs the public key (PKCS#8 v2): computing it from the seed needs
+/// Ed25519 arithmetic, which SymCrypt does not expose.
+#[cfg(russh_backend = "symcrypt")]
+fn ed25519_into_keypair(pki: &PrivateKeyInfoRef<'_>) -> Result<Ed25519Keypair, Error> {
+    use pkcs8::KeyError;
+    use zeroize::Zeroizing;
+
+    if pki.algorithm.parameters.is_some() {
+        return Err(pkcs8::Error::ParametersMalformed.into());
+    }
+    // An OCTET STRING of 32 bytes in the OCTET STRING.
+    let seed: &[u8; 32] = match pki.private_key.as_bytes() {
+        [0x04, 0x20, rest @ ..] => rest.try_into().map_err(|_| KeyError::Invalid),
+        _ => Err(KeyError::Invalid),
+    }
+    .map_err(pkcs8::Error::from)?;
+    let Some(public) = pki.public_key.and_then(|x| x.as_bytes()) else {
+        return Err(super::unsupported(
+            "Ed25519 PKCS#8 private key without its public key: the symcrypt crypto \
+             backend cannot compute it (convert the key with `ssh-keygen -p`, or to PKCS#8 v2)",
+        ));
+    };
+    let public: &[u8; 32] = public
+        .try_into()
+        .map_err(|_| pkcs8::Error::from(KeyError::Invalid))?;
+    let mut bytes = Zeroizing::new([0; Ed25519Keypair::BYTE_SIZE]);
+    let (private_bytes, public_bytes) = bytes.split_at_mut(seed.len());
+    private_bytes.copy_from_slice(seed);
+    public_bytes.copy_from_slice(public);
+    // Checks the public key while ssh-key's `ed25519` feature is enabled.
+    Ed25519Keypair::from_bytes(&bytes).map_err(|_| Error::KeyIsCorrupt)
+}
+
+#[cfg(not(russh_backend = "symcrypt"))]
 fn pkcs8_pki_into_keypair_data(pki: PrivateKeyInfoRef<'_>) -> Result<KeypairData, Error> {
     // Temporary if {} due to multiple const_oid crate versions
     #[cfg(feature = "rsa")]
@@ -75,6 +220,7 @@ fn pkcs8_pki_into_keypair_data(pki: PrivateKeyInfoRef<'_>) -> Result<KeypairData
     }
 }
 
+#[cfg(not(russh_backend = "symcrypt"))]
 fn ec_key_data_into_keypair<K, E>(
     curve_oid: ObjectIdentifier,
     private_key: K,
@@ -170,15 +316,16 @@ mod explicit_curve_params {
             // prime INTEGER — as_bytes() strips DER sign-extension leading zero
             let prime: UintRef = field_id.decode()?;
             Ok(match prime.as_bytes().len() {
-                32 => NistP256::OID,
-                48 => NistP384::OID,
-                66 => NistP521::OID,
+                32 => NIST_P256,
+                48 => NIST_P384,
+                66 => NIST_P521,
                 _ => return Err(Error::CouldNotReadKey),
             })
         })
     }
 
     /// Build an EcdsaKeypair from raw private key bytes and a curve OID.
+    #[cfg(not(russh_backend = "symcrypt"))]
     fn build_ec_keypair_from_bytes(
         curve_oid: ObjectIdentifier,
         private_key_bytes: &[u8],
@@ -208,9 +355,23 @@ mod explicit_curve_params {
             Err(Error::UnknownAlgorithm(curve_oid))
         }
     }
+
+    /// Build an EcdsaKeypair from raw private key bytes and a curve OID.
+    #[cfg(russh_backend = "symcrypt")]
+    fn build_ec_keypair_from_bytes(
+        curve_oid: ObjectIdentifier,
+        private_key_bytes: &[u8],
+    ) -> Result<EcdsaKeypair, Error> {
+        crate::crypto::symcrypt::keys::ecdsa_keypair(
+            ecdsa_curve(curve_oid)?,
+            private_key_bytes,
+            None,
+        )
+    }
 }
 
 /// Encode into a password-protected PKCS#8-encoded private key.
+#[cfg(not(russh_backend = "symcrypt"))]
 pub fn encode_pkcs8_encrypted(
     pass: &[u8],
     rounds: u32,
@@ -234,7 +395,23 @@ pub fn encode_pkcs8_encrypted(
     Ok(doc.as_bytes().to_vec())
 }
 
+/// Encode into a password-protected PKCS#8-encoded private key.
+///
+/// The symcrypt backend does not encrypt keys: this fails with
+/// [`Error::UnsupportedKeyType`].
+#[cfg(russh_backend = "symcrypt")]
+pub fn encode_pkcs8_encrypted(
+    _pass: &[u8],
+    _rounds: u32,
+    _key: &PrivateKey,
+) -> Result<Vec<u8>, Error> {
+    Err(super::unsupported(
+        "encrypted PKCS#8 private key: the symcrypt crypto backend does not encrypt private keys",
+    ))
+}
+
 /// Encode into a PKCS#8-encoded private key.
+#[cfg(not(russh_backend = "symcrypt"))]
 pub fn encode_pkcs8(key: &ssh_key::PrivateKey) -> Result<Vec<u8>, Error> {
     let v = match key.key_data() {
         ssh_key::private::KeypairData::Ed25519(pair) => {
@@ -261,6 +438,101 @@ pub fn encode_pkcs8(key: &ssh_key::PrivateKey) -> Result<Vec<u8>, Error> {
                 sk.to_pkcs8_der()?.as_bytes().to_vec()
             }
         },
+        _ => {
+            let algo = key.algorithm();
+            let kt = algo.as_str();
+            return Err(Error::UnsupportedKeyType {
+                key_type_string: kt.into(),
+                key_type_raw: kt.as_bytes().into(),
+            });
+        }
+    };
+    Ok(v)
+}
+
+/// Encode into a PKCS#8-encoded private key.
+///
+/// Writes what the other backends write: PKCS#8 v1 for ECDSA (with the
+/// public key in the SEC1 key) and RSA, and v2 (with the public key) for
+/// Ed25519.
+#[cfg(russh_backend = "symcrypt")]
+pub fn encode_pkcs8(key: &ssh_key::PrivateKey) -> Result<Vec<u8>, Error> {
+    use der::Encode;
+    use der::asn1::{AnyRef, BitStringRef, OctetStringRef, UintRef};
+    use spki::AlgorithmIdentifierRef;
+    use ssh_key::EcdsaCurve;
+    use zeroize::Zeroizing;
+
+    use crate::crypto::symcrypt::keys;
+
+    let v = match key.key_data() {
+        KeypairData::Ed25519(pair) => {
+            let seed: &[u8; 32] = pair.private.as_ref();
+            let mut private_key = Zeroizing::new([0; 34]);
+            let (header, private_seed) = private_key.split_at_mut(2);
+            header.copy_from_slice(&[0x04, 0x20]);
+            private_seed.copy_from_slice(seed);
+            let mut pki = PrivateKeyInfoRef::new(
+                AlgorithmIdentifierRef {
+                    oid: ED25519,
+                    parameters: None,
+                },
+                OctetStringRef::new(private_key.as_slice())?,
+            );
+            pki.public_key = Some(BitStringRef::from_bytes(&pair.public.0)?);
+            pki.to_der()?
+        }
+        KeypairData::Rsa(pair) => {
+            fn positive(x: &ssh_key::Mpint) -> Result<&[u8], Error> {
+                x.as_positive_bytes().ok_or(Error::KeyIsCorrupt)
+            }
+            let n = positive(pair.public().n())?;
+            let e = positive(pair.public().e())?;
+            let p = positive(pair.private().p())?;
+            let q = positive(pair.private().q())?;
+            let crt = keys::rsa_crt(n, e, p, q)?;
+            let rsa = pkcs1::RsaPrivateKey {
+                modulus: UintRef::new(n)?,
+                public_exponent: UintRef::new(e)?,
+                private_exponent: UintRef::new(positive(pair.private().d())?)?,
+                prime1: UintRef::new(p)?,
+                prime2: UintRef::new(q)?,
+                exponent1: UintRef::new(&crt.exponent1)?,
+                exponent2: UintRef::new(&crt.exponent2)?,
+                coefficient: UintRef::new(&crt.coefficient)?,
+                other_prime_infos: None,
+            };
+            let private_key = Zeroizing::new(rsa.to_der()?);
+            PrivateKeyInfoRef::new(pkcs1::ALGORITHM_ID, OctetStringRef::new(&private_key)?)
+                .to_der()?
+        }
+        KeypairData::Ecdsa(pair) => {
+            let curve = pair.curve();
+            // Like the other backends, writes the public key of the private
+            // key, not the stored one.
+            let pair = keys::ecdsa_keypair(curve, pair.private_key_bytes(), None)?;
+            let private_key = Zeroizing::new(
+                sec1::EcPrivateKey {
+                    private_key: pair.private_key_bytes(),
+                    parameters: None,
+                    public_key: Some(pair.public_key_bytes()),
+                }
+                .to_der()?,
+            );
+            let curve = match curve {
+                EcdsaCurve::NistP256 => NIST_P256,
+                EcdsaCurve::NistP384 => NIST_P384,
+                EcdsaCurve::NistP521 => NIST_P521,
+            };
+            PrivateKeyInfoRef::new(
+                AlgorithmIdentifierRef {
+                    oid: sec1::ALGORITHM_OID,
+                    parameters: Some(AnyRef::from(&curve)),
+                },
+                OctetStringRef::new(&private_key)?,
+            )
+            .to_der()?
+        }
         _ => {
             let algo = key.algorithm();
             let kt = algo.as_str();

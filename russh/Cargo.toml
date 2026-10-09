@@ -27,7 +27,7 @@ rsa = ["dep:rsa", "dep:pkcs1", "ssh-key/rsa"]
 serde = ["ssh-key/serde"]
 # Alternative crypto backend; links the native SymCrypt library (see the
 # `symcrypt-sys` crate for how it is found, e.g. `SYMCRYPT_LIB_PATH`).
-symcrypt = ["dep:symcrypt", "dep:symcrypt-sys"]
+symcrypt = ["dep:symcrypt", "dep:symcrypt-sys", "dep:pkcs1", "pkcs1/alloc"]
 _bench = ["dep:criterion"]
 
 [dependencies]

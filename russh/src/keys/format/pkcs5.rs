@@ -1,3 +1,4 @@
+#[cfg(not(russh_backend = "symcrypt"))]
 use aes::*;
 use ssh_key::PrivateKey;
 
@@ -6,6 +7,7 @@ use crate::keys::Error;
 
 /// Decode a secret key in the PKCS#5 format, possibly deciphering it
 /// using the supplied password.
+#[cfg(not(russh_backend = "symcrypt"))]
 pub fn decode_pkcs5(
     secret: &[u8],
     password: Option<&str>,
@@ -44,4 +46,18 @@ pub fn decode_pkcs5(
     } else {
         Err(Error::KeyIsEncrypted)
     }
+}
+
+/// Decode a secret key in the PKCS#5 format, possibly deciphering it
+/// using the supplied password.
+///
+/// The symcrypt backend does not decrypt keys: this fails with
+/// [`Error::UnsupportedKeyType`].
+#[cfg(russh_backend = "symcrypt")]
+pub fn decode_pkcs5(
+    _secret: &[u8],
+    _password: Option<&str>,
+    _enc: Encryption,
+) -> Result<PrivateKey, Error> {
+    Err(super::encrypted("PEM"))
 }

@@ -31,7 +31,7 @@ pub enum Encryption {
 
 #[derive(Clone, Debug)]
 enum Format {
-    #[cfg(feature = "rsa")]
+    #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
     Rsa,
     Openssh,
     Pkcs5Encrypted(Encryption),
@@ -41,8 +41,17 @@ enum Format {
 
 /// Decode a secret key, possibly deciphering it with the supplied
 /// password.
+///
+/// The symcrypt backend loads only unencrypted keys in the OpenSSH, PKCS#8,
+/// SEC1 and PKCS#1 formats, and ignores the password. Encrypted keys and
+/// PuTTY (PPK) keys fail with [`Error::UnsupportedKeyType`].
 pub fn decode_secret_key(secret: &str, password: Option<&str>) -> Result<PrivateKey, Error> {
     if secret.trim().starts_with("PuTTY-User-Key-File-") {
+        #[cfg(russh_backend = "symcrypt")]
+        return Err(unsupported(
+            "PuTTY (PPK) private key: the symcrypt crypto backend does not load PPK keys",
+        ));
+        #[cfg(not(russh_backend = "symcrypt"))]
         return Ok(PrivateKey::from_ppk(secret, password.map(Into::into))?);
     }
     let mut format = None;
@@ -53,6 +62,12 @@ pub fn decode_secret_key(secret: &str, password: Option<&str>) -> Result<Private
             if started {
                 if l.starts_with("-----END ") {
                     break;
+                }
+                #[cfg(russh_backend = "symcrypt")]
+                if (l.starts_with("Proc-Type:") && l.contains("ENCRYPTED"))
+                    || l.starts_with("DEK-Info:")
+                {
+                    return Err(encrypted("PEM"));
                 }
                 if l.chars().all(is_base64_char) {
                     sec.push_str(l)
@@ -71,12 +86,12 @@ pub fn decode_secret_key(secret: &str, password: Option<&str>) -> Result<Private
                 started = true;
                 format = Some(Format::Openssh);
             } else if l == "-----BEGIN RSA PRIVATE KEY-----" {
-                #[cfg(feature = "rsa")]
+                #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
                 {
                     started = true;
                     format = Some(Format::Rsa);
                 }
-                #[cfg(not(feature = "rsa"))]
+                #[cfg(not(any(feature = "rsa", russh_backend = "symcrypt")))]
                 {
                     return Err(Error::UnsupportedKeyType {
                         key_type_string: "RSA".to_string(),
@@ -97,7 +112,7 @@ pub fn decode_secret_key(secret: &str, password: Option<&str>) -> Result<Private
     let secret = BASE64_MIME.decode(secret.as_bytes())?;
     match format {
         Some(Format::Openssh) => decode_openssh(&secret, password),
-        #[cfg(feature = "rsa")]
+        #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
         Some(Format::Rsa) => Ok(decode_rsa_pkcs1_der(&secret)?.into()),
         Some(Format::Pkcs5Encrypted(enc)) => decode_pkcs5(&secret, password, enc),
         Some(Format::Pkcs8Encrypted) | Some(Format::Pkcs8) => {
@@ -128,11 +143,50 @@ pub fn encode_pkcs8_pem_encrypted<W: Write>(
     Ok(())
 }
 
-#[cfg(feature = "rsa")]
+#[cfg(all(feature = "rsa", not(russh_backend = "symcrypt")))]
 fn decode_rsa_pkcs1_der(secret: &[u8]) -> Result<ssh_key::private::RsaKeypair, Error> {
     use std::convert::TryInto;
 
     use pkcs1::DecodeRsaPrivateKey;
 
     Ok(rsa::RsaPrivateKey::from_pkcs1_der(secret)?.try_into()?)
+}
+
+/// Decodes a PKCS#1 `RSAPrivateKey`; SymCrypt checks the key.
+#[cfg(russh_backend = "symcrypt")]
+fn decode_rsa_pkcs1_der(secret: &[u8]) -> Result<ssh_key::private::RsaKeypair, Error> {
+    use der::Decode;
+
+    let key = pkcs1::RsaPrivateKey::from_der(secret)?;
+    if key.other_prime_infos.is_some() {
+        return Err(unsupported(
+            "multi-prime RSA private key: the symcrypt crypto backend supports two primes",
+        ));
+    }
+    crate::crypto::symcrypt::keys::rsa_keypair(
+        key.modulus.as_bytes(),
+        key.public_exponent.as_bytes(),
+        key.private_exponent.as_bytes(),
+        key.prime1.as_bytes(),
+        key.prime2.as_bytes(),
+    )
+}
+
+/// The error for a key that the symcrypt backend does not load.
+#[cfg(russh_backend = "symcrypt")]
+fn unsupported(message: impl Into<String>) -> Error {
+    Error::UnsupportedKeyType {
+        key_type_string: message.into(),
+        key_type_raw: Vec::new(),
+    }
+}
+
+/// The error for an encrypted key in `format`: the symcrypt backend does not
+/// decrypt keys.
+#[cfg(russh_backend = "symcrypt")]
+fn encrypted(format: &str) -> Error {
+    unsupported(format!(
+        "encrypted {format} private key: the symcrypt crypto backend does not decrypt \
+         private keys (remove the passphrase, e.g. with `ssh-keygen -p`)"
+    ))
 }
