@@ -15,10 +15,17 @@ env:
 # executables must also pass `copy-dll-to` (see .github/actions/setup-symcrypt/action.yml).
 jobs:
   Build:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
 
     steps:
+      - name: Install job dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git pkg-config
+
       - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Build (no features enabled)
         run: cargo build --verbose
@@ -50,10 +57,11 @@ jobs:
         run: cargo build --verbose --all-features
 
   Build-WASM:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
 
     steps:
       - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Install target
         run: |
@@ -64,10 +72,11 @@ jobs:
         run: cargo +1.89.0 build --verbose --target wasm32-wasip1 --no-default-features --features flate2,ring -p russh
 
   Formatting:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
 
     steps:
       - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Install rustfmt
         run: rustup component add rustfmt
@@ -76,10 +85,17 @@ jobs:
         run: cargo fmt --check
 
   Clippy:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
 
     steps:
+      - name: Install job dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git pkg-config
+
       - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Install Clippy
         run: rustup component add clippy
@@ -94,16 +110,18 @@ jobs:
         run: cargo clippy --all-features -- -D warnings
 
   Test:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
 
     steps:
-      - uses: actions/checkout@v2
-
-      - name: Install OpenSSH
+      - name: Install job dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y openssh-client openssh-server
-          sudo mkdir -p /run/sshd
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git openssh-client openssh-server pkg-config
+          mkdir -p /run/sshd
+
+      - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Test (no features enabled)
         run: |
@@ -123,9 +141,15 @@ jobs:
           RUST_BACKTRACE: 1
 
   Minimal-versions:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
 
     steps:
+      - name: Install job dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git pkg-config
+
       - uses: actions/checkout@v2
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@cargo-hack

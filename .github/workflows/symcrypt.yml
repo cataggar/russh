@@ -18,11 +18,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: ubuntu-24.04
+            container: ubuntu:24.04
+          - os: ubuntu-24.04-arm
+            container: ubuntu:24.04
+          - os: windows-latest
+    runs-on: ${{ (startsWith(matrix.os, 'ubuntu-') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(format('["self-hosted","Linux","{0}","ubuntu2604"]', matrix.os == 'ubuntu-24.04-arm' && 'ARM64' || 'X64'))) || matrix.os }}
+    container: ${{ matrix.container }}
 
     steps:
+      - name: Install Linux job dependencies
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git pkg-config
+
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        if: runner.os == 'Linux'
 
       # The smoke crate is its own workspace, so its executable is built in ci/symcrypt-smoke/target.
       - name: Set up SymCrypt
@@ -64,18 +79,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: ubuntu-24.04
+            container: ubuntu:24.04
+          - os: ubuntu-24.04-arm
+            container: ubuntu:24.04
+          - os: windows-latest
+    runs-on: ${{ (startsWith(matrix.os, 'ubuntu-') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(format('["self-hosted","Linux","{0}","ubuntu2604"]', matrix.os == 'ubuntu-24.04-arm' && 'ARM64' || 'X64'))) || matrix.os }}
+    container: ${{ matrix.container }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install OpenSSH
+      - name: Install Linux job dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y openssh-client openssh-server
-          sudo mkdir -p /run/sshd
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git openssh-client openssh-server pkg-config
+          mkdir -p /run/sshd
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+        if: runner.os == 'Linux'
 
       # On Windows, put the pinned symcrypt.dll next to the test executables so
       # they load it instead of C:\Windows\System32\symcrypt.dll.
