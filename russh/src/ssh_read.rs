@@ -238,8 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ssh_id_too_long() {
-        let data = String::from_iter(iter::once("SSH-2.0-").chain(
-            iter::repeat("A").take(500)));
+        let data = String::from_iter(iter::once("SSH-2.0-").chain(iter::repeat_n("A", 500)));
         let mut read = SshRead::new(data.as_bytes());
 
         let received = read.read_ssh_id().await;

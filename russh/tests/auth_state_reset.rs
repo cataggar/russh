@@ -39,11 +39,13 @@ impl server::Handler for RemainingMethodsUserSwitchServer {
 
 #[tokio::test]
 async fn auth_does_not_carry_remaining_methods_across_username_change() {
-    let mut server_config = server::Config::default();
-    server_config.inactivity_timeout = None;
-    server_config.auth_rejection_time = Duration::from_millis(1);
-    server_config.auth_rejection_time_initial = Some(Duration::from_millis(1));
-    server_config.keys.push(test_keys::key(0));
+    let server_config = server::Config {
+        inactivity_timeout: None,
+        auth_rejection_time: Duration::from_millis(1),
+        auth_rejection_time_initial: Some(Duration::from_millis(1)),
+        keys: vec![test_keys::key(0)],
+        ..Default::default()
+    };
     let server_config = Arc::new(server_config);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

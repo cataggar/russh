@@ -123,13 +123,22 @@ jobs:
         run: rustup component add clippy
 
       - name: Clippy (no features enabled)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (aws-lc-rs)
+        run: cargo clippy -p russh --all-targets --no-default-features --features aws-lc-rs -- -D warnings
+
+      - name: Clippy (ring)
+        run: cargo clippy -p russh --all-targets --no-default-features --features ring -- -D warnings
+
+      - name: Clippy (ring, rsa)
+        run: cargo clippy -p russh --all-targets --no-default-features --features ring,rsa -- -D warnings
 
       - name: Set up SymCrypt
         uses: ./.github/actions/setup-symcrypt
 
       - name: Clippy (all features enabled)
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   Test:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}

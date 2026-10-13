@@ -463,18 +463,12 @@ mod tests {
         };
 
         let probe = publickey_probe_packet("alice", &pk_ok_key);
-        let mut probe = BytesMut::from(probe.as_slice());
-        session
-            .process_packet(&mut handler, &mut probe)
-            .await
-            .unwrap();
+        let probe = BytesMut::from(probe.as_slice());
+        session.process_packet(&mut handler, &probe).await.unwrap();
 
         let signed = publickey_signed_packet("alice", Arc::new(signed_private), &signed_key);
-        let mut signed = BytesMut::from(signed.as_slice());
-        session
-            .process_packet(&mut handler, &mut signed)
-            .await
-            .unwrap();
+        let signed = BytesMut::from(signed.as_slice());
+        session.process_packet(&mut handler, &signed).await.unwrap();
 
         assert!(
             !handler.final_auth_reached_for_signed_key,
@@ -679,16 +673,17 @@ mod tests {
     }
 
     fn test_auth_session() -> Session {
-        let mut config = Config::default();
-        config.preferred = Preferred {
-            host_key_certificates: Cow::Borrowed(&[]),
-            kex: Cow::Owned(vec![KEX_NONE]),
-            key: Cow::Owned(vec![test_keys::ALGORITHM]),
-            cipher: Cow::Owned(vec![cipher::NONE]),
-            mac: Cow::Owned(vec![mac::NONE]),
-            compression: Cow::Owned(vec![compression::NONE]),
-        };
-        let config = Arc::new(config);
+        let config = Arc::new(Config {
+            preferred: Preferred {
+                host_key_certificates: Cow::Borrowed(&[]),
+                kex: Cow::Owned(vec![KEX_NONE]),
+                key: Cow::Owned(vec![test_keys::ALGORITHM]),
+                cipher: Cow::Owned(vec![cipher::NONE]),
+                mac: Cow::Owned(vec![mac::NONE]),
+                compression: Cow::Owned(vec![compression::NONE]),
+            },
+            ..Default::default()
+        });
         let (priority_sender, priority_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let handle = Handle {

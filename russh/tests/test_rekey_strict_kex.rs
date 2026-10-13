@@ -21,17 +21,17 @@ async fn test_rekey_with_strict_kex() {
     let client_key = test_keys::key(1);
 
     // Server config with strict kex enabled
-    let mut server_config = server::Config::default();
-    server_config.inactivity_timeout = None;
-    server_config.auth_rejection_time = std::time::Duration::from_secs(3);
-    server_config.keys.push(test_keys::key(0));
-
-    // Enable strict kex by including the strict kex extension
-    server_config.preferred = {
-        let mut p = Preferred::default();
-        // Include the strict kex extension marker for server
-        p.kex = Cow::Borrowed(&[kex::CURVE25519, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER]);
-        p
+    let server_config = server::Config {
+        inactivity_timeout: None,
+        auth_rejection_time: std::time::Duration::from_secs(3),
+        keys: vec![test_keys::key(0)],
+        // Enable strict kex by including the strict kex extension
+        preferred: Preferred {
+            // Include the strict kex extension marker for server
+            kex: Cow::Borrowed(&[kex::CURVE25519, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER]),
+            ..Default::default()
+        },
+        ..Default::default()
     };
 
     let server_config = Arc::new(server_config);
@@ -48,12 +48,13 @@ async fn test_rekey_with_strict_kex() {
     });
 
     // Client config with strict kex enabled
-    let mut client_config = client::Config::default();
-    client_config.preferred = {
-        let mut p = Preferred::default();
-        // Include the strict kex extension marker for client
-        p.kex = Cow::Borrowed(&[kex::CURVE25519, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT]);
-        p
+    let client_config = client::Config {
+        preferred: Preferred {
+            // Include the strict kex extension marker for client
+            kex: Cow::Borrowed(&[kex::CURVE25519, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT]),
+            ..Default::default()
+        },
+        ..Default::default()
     };
     let client_config = Arc::new(client_config);
 

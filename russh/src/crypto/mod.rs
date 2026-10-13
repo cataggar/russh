@@ -629,7 +629,7 @@ pub(crate) mod testing {
             &macs,
             provider::mac::DEFAULT_ORDER,
         );
-        assert!(!provider::sign::DEFAULT_ORDER.is_empty());
+        const { assert!(!provider::sign::DEFAULT_ORDER.is_empty()) };
         for (i, algorithm) in provider::sign::DEFAULT_ORDER.iter().enumerate() {
             assert!(is_supported_signature_algorithm(algorithm));
             assert!(!provider::sign::DEFAULT_ORDER[..i].contains(algorithm));

@@ -27,24 +27,30 @@ async fn test_aes256_gcm_with_zlib_allows_full_256k_channel_packet() {
     run_max_channel_packet_size_test(Some(ZLIB_ONLY)).await;
 }
 
+fn aes256_gcm_preferred(compression: Option<&'static [compression::Name]>) -> Preferred {
+    let mut preferred = Preferred {
+        cipher: Cow::Borrowed(&[cipher::AES_256_GCM]),
+        ..Default::default()
+    };
+    if let Some(compression) = compression {
+        preferred.compression = Cow::Borrowed(compression);
+    }
+    preferred
+}
+
 async fn run_max_channel_packet_size_test(compression: Option<&'static [compression::Name]>) {
     let _ = env_logger::try_init();
 
     let client_key = test_keys::key(1);
 
-    let mut server_config = server::Config::default();
-    server_config.inactivity_timeout = None;
-    server_config.auth_rejection_time = std::time::Duration::from_secs(3);
-    server_config.maximum_packet_size = MAX_CHANNEL_PACKET_SIZE;
-    server_config.window_size = MAX_CHANNEL_PACKET_SIZE * 4;
-    server_config.keys.push(test_keys::key(0));
-    server_config.preferred = {
-        let mut preferred = Preferred::default();
-        preferred.cipher = Cow::Borrowed(&[cipher::AES_256_GCM]);
-        if let Some(compression) = compression {
-            preferred.compression = Cow::Borrowed(compression);
-        }
-        preferred
+    let server_config = server::Config {
+        inactivity_timeout: None,
+        auth_rejection_time: std::time::Duration::from_secs(3),
+        maximum_packet_size: MAX_CHANNEL_PACKET_SIZE,
+        window_size: MAX_CHANNEL_PACKET_SIZE * 4,
+        keys: vec![test_keys::key(0)],
+        preferred: aes256_gcm_preferred(compression),
+        ..Default::default()
     };
 
     let server_config = Arc::new(server_config);
@@ -58,16 +64,11 @@ async fn run_max_channel_packet_size_test(compression: Option<&'static [compress
             .unwrap();
     });
 
-    let mut client_config = client::Config::default();
-    client_config.maximum_packet_size = MAX_CHANNEL_PACKET_SIZE;
-    client_config.window_size = MAX_CHANNEL_PACKET_SIZE * 4;
-    client_config.preferred = {
-        let mut preferred = Preferred::default();
-        preferred.cipher = Cow::Borrowed(&[cipher::AES_256_GCM]);
-        if let Some(compression) = compression {
-            preferred.compression = Cow::Borrowed(compression);
-        }
-        preferred
+    let client_config = client::Config {
+        maximum_packet_size: MAX_CHANNEL_PACKET_SIZE,
+        window_size: MAX_CHANNEL_PACKET_SIZE * 4,
+        preferred: aes256_gcm_preferred(compression),
+        ..Default::default()
     };
 
     let mut session = client::connect(Arc::new(client_config), addr, TestClient {})

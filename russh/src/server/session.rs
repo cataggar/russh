@@ -1577,7 +1577,10 @@ impl Session {
     }
 }
 
-#[cfg(all(test, feature = "flate2"))]
+// Separate attributes: clippy's `allow-*-in-tests` settings only recognize a
+// bare `#[cfg(test)]`.
+#[cfg(test)]
+#[cfg(feature = "flate2")]
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::io::Write;
