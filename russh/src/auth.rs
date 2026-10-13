@@ -362,6 +362,10 @@ pub struct AuthRequest {
     pub(crate) principal: Option<AuthPrincipal>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub rejection_count: usize,
+    /// Client side: the hash an RSA [`Method::OpenSshCertificate`] is named
+    /// after and signed with, fixed when the probe is sent so that the signed
+    /// request matches it.
+    pub(crate) certificate_hash_alg: Option<HashAlg>,
 }
 
 #[doc(hidden)]
@@ -398,6 +402,7 @@ impl AuthRequest {
             current: None,
             principal: None,
             rejection_count: 0,
+            certificate_hash_alg: None,
         }
     }
 
@@ -418,6 +423,7 @@ impl AuthRequest {
             current,
             principal: None,
             rejection_count: 0,
+            certificate_hash_alg: None,
         }
     }
 

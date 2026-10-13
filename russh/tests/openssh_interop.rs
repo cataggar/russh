@@ -89,6 +89,51 @@ async fn user_keys() {
     openssh::check_user_keys(Case::default(), KEY_ALGORITHMS).await;
 }
 
+/// Publickey authentication with user certificates made by `ssh-keygen -s`.
+/// sshd accepts only the certificate algorithm of the case, so the client
+/// must name an RSA certificate after the hash that signs it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn user_certificates() {
+    openssh::check_user_certificates(
+        Case::default().with_round_trip(0),
+        &[
+            KeyAlg::ED25519,
+            KeyAlg::ECDSA_P256,
+            KeyAlg::ECDSA_P384,
+            KeyAlg::ECDSA_P521,
+            #[cfg(feature = "rsa")]
+            KeyAlg::RSA_SHA2_256,
+            #[cfg(feature = "rsa")]
+            KeyAlg::RSA_SHA2_512,
+        ],
+    )
+    .await;
+}
+
+/// An RSA user certificate against sshd's default `PubkeyAcceptedAlgorithms`,
+/// which leave out `ssh-rsa-cert-v01@openssh.com` since OpenSSH 8.8.
+#[cfg(feature = "rsa")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rsa_user_certificate_with_default_algorithms() {
+    if openssh::available().is_none() {
+        return;
+    }
+    let sshd = Sshd::builder()
+        .user_key(KeyType::Rsa3072)
+        .user_ca(KeyType::EcdsaP256)
+        .start()
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    let case = Case::default()
+        .with_user_key(KeyAlg::RSA_SHA2_512)
+        .with_user_certificate()
+        .with_round_trip(0);
+    if let Err(error) = case.run_client(&sshd).await {
+        // Dropping `sshd` while panicking prints its diagnostics.
+        panic!("{case}: {error:#}");
+    }
+}
+
 /// Several algorithms forced at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn combinations() {

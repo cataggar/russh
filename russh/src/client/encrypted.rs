@@ -18,7 +18,7 @@ use std::str::FromStr;
 use bytes::Bytes;
 use log::{debug, error, info, trace, warn};
 use ssh_encoding::{Decode, Encode, Reader};
-use ssh_key::{Algorithm, PublicKey, Signature};
+use ssh_key::{Algorithm, HashAlg, PublicKey, Signature};
 
 use super::IncomingSshPacket;
 use crate::auth::AuthRequest;
@@ -56,6 +56,39 @@ fn verify_hostkeys_proof(
     }
     ensure_end(&r)?;
     Ok(())
+}
+
+/// The hash an RSA certificate is named after and signed with.
+///
+/// As `Handle::best_supported_rsa_hash` does for a plain key, rsa-sha2-512 is
+/// preferred to rsa-sha2-256 among the server's `server-sig-algs`. There is no
+/// SHA-1 fallback, as OpenSSH 8.8+ refuses `ssh-rsa-cert-v01@openssh.com`: a
+/// server that sent no `server-sig-algs`, or offers neither SHA-2 hash, gets
+/// rsa-sha2-512.
+fn rsa_certificate_hash_alg(server_sig_algs: Option<&[Algorithm]>) -> HashAlg {
+    let offered = |hash| {
+        server_sig_algs.is_some_and(|algs| algs.contains(&Algorithm::Rsa { hash: Some(hash) }))
+    };
+    if offered(HashAlg::Sha256) && !offered(HashAlg::Sha512) {
+        HashAlg::Sha256
+    } else {
+        HashAlg::Sha512
+    }
+}
+
+/// The hash `method` names its certificate after and signs with: chosen by
+/// [`rsa_certificate_hash_alg`] for an RSA [`auth::Method::OpenSshCertificate`],
+/// `None` for anything else.
+fn certificate_hash_alg(
+    method: &auth::Method,
+    server_sig_algs: Option<&[Algorithm]>,
+) -> Option<HashAlg> {
+    match method {
+        auth::Method::OpenSshCertificate { cert, .. } if cert.algorithm().is_rsa() => {
+            Some(rsa_certificate_hash_alg(server_sig_algs))
+        }
+        _ => None,
+    }
 }
 
 impl Session {
@@ -97,8 +130,14 @@ impl Session {
                                 map_err!(ensure_end(&r))?;
                                 *accepted = true;
                                 if let Some(ref meth) = self.common.auth_method {
-                                    let auth_request = AuthRequest::new(meth);
-                                    if enc.write_auth_request(&self.common.auth_user, meth)? {
+                                    let mut auth_request = AuthRequest::new(meth);
+                                    auth_request.certificate_hash_alg =
+                                        certificate_hash_alg(meth, self.server_sig_algs.as_deref());
+                                    if enc.write_auth_request(
+                                        &self.common.auth_user,
+                                        meth,
+                                        auth_request.certificate_hash_alg,
+                                    )? {
                                         debug!("enc: auth request written");
                                         enc.state = EncryptedState::WaitingAuthRequest(auth_request)
                                     }
@@ -251,12 +290,14 @@ impl Session {
                             }
 
                             // continue with userauth_pk_ok
+                            let certificate_hash_alg = auth_request.certificate_hash_alg;
                             match self.common.auth_method.take() {
                                 Some(auth_method @ auth::Method::PublicKey { .. }) => {
                                     self.common.buffer.clear();
                                     enc.client_send_signature(
                                         &self.common.auth_user,
                                         &auth_method,
+                                        None,
                                         &mut self.common.buffer,
                                     )?
                                 }
@@ -265,6 +306,7 @@ impl Session {
                                     enc.client_send_signature(
                                         &self.common.auth_user,
                                         &auth_method,
+                                        certificate_hash_alg,
                                         &mut self.common.buffer,
                                     )?
                                 }
@@ -1088,8 +1130,10 @@ impl Session {
             };
             debug!("write_auth_request_if_needed: is_waiting = {is_waiting:?}");
             if is_waiting {
-                enc.write_auth_request(user, &meth)?;
-                let auth_request = AuthRequest::new(&meth);
+                let mut auth_request = AuthRequest::new(&meth);
+                auth_request.certificate_hash_alg =
+                    certificate_hash_alg(&meth, self.server_sig_algs.as_deref());
+                enc.write_auth_request(user, &meth, auth_request.certificate_hash_alg)?;
                 enc.state = EncryptedState::WaitingAuthRequest(auth_request);
             }
         }
@@ -1104,11 +1148,15 @@ impl Session {
 mod tests {
     use std::collections::HashMap;
     use std::num::Wrapping;
+    use std::sync::Arc;
 
     use byteorder::{BigEndian, ByteOrder};
     use ssh_encoding::{Decode, Encode};
+    use ssh_key::certificate::{Builder, CertType};
+    use ssh_key::{Certificate, PrivateKey};
 
     use super::*;
+    use crate::client::tests::{TestHandler, keyboard_interactive_session};
     use crate::compression::{Compression, Decompress};
     use crate::kex::{KEXES, NONE};
     use crate::session::Exchange;
@@ -1169,6 +1217,7 @@ mod tests {
                 &auth::Method::GssapiWithMic {
                     mechanism_oids: vec![krb5_oid.clone()],
                 },
+                None,
             )
             .unwrap();
         assert!(wrote);
@@ -1266,49 +1315,215 @@ mod tests {
         ensure_end(&mic).unwrap();
     }
 
-    fn rsa_user_certificate() -> ssh_key::Certificate {
-        let subject =
-            ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Rsa { hash: None })
+    /// A user certificate for `subject`, with the principal "alice".
+    fn user_certificate(subject: &PrivateKey) -> Certificate {
+        let mut builder =
+            Builder::new_with_random_nonce(&mut rand::rng(), subject.public_key(), 0, u64::MAX)
                 .unwrap();
-        let ca =
-            ssh_key::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap();
-        let mut builder = ssh_key::certificate::Builder::new_with_random_nonce(
-            &mut rand::rng(),
-            subject.public_key(),
-            0,
-            u64::MAX,
+        builder.key_id("user-cert").unwrap();
+        builder.cert_type(CertType::User).unwrap();
+        builder.valid_principal("alice").unwrap();
+        crate::tests::test_keys::certify(builder, &crate::tests::test_keys::key(0))
+    }
+
+    /// An RSA key and a user certificate for it.
+    fn rsa_user_certificate() -> (PrivateKey, Certificate) {
+        let key = crate::keys::decode_secret_key(
+            include_str!("../../tests/data/test-keys/rsa-2048-0"),
+            None,
         )
         .unwrap();
-        builder.key_id("rsa-user-cert").unwrap();
-        builder
-            .cert_type(ssh_key::certificate::CertType::User)
-            .unwrap();
-        builder.valid_principal("alice").unwrap();
-        builder.sign(&ca).unwrap()
+        let certificate = user_certificate(&key);
+        (key, certificate)
     }
 
-    fn decode_userauth_certificate_algorithm(
-        mut request: &[u8],
+    /// Decodes a `publickey` request from "alice" with a certificate: the
+    /// algorithm it names, the part a signature covers (after the session
+    /// id), and the signature that ends a signed request.
+    fn decode_userauth_certificate_request(
+        request: &[u8],
         expected_has_signature: bool,
-    ) -> String {
-        assert_eq!(u8::decode(&mut request).unwrap(), msg::USERAUTH_REQUEST);
-        assert_eq!(String::decode(&mut request).unwrap(), "alice");
-        assert_eq!(String::decode(&mut request).unwrap(), "ssh-connection");
-        assert_eq!(String::decode(&mut request).unwrap(), "publickey");
+    ) -> (String, &[u8], Option<Signature>) {
+        let mut r = request;
+        assert_eq!(u8::decode(&mut r).unwrap(), msg::USERAUTH_REQUEST);
+        assert_eq!(String::decode(&mut r).unwrap(), "alice");
+        assert_eq!(String::decode(&mut r).unwrap(), "ssh-connection");
+        assert_eq!(String::decode(&mut r).unwrap(), "publickey");
         assert_eq!(
-            u8::decode(&mut request).unwrap(),
+            u8::decode(&mut r).unwrap(),
             u8::from(expected_has_signature)
         );
-        let algorithm = String::decode(&mut request).unwrap();
-        let _certificate = Vec::<u8>::decode(&mut request).unwrap();
-        ensure_end(&request).unwrap();
-        algorithm
+        let algorithm = String::decode(&mut r).unwrap();
+        let _certificate = Vec::<u8>::decode(&mut r).unwrap();
+        let unsigned = &request[..request.len() - r.len()];
+        let signature = (!r.is_empty()).then(|| {
+            let blob = Vec::<u8>::decode(&mut r).unwrap();
+            let mut blob = blob.as_slice();
+            let signature = Signature::decode(&mut blob).unwrap();
+            ensure_end(&blob).unwrap();
+            signature
+        });
+        ensure_end(&r).unwrap();
+        (algorithm, unsigned, signature)
     }
 
-    #[cfg(feature = "rsa")]
+    /// Checks that `certificate`'s key made `signature` over the session id
+    /// and `request`.
+    fn assert_signed_by(certificate: &Certificate, request: &[u8], signature: &Signature) {
+        let mut signed = Vec::new();
+        b"session-id".as_slice().encode(&mut signed).unwrap();
+        signed.extend_from_slice(request);
+        crate::crypto::verify(certificate.public_key(), &signed, signature).unwrap();
+    }
+
+    /// The one packet `session` wrote since the last call.
+    fn take_written_payload(session: &mut Session) -> Vec<u8> {
+        let enc = session.common.encrypted.as_mut().unwrap();
+        let written = payloads(&enc.write);
+        assert_eq!(written.len(), 1);
+        let payload = written[0].to_vec();
+        enc.write.clear();
+        payload
+    }
+
+    /// The probe and the signed request with which a client authenticates
+    /// "alice" with `method` to a server that sent `server_sig_algs`. The
+    /// probe answers the server's `SERVICE_ACCEPT` or, with `retry`, follows
+    /// an earlier request.
+    async fn publickey_requests(
+        method: auth::Method,
+        server_sig_algs: Option<Vec<Algorithm>>,
+        retry: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
+        // Waits for the answer to a keyboard-interactive request.
+        let (mut session, _sender, _replies) = keyboard_interactive_session();
+        session.server_sig_algs = server_sig_algs;
+        let enc = session.common.encrypted.as_mut().unwrap();
+        enc.session_id = CryptoVec::from(&b"session-id"[..]);
+        if !retry {
+            enc.state = EncryptedState::WaitingAuthServiceRequest {
+                sent: true,
+                accepted: false,
+            };
+        }
+        session
+            .write_auth_request_if_needed("alice", method)
+            .unwrap();
+        if !retry {
+            let mut service_accept = vec![msg::SERVICE_ACCEPT];
+            "ssh-userauth".encode(&mut service_accept).unwrap();
+            session
+                .process_packet(&mut TestHandler, &service_accept)
+                .await
+                .unwrap();
+        }
+        let probe = take_written_payload(&mut session);
+        // The client does not read what USERAUTH_PK_OK repeats of the probe.
+        session
+            .process_packet(
+                &mut TestHandler,
+                &[msg::USERAUTH_INFO_REQUEST_OR_USERAUTH_PK_OK],
+            )
+            .await
+            .unwrap();
+        (probe, take_written_payload(&mut session))
+    }
+
+    #[test]
+    fn rsa_certificate_hash_prefers_sha512_and_is_never_sha1() {
+        let rsa = |hash| Algorithm::Rsa { hash };
+        for (server_sig_algs, expected) in [
+            (None, HashAlg::Sha512),
+            (Some(vec![]), HashAlg::Sha512),
+            (
+                Some(vec![rsa(Some(HashAlg::Sha256)), rsa(Some(HashAlg::Sha512))]),
+                HashAlg::Sha512,
+            ),
+            (
+                Some(vec![rsa(Some(HashAlg::Sha256)), rsa(None)]),
+                HashAlg::Sha256,
+            ),
+            (Some(vec![rsa(None)]), HashAlg::Sha512),
+            (Some(vec![Algorithm::Ed25519]), HashAlg::Sha512),
+        ] {
+            assert_eq!(
+                rsa_certificate_hash_alg(server_sig_algs.as_deref()),
+                expected,
+                "server-sig-algs {server_sig_algs:?}"
+            );
+        }
+    }
+
+    #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
+    #[tokio::test]
+    async fn rsa_certificate_is_named_after_the_hash_it_is_signed_with() {
+        let (key, certificate) = rsa_user_certificate();
+        let key = Arc::new(key);
+        let rsa = |hash| Algorithm::Rsa { hash: Some(hash) };
+        for (server_sig_algs, hash) in [
+            (None, HashAlg::Sha512),
+            (
+                Some(vec![rsa(HashAlg::Sha512), rsa(HashAlg::Sha256)]),
+                HashAlg::Sha512,
+            ),
+            (Some(vec![rsa(HashAlg::Sha256)]), HashAlg::Sha256),
+        ] {
+            for retry in [false, true] {
+                let context = format!("server-sig-algs {server_sig_algs:?}, retry {retry}");
+                let method = auth::Method::OpenSshCertificate {
+                    key: key.clone(),
+                    cert: certificate.clone(),
+                };
+                let (probe, signed) =
+                    publickey_requests(method, server_sig_algs.clone(), retry).await;
+                let expected = rsa(hash).to_certificate_type();
+
+                let (algorithm, _, signature) = decode_userauth_certificate_request(&probe, false);
+                assert_eq!(algorithm, expected, "probe, {context}");
+                assert!(signature.is_none(), "probe, {context}");
+
+                let (algorithm, unsigned, signature) =
+                    decode_userauth_certificate_request(&signed, true);
+                assert_eq!(algorithm, expected, "signed request, {context}");
+                let signature = signature.expect("signed request without a signature");
+                assert_eq!(signature.algorithm(), rsa(hash), "{context}");
+                assert_signed_by(&certificate, unsigned, &signature);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn other_certificates_keep_the_algorithm_of_their_key() {
+        let key = crate::tests::test_keys::key(1);
+        let certificate = user_certificate(&key);
+        let method = auth::Method::OpenSshCertificate {
+            key: Arc::new(key.clone()),
+            cert: certificate.clone(),
+        };
+        // This would make an RSA certificate use rsa-sha2-256.
+        let server_sig_algs = vec![
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256),
+            },
+            key.algorithm(),
+        ];
+        let (probe, signed) = publickey_requests(method, Some(server_sig_algs), false).await;
+        let expected = key.algorithm().to_certificate_type();
+
+        assert_eq!(
+            decode_userauth_certificate_request(&probe, false).0,
+            expected
+        );
+        let (algorithm, unsigned, signature) = decode_userauth_certificate_request(&signed, true);
+        assert_eq!(algorithm, expected);
+        let signature = signature.expect("signed request without a signature");
+        assert_eq!(signature.algorithm(), key.algorithm());
+        assert_signed_by(&certificate, unsigned, &signature);
+    }
+
     #[test]
     fn rsa_future_certificate_hash_is_encoded_in_probe_and_signed_requests() {
-        let certificate = rsa_user_certificate();
+        let (_, certificate) = rsa_user_certificate();
         for (hash_alg, expected) in [
             (
                 Some(ssh_key::HashAlg::Sha512),
@@ -1328,12 +1543,13 @@ mod tests {
                         cert: certificate.clone(),
                         hash_alg,
                     },
+                    None,
                 )
                 .unwrap();
             let probe_payloads = payloads(&encrypted.write);
             assert_eq!(probe_payloads.len(), 1);
             assert_eq!(
-                decode_userauth_certificate_algorithm(probe_payloads[0], false),
+                decode_userauth_certificate_request(probe_payloads[0], false).0,
                 expected
             );
 
@@ -1352,7 +1568,7 @@ mod tests {
                 b"session-id"
             );
             assert_eq!(
-                decode_userauth_certificate_algorithm(signed_request, true),
+                decode_userauth_certificate_request(signed_request, true).0,
                 expected
             );
         }
@@ -1360,10 +1576,14 @@ mod tests {
 }
 
 impl Encrypted {
+    /// Writes the first `USERAUTH_REQUEST` for `auth_method`; for a public key
+    /// that is a probe. `certificate_hash_alg` names an
+    /// [`auth::Method::OpenSshCertificate`] (see [`certificate_hash_alg`]).
     fn write_auth_request(
         &mut self,
         user: &str,
         auth_method: &auth::Method,
+        certificate_hash_alg: Option<HashAlg>,
     ) -> Result<bool, crate::Error> {
         // The server is waiting for our USERAUTH_REQUEST.
         Ok(push_packet!(self.write, {
@@ -1403,6 +1623,7 @@ impl Encrypted {
 
                     debug!("write_auth_request: cert - {:?}", cert.algorithm());
                     cert.algorithm()
+                        .with_hash_alg(certificate_hash_alg)
                         .to_certificate_type()
                         .encode(&mut self.write)?;
                     cert.to_bytes()?.as_slice().encode(&mut self.write)?;
@@ -1541,10 +1762,14 @@ impl Encrypted {
         Ok(i0)
     }
 
+    /// Sends the signed request answering `USERAUTH_PK_OK`.
+    /// `certificate_hash_alg` is the one [`Encrypted::write_auth_request`]
+    /// named the probe after.
     fn client_send_signature(
         &mut self,
         user: &str,
         method: &auth::Method,
+        certificate_hash_alg: Option<HashAlg>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), crate::Error> {
         match method {
@@ -1568,13 +1793,14 @@ impl Encrypted {
                 let i0 = self.client_make_to_sign(
                     user,
                     &PublicKeyOrCertificate::Certificate(cert.clone()),
-                    None,
+                    certificate_hash_alg,
                     buffer,
                 )?;
 
-                // Extend with self-signature.
-                // As `ssh-key` does for a bare RSA key: rsa-sha2-512.
-                crate::crypto::sign(key, Some(ssh_key::HashAlg::Sha512), buffer)?
+                // Extend with self-signature. RSA signs with the hash the
+                // request is named after; other keys ignore the hash.
+                let hash_alg = certificate_hash_alg.unwrap_or(HashAlg::Sha512);
+                crate::crypto::sign(key, Some(hash_alg), buffer)?
                     .encoded()?
                     .encode(&mut *buffer)?;
 

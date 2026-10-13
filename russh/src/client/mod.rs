@@ -480,6 +480,17 @@ impl<H: Handler> Handle<H> {
     }
 
     /// Perform public OpenSSH Certificate-based SSH authentication
+    ///
+    /// An RSA certificate is named after the hash it is signed with, chosen
+    /// from the server's `server-sig-algs` like
+    /// [`Handle::best_supported_rsa_hash`] does:
+    /// `rsa-sha2-512-cert-v01@openssh.com`, or
+    /// `rsa-sha2-256-cert-v01@openssh.com` if the server offers `rsa-sha2-256`
+    /// but not `rsa-sha2-512`. A server that sent no `server-sig-algs` gets
+    /// `rsa-sha2-512-cert-v01@openssh.com`. SHA-1
+    /// (`ssh-rsa-cert-v01@openssh.com`), which OpenSSH 8.8 and later refuse by
+    /// default, is never used. To choose the hash yourself, use
+    /// [`Handle::authenticate_certificate_with`].
     pub async fn authenticate_openssh_cert<U: Into<String>>(
         &mut self,
         user: U,
@@ -2069,7 +2080,7 @@ mod tests {
     use crate::sshbuffer::{IncomingSshPacket, PacketWriter, SSHBuffer};
     use crate::{CryptoVec, cipher, mac};
 
-    struct TestHandler;
+    pub(super) struct TestHandler;
 
     impl Handler for TestHandler {
         type Error = crate::Error;
@@ -2082,7 +2093,7 @@ mod tests {
         }
     }
 
-    fn keyboard_interactive_session() -> (
+    pub(super) fn keyboard_interactive_session() -> (
         Session,
         tokio::sync::mpsc::Sender<Msg>,
         tokio::sync::mpsc::UnboundedReceiver<Reply>,

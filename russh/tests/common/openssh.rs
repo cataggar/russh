@@ -49,10 +49,11 @@
 //! ## API overview
 //!
 //! * Family runners [`check_kex`], [`check_ciphers`], [`check_macs`],
-//!   [`check_host_keys`] and [`check_user_keys`]. Each takes a *base* [`Case`]
-//!   (the algorithms that stay fixed) and a list of algorithms to try one at
-//!   a time. A backend with fewer algorithms passes its own lists, and its
-//!   own base case if the defaults are unsupported.
+//!   [`check_host_keys`], [`check_user_keys`] and [`check_user_certificates`].
+//!   Each takes a *base* [`Case`] (the algorithms that stay fixed) and a list
+//!   of algorithms to try one at a time. A backend with fewer algorithms
+//!   passes its own lists, and its own base case if the defaults are
+//!   unsupported.
 //! * [`check_cases`] runs any list of cases and panics on failure, after
 //!   printing a summary. [`run_cases`] and [`run_case`] return [`Outcome`]s
 //!   instead, and [`report`] prints and checks them.
@@ -66,11 +67,15 @@
 //!   configuration and [`Case::preferred`] the matching client [`Preferred`].
 //!   [`Case::with_user_key_format`] makes the client load the user key from
 //!   a PKCS#8 or PEM copy instead of the OpenSSH file.
+//!   [`Case::with_user_certificate`] makes it authenticate with a
+//!   certificate of the user key instead of the key itself.
 //! * [`Sshd::builder`] → [`SshdBuilder::start`] → [`Sshd`] is a running
-//!   sshd for custom scenarios. [`Sshd::connect`] returns a [`Client`] with
-//!   [`Client::authenticate`], [`Client::negotiated`], [`Client::exec`],
-//!   [`Client::check_echo`], [`Client::check_round_trip`] and
-//!   [`Client::disconnect_reason`], plus the raw russh handle. Errors from
+//!   sshd for custom scenarios. [`SshdBuilder::user_ca`] makes sshd trust a
+//!   user CA that certifies the user key ([`Sshd::load_user_certificate`]).
+//!   [`Sshd::connect`] returns a [`Client`] with [`Client::authenticate`],
+//!   [`Client::authenticate_with_certificate`], [`Client::negotiated`],
+//!   [`Client::exec`], [`Client::check_echo`], [`Client::check_round_trip`]
+//!   and [`Client::disconnect_reason`], plus the raw russh handle. Errors from
 //!   these steps include why the connection ended, if it did.
 //! * [`available`] returns the detected OpenSSH installation (paths,
 //!   version, and the algorithms `ssh -Q` lists), or `None` to skip.
@@ -88,6 +93,7 @@
 //! | `mac`        | `MACs`                            | `Preferred::mac`                                 |
 //! | `host_key`   | `HostKey` + `HostKeyAlgorithms`   | `Preferred::key`                                 |
 //! | `user_key`   | `AuthorizedKeysFile` + `PubkeyAcceptedAlgorithms` | key (from a `user_key_format` file) + RSA hash given to `authenticate_publickey` |
+//! | `user_certificate` | `TrustedUserCAKeys` + the certificate algorithm of `user_key` in `PubkeyAcceptedAlgorithms` | key + certificate from `ssh-keygen -s` given to `authenticate_openssh_cert`, which picks the RSA hash itself |
 //!
 //! A `kex`, `cipher` or `mac` of `None` leaves both sides at their defaults.
 //! Host and user keys are always forced. Their default, ECDSA P-256, is
@@ -110,7 +116,8 @@
 //!   summary, even with `RUSSH_REQUIRE_SSHD`. For example,
 //!   `mlkem768x25519-sha256` needs OpenSSH 9.9. Support is checked with
 //!   `ssh -Q kex|cipher|mac|key|sig`. If `ssh` is missing, everything counts
-//!   as supported.
+//!   as supported. Likewise, `rsa-sha2-256` user certificate cases need
+//!   OpenSSH 9.6 (see [`Case::with_user_certificate`]).
 //! * `RUSSH_SSHD=/abs/path/sshd` selects another sshd. The path must be
 //!   absolute because sshd re-executes itself.
 //! * `RUSSH_INTEROP_JOBS=<n>` caps how many cases a runner runs at once.
@@ -146,7 +153,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, anyhow, bail, ensure};
 use russh::keys::{
-    Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate,
+    Algorithm, Certificate, EcdsaCurve, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey,
+    PublicKeyOrCertificate,
 };
 use russh::{ChannelMsg, Disconnect, Names, Preferred, cipher, client, kex, mac};
 use tokio::sync::Semaphore;
@@ -586,6 +594,30 @@ fn public_key_path(private_key: &Path) -> PathBuf {
     path.into()
 }
 
+/// Signs the public half of `user_key` with the CA key `ca` for the current
+/// user, and returns the path of the certificate, which `ssh-keygen -s`
+/// writes next to the key: `<user_key>-cert.pub`.
+fn certify_user_key(openssh: &OpenSsh, ca: &Path, user_key: &Path) -> anyhow::Result<PathBuf> {
+    let output = Command::new(&openssh.ssh_keygen)
+        .args(["-q", "-s"])
+        .arg(ca)
+        .args(["-I", "russh-interop-test", "-n", openssh.user.as_str()])
+        .arg(public_key_path(user_key))
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("running {}", openssh.ssh_keygen.display()))?;
+    ensure!(
+        output.status.success(),
+        "ssh-keygen -s failed with {}: {}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim(),
+        String::from_utf8_lossy(&output.stdout).trim(),
+    );
+    let mut path = user_key.as_os_str().to_owned();
+    path.push("-cert.pub");
+    Ok(path.into())
+}
+
 /// Generates `count` keys of `key_type` with `ssh-keygen` and checks that
 /// `russh::keys::load_secret_key` loads every one. It takes many keys to hit
 /// rare encodings, such as ECDSA scalars with leading zero bytes. Panics
@@ -666,6 +698,7 @@ fn describe_key(key: &PublicKey) -> String {
 pub struct SshdBuilder {
     host_keys: Vec<KeyType>,
     user_key: KeyType,
+    user_ca: Option<KeyType>,
     kex_algorithms: Option<String>,
     ciphers: Option<String>,
     macs: Option<String>,
@@ -679,6 +712,7 @@ impl Default for SshdBuilder {
         SshdBuilder {
             host_keys: Vec::new(),
             user_key: KeyType::EcdsaP256,
+            user_ca: None,
             kex_algorithms: None,
             ciphers: None,
             macs: None,
@@ -702,6 +736,14 @@ impl SshdBuilder {
     /// Type of the user key put into `authorized_keys` (default: ECDSA P-256).
     pub fn user_key(mut self, key_type: KeyType) -> Self {
         self.user_key = key_type;
+        self
+    }
+
+    /// Adds a user CA of this type, which sshd trusts (`TrustedUserCAKeys`),
+    /// and certifies the user key with it for the current user. See
+    /// [`Sshd::load_user_certificate`].
+    pub fn user_ca(mut self, key_type: KeyType) -> Self {
+        self.user_ca = Some(key_type);
         self
     }
 
@@ -770,13 +812,23 @@ impl SshdBuilder {
             .map(|key_type| root.join(format!("host_{key_type}")))
             .collect();
         let user_key_path = root.join(format!("user_{}", self.user_key));
+        let user_ca_path = self
+            .user_ca
+            .map(|key_type| root.join(format!("user_ca_{key_type}")));
         let mut keys: Vec<(KeyType, &Path)> = host_key_types
             .iter()
             .copied()
             .zip(host_key_paths.iter().map(PathBuf::as_path))
             .collect();
         keys.push((self.user_key, &user_key_path));
+        if let (Some(key_type), Some(path)) = (self.user_ca, &user_ca_path) {
+            keys.push((key_type, path));
+        }
         generate_keys(&openssh.ssh_keygen, &keys)?;
+        let user_certificate_path = user_ca_path
+            .as_deref()
+            .map(|ca| certify_user_key(openssh, ca, &user_key_path))
+            .transpose()?;
 
         let host_keys = host_key_types
             .iter()
@@ -793,8 +845,14 @@ impl SshdBuilder {
         let mut attempt = 1;
         loop {
             let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()?));
-            let config =
-                self.render_config(openssh, &root, addr, &host_key_paths, &authorized_keys);
+            let config = self.render_config(
+                openssh,
+                &root,
+                addr,
+                &host_key_paths,
+                &authorized_keys,
+                user_ca_path.as_deref(),
+            );
             fs::write(&config_path, &config).context("writing sshd_config")?;
             let _ = fs::remove_file(&log_path);
             let output = fs::File::create(&output_path)?;
@@ -820,6 +878,7 @@ impl SshdBuilder {
                         host_keys,
                         user_key: self.user_key,
                         user_key_path,
+                        user_certificate_path,
                         config,
                     });
                 }
@@ -851,6 +910,7 @@ impl SshdBuilder {
         addr: SocketAddr,
         host_keys: &[PathBuf],
         authorized_keys: &Path,
+        user_ca: Option<&Path>,
     ) -> String {
         let mut lines = vec![
             "# Generated by russh/tests/common/openssh.rs. For most keywords sshd keeps the first value."
@@ -875,6 +935,12 @@ impl SshdBuilder {
         }
         lines.push(format!("PidFile {}", root.join("sshd.pid").display()));
         lines.push(format!("AuthorizedKeysFile {}", authorized_keys.display()));
+        if let Some(ca) = user_ca {
+            lines.push(format!(
+                "TrustedUserCAKeys {}",
+                public_key_path(ca).display()
+            ));
+        }
         lines.extend(
             [
                 "UsePAM no",
@@ -971,6 +1037,7 @@ pub struct Sshd {
     host_keys: Vec<(KeyType, PublicKey)>,
     user_key: KeyType,
     user_key_path: PathBuf,
+    user_certificate_path: Option<PathBuf>,
     config: String,
 }
 
@@ -1026,6 +1093,17 @@ impl Sshd {
         rsa_hash: Option<HashAlg>,
     ) -> anyhow::Result<PrivateKeyWithHashAlg> {
         load_user_key(&self.user_key_path, rsa_hash)
+    }
+
+    /// Loads the certificate of the user key, signed by the user CA that sshd
+    /// trusts. Fails unless the sshd was built with [`SshdBuilder::user_ca`].
+    pub fn load_user_certificate(&self) -> anyhow::Result<Certificate> {
+        let path = self
+            .user_certificate_path
+            .as_deref()
+            .context("this sshd has no user CA, see SshdBuilder::user_ca")?;
+        russh::keys::load_openssh_certificate(path)
+            .map_err(|error| anyhow!("loading {}: {error}", path.display()))
     }
 
     /// The private key file of the user key in `format`: the generated file,
@@ -1127,9 +1205,13 @@ impl Drop for Sshd {
     }
 }
 
+fn load_secret_key(path: &Path) -> anyhow::Result<PrivateKey> {
+    russh::keys::load_secret_key(path, None)
+        .map_err(|error| anyhow!("loading {}: {error}", path.display()))
+}
+
 fn load_user_key(path: &Path, rsa_hash: Option<HashAlg>) -> anyhow::Result<PrivateKeyWithHashAlg> {
-    let key = russh::keys::load_secret_key(path, None)
-        .map_err(|error| anyhow!("loading {}: {error}", path.display()))?;
+    let key = load_secret_key(path)?;
     Ok(PrivateKeyWithHashAlg::new(Arc::new(key), rsa_hash))
 }
 
@@ -1285,6 +1367,26 @@ impl Client {
         Err(self.explain(error))
     }
 
+    /// Authenticates as the sshd's user with `key` and its `certificate`,
+    /// through `authenticate_openssh_cert`. That picks the signature
+    /// algorithm itself: for RSA, from sshd's `server-sig-algs`.
+    pub async fn authenticate_with_certificate(
+        &mut self,
+        key: Arc<PrivateKey>,
+        certificate: Certificate,
+    ) -> anyhow::Result<()> {
+        let authenticating =
+            self.handle
+                .authenticate_openssh_cert(self.user.clone(), key, certificate);
+        let error = match timeout(STEP_TIMEOUT, authenticating).await {
+            Ok(Ok(result)) if result.success() => return Ok(()),
+            Ok(Ok(result)) => anyhow!("certificate authentication failed: {result:?}"),
+            Ok(Err(error)) => anyhow!("certificate authentication failed: {error}"),
+            Err(_) => anyhow!("certificate authentication timed out"),
+        };
+        Err(self.explain(error))
+    }
+
     /// Runs `command` in a new session channel, sends `stdin` followed by
     /// EOF, and collects the output until the channel closes.
     pub async fn exec(&self, command: &str, stdin: &[u8]) -> anyhow::Result<ExecOutput> {
@@ -1423,6 +1525,9 @@ pub struct Case {
     pub user_key: KeyAlg,
     /// The format of the user key file the client loads.
     pub user_key_format: KeyFormat,
+    /// Authenticate with a certificate of the user key, see
+    /// [`Case::with_user_certificate`].
+    pub user_certificate: bool,
     pub kex: Option<kex::Name>,
     pub cipher: Option<cipher::Name>,
     pub mac: Option<mac::Name>,
@@ -1437,6 +1542,7 @@ impl Default for Case {
             host_key: KeyAlg::ECDSA_P256,
             user_key: KeyAlg::ECDSA_P256,
             user_key_format: KeyFormat::OpenSsh,
+            user_certificate: false,
             kex: None,
             cipher: None,
             mac: None,
@@ -1460,6 +1566,18 @@ impl Case {
     /// [`Sshd::user_key_file`]).
     pub fn with_user_key_format(mut self, format: KeyFormat) -> Self {
         self.user_key_format = format;
+        self
+    }
+
+    /// Makes the client authenticate with a certificate of the user key,
+    /// signed by `ssh-keygen -s` with an ECDSA P-256 user CA that sshd trusts.
+    /// sshd accepts only the certificate algorithm of `user_key`, such as
+    /// `rsa-sha2-256-cert-v01@openssh.com`, and the client is not told which:
+    /// for RSA it picks the hash from sshd's `server-sig-algs`. OpenSSH limits
+    /// those to `PubkeyAcceptedAlgorithms` only since 9.6, so older versions
+    /// skip `rsa-sha2-256` cases.
+    pub fn with_user_certificate(mut self) -> Self {
+        self.user_certificate = true;
         self
     }
 
@@ -1506,11 +1624,19 @@ impl Case {
 
     /// The server side: an sshd restricted to this case's algorithms.
     pub fn sshd(&self) -> SshdBuilder {
+        let user_algorithm = if self.user_certificate {
+            self.user_key.algorithm().to_certificate_type()
+        } else {
+            self.user_key.name()
+        };
         let mut sshd = Sshd::builder()
             .host_key(self.host_key.key)
             .host_key_algorithms(self.host_key.name())
             .user_key(self.user_key.key)
-            .pubkey_accepted_algorithms(self.user_key.name());
+            .pubkey_accepted_algorithms(user_algorithm);
+        if self.user_certificate {
+            sshd = sshd.user_ca(KeyType::EcdsaP256);
+        }
         if let Some(kex) = self.kex {
             sshd = sshd.kex_algorithms(kex.as_ref());
         }
@@ -1545,13 +1671,30 @@ impl Case {
             check(Query::Key, "key type", key.key.openssh_name());
             check(Query::Sig, "signature algorithm", &key.name());
         }
-        (!missing.is_empty()).then(|| {
-            format!(
+        if self.user_certificate {
+            let certificate_type =
+                format!("{}-cert-v01@openssh.com", self.user_key.key.openssh_name());
+            check(Query::Key, "certificate type", &certificate_type);
+        }
+        if !missing.is_empty() {
+            return Some(format!(
                 "{} does not support {}",
                 openssh.short_version(),
                 missing.join(", ")
-            )
-        })
+            ));
+        }
+        if self.user_certificate
+            && self.user_key.is_rsa()
+            && self.user_key.rsa_hash == Some(HashAlg::Sha256)
+            && !openssh.version_at_least(9, 6)
+        {
+            return Some(format!(
+                "{} does not limit server-sig-algs to PubkeyAcceptedAlgorithms (9.6 does), so \
+                 the client signs RSA certificates with rsa-sha2-512",
+                openssh.short_version()
+            ));
+        }
+        None
     }
 
     /// Checks the algorithms passed to `Handler::kex_done` against the
@@ -1602,10 +1745,25 @@ impl Case {
 
     /// The client side of [`run_case`].
     pub async fn run_client(&self, sshd: &Sshd) -> anyhow::Result<()> {
-        let user_key = sshd.user_key_file(self.user_key_format)?;
-        let user_key = load_user_key(&user_key, self.user_key.rsa_hash)?;
+        let user_key = load_secret_key(&sshd.user_key_file(self.user_key_format)?)?;
+        let certificate = if self.user_certificate {
+            Some(sshd.load_user_certificate()?)
+        } else {
+            None
+        };
         let mut client = sshd.connect(self.preferred()).await?;
-        client.authenticate_with(user_key).await?;
+        match certificate {
+            Some(certificate) => {
+                client
+                    .authenticate_with_certificate(Arc::new(user_key), certificate)
+                    .await?
+            }
+            None => {
+                let user_key =
+                    PrivateKeyWithHashAlg::new(Arc::new(user_key), self.user_key.rsa_hash);
+                client.authenticate_with(user_key).await?
+            }
+        }
         self.check_negotiated(client.negotiated().as_ref())?;
         client.check_echo().await?;
         if self.round_trip > 0 {
@@ -1626,7 +1784,12 @@ impl fmt::Display for Case {
         if let Some(mac) = self.mac {
             write!(f, "mac={} ", mac.as_ref())?;
         }
-        write!(f, "host-key={} user-key={}", self.host_key, self.user_key)?;
+        let user = if self.user_certificate {
+            "user-cert"
+        } else {
+            "user-key"
+        };
+        write!(f, "host-key={} {user}={}", self.host_key, self.user_key)?;
         if self.user_key_format != KeyFormat::OpenSsh {
             write!(f, " ({})", self.user_key_format)?;
         }
@@ -1838,6 +2001,15 @@ pub async fn check_user_keys(base: Case, algorithms: &[KeyAlg]) {
         .iter()
         .map(|&user_key| base.clone().with_user_key(user_key));
     check_cases("user keys", cases).await;
+}
+
+/// Checks publickey authentication with a certificate of each user key
+/// algorithm on top of `base`, see [`Case::with_user_certificate`].
+pub async fn check_user_certificates(base: Case, algorithms: &[KeyAlg]) {
+    let cases = algorithms
+        .iter()
+        .map(|&user_key| base.clone().with_user_key(user_key).with_user_certificate());
+    check_cases("user certificates", cases).await;
 }
 
 // ---------------------------------------------------------------------------
