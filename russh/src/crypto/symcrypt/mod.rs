@@ -13,8 +13,8 @@
 //! | Category | File |
 //! |---|---|
 //! | `hash`: SHA-1, SHA-2 | `hash.rs` |
-//! | `kex`: X25519, ECDH P-256/P-384, ML-KEM-768 hybrid (no P-521, no finite-field DH) | `kex.rs` |
-//! | `sign`: ECDSA P-256/P-384, RSA SHA-2 host key, certificate and user signatures (no Ed25519, P-521, SHA-1 RSA) | `sign.rs` |
+//! | `kex`: X25519, ECDH P-256/P-384/P-521, ML-KEM-768 hybrid (no finite-field DH) | `kex.rs` |
+//! | `sign`: ECDSA P-256/P-384/P-521, RSA SHA-2 host key, certificate and user signatures (no Ed25519, SHA-1 RSA) | `sign.rs` |
 //! | `cipher`: AES-GCM, ChaCha20-Poly1305, AES-CTR | `cipher.rs` |
 //! | `mac`: HMAC-SHA2; HMAC-SHA1 only for hashed `known_hosts` host names | `mac.rs` |
 //! | `rng`: all of russh's randomness | `rng.rs` |
@@ -26,9 +26,10 @@
 //! `ci/symcrypt-ban-check.sh` checks that no other crypto implementation is
 //! in the dependency graph (`sha2` is, for ssh-key's key fingerprints only).
 //!
-//! A primitive SymCrypt lacks is `crate::crypto::Unsupported` (`NistP521`
-//! and `Dh` in `kex`), and the algorithms that need it are left out of
-//! `ALGORITHMS`, so they are neither offered nor accepted.
+//! A primitive SymCrypt lacks is `crate::crypto::Unsupported` (`Dh` in
+//! `kex`: `symcrypt-sys` has no bindings for SymCrypt's finite-field DH),
+//! and the algorithms that need it are left out of `ALGORITHMS`, so they are
+//! neither offered nor accepted.
 //!
 //! # Changing a category
 //!
@@ -78,6 +79,9 @@ mod tests {
     const P384: Algorithm = Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP384,
     };
+    const P521: Algorithm = Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP521,
+    };
     const RSA_SHA512: Algorithm = Algorithm::Rsa {
         hash: Some(HashAlg::Sha512),
     };
@@ -110,13 +114,14 @@ mod tests {
                     kex::CURVE25519_PRE_RFC_8731,
                     kex::ECDH_SHA2_NISTP256,
                     kex::ECDH_SHA2_NISTP384,
+                    kex::ECDH_SHA2_NISTP521,
                     kex::EXTENSION_SUPPORT_AS_CLIENT,
                     kex::EXTENSION_SUPPORT_AS_SERVER,
                     kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
                     kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
                 ]
             );
-            assert_eq!(pref.key[..], [P256, P384, RSA_SHA512, RSA_SHA256]);
+            assert_eq!(pref.key[..], [P256, P384, P521, RSA_SHA512, RSA_SHA256]);
             assert!(pref.host_key_certificates.is_empty());
             assert_eq!(
                 pref.cipher[..],
@@ -161,9 +166,7 @@ mod tests {
             Algorithm::Ed25519,
             P256,
             P384,
-            Algorithm::Ecdsa {
-                curve: EcdsaCurve::NistP521,
-            },
+            P521,
             RSA_SHA512,
             RSA_SHA256,
             Algorithm::Rsa { hash: None },
@@ -190,13 +193,17 @@ mod tests {
                 kex::CURVE25519_PRE_RFC_8731,
                 kex::ECDH_SHA2_NISTP256,
                 kex::ECDH_SHA2_NISTP384,
+                kex::ECDH_SHA2_NISTP521,
                 kex::NONE,
             ]
         );
-        assert_eq!(supported.key[..], [P256, P384, RSA_SHA512, RSA_SHA256]);
+        assert_eq!(
+            supported.key[..],
+            [P256, P384, P521, RSA_SHA512, RSA_SHA256]
+        );
         assert_eq!(
             supported.host_key_certificates[..],
-            [P256, P384, RSA_SHA512, RSA_SHA256]
+            [P256, P384, P521, RSA_SHA512, RSA_SHA256]
         );
         assert_eq!(
             supported.cipher[..],

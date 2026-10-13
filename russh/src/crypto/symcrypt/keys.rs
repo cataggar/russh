@@ -250,6 +250,8 @@ mod tests {
     use std::path::Path;
 
     use der::{Decode, Encode};
+    use hex_literal::hex;
+    use ssh_key::private::{EcdsaKeypair, KeypairData};
     use ssh_key::{PrivateKey, PublicKey};
 
     use crate::keys::pkcs8::{decode_pkcs8, encode_pkcs8, encode_pkcs8_encrypted};
@@ -355,6 +357,101 @@ mod tests {
             encode_pkcs8_pem(&key, &mut pem).unwrap();
             let decoded = decode_secret_key(std::str::from_utf8(&pem).unwrap(), None).unwrap();
             assert!(decoded.key_data() == key.key_data(), "{name}");
+        }
+    }
+
+    /// The P-521 private scalars `0x0102…1f` (31 bytes) and `0x0102…40` (64
+    /// bytes), and their public points.
+    const P521_SHORT_SCALARS: [(&[u8], [u8; 133]); 2] = [
+        (
+            &hex!("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+            hex!(
+                "04"
+                "00df"
+                "3ec97448b70a1e6c7e14d18fe2e265888f0ae704e922961520b610a7248c709b"
+                "a3410eca5a2d62946151b360f47f0a1dfc98632ce27f8c1d9ce1c04d47c38de3"
+                "00a1"
+                "d1cf55787695c49950e441f48eadf76c6948b9b7c35c5d80fceaa046ef286370"
+                "404602bfee96bcfa16984c8dc0e8f67584e3b957b529c73914ce6142ea8018d7"
+            ),
+        ),
+        (
+            &hex!(
+                "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+                "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40"
+            ),
+            hex!(
+                "04"
+                "017f"
+                "30635fc463be581744b72e0c4fa6f267b05540a38643fb4fb7bdccb3ef1ef2f2"
+                "74d433ecf6e75c35e42a674aa075a4746709c75cb275dd526a2c168065aa08ed"
+                "0126"
+                "74797f74196eb13190bc1e7e6c93b356dd903e709b6801d62ee222ef37d3d270"
+                "35ad79eceebc44289b18f45ecffe0da32dd9c0d008c5abd9354cb6b784309762"
+            ),
+        ),
+    ];
+
+    /// An unencrypted OpenSSH P-521 key, with `scalar` as its `mpint`.
+    fn openssh_p521(scalar: &[u8], point: &[u8]) -> String {
+        fn string(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+        let mut public = Vec::new();
+        string(&mut public, b"ecdsa-sha2-nistp521");
+        string(&mut public, b"nistp521");
+        string(&mut public, point);
+        let mut private = [0x5a; 8].to_vec();
+        private.extend_from_slice(&public);
+        string(&mut private, scalar);
+        string(&mut private, b"russh-test");
+        let padding = (8 - private.len() % 8) % 8;
+        private.extend((1..).take(padding));
+        let mut key = b"openssh-key-v1\0".to_vec();
+        for field in [&b"none"[..], b"none", b""] {
+            string(&mut key, field);
+        }
+        key.extend_from_slice(&1u32.to_be_bytes());
+        string(&mut key, &public);
+        string(&mut key, &private);
+        format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            data_encoding::BASE64.encode(&key)
+        )
+    }
+
+    /// P-521 scalars below 2^512 are short `mpint`s (1 in 512 keys from
+    /// `ssh-keygen`): ssh-key pads those of 32 bytes or more, and
+    /// `pad_short_ecdsa_scalar` in `keys::format::openssh` shorter ones.
+    /// Both are padded to 66 bytes, from OpenSSH and SEC1 keys, and sign.
+    #[test]
+    fn loads_short_p521_scalars() {
+        let parameters = pem_der(&fixture("ecdsa-p521.pem"));
+        let parameters = sec1::EcPrivateKey::from_der(&parameters)
+            .unwrap()
+            .parameters;
+        for (scalar, point) in P521_SHORT_SCALARS {
+            let sec1 = sec1::EcPrivateKey {
+                private_key: scalar,
+                parameters,
+                public_key: None,
+            };
+            let keys = [
+                decode_secret_key(&openssh_p521(scalar, &point), None).unwrap(),
+                decode_pkcs8(&sec1_der(&sec1), None).unwrap(),
+            ];
+            for key in keys {
+                let KeypairData::Ecdsa(pair @ EcdsaKeypair::NistP521 { .. }) = key.key_data()
+                else {
+                    panic!("not P-521");
+                };
+                let (zeros, digits) = pair.private_key_bytes().split_at(66 - scalar.len());
+                assert!(zeros.iter().all(|&b| b == 0) && digits == scalar);
+                assert_eq!(pair.public_key_bytes(), point);
+                let signature = crate::crypto::sign(&key, None, b"message").unwrap();
+                crate::crypto::verify(key.public_key().key_data(), b"message", &signature).unwrap();
+            }
         }
     }
 

@@ -70,7 +70,6 @@ Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to th
 **Algorithms.** [Supported algorithms](#supported-algorithms) has the full lists. Unlike the other backends, `symcrypt` doesn't offer:
 
 - `ssh-ed25519`: SymCrypt has no EdDSA.
-- `ecdh-sha2-nistp521` and `ecdsa-sha2-nistp521`: not implemented in this backend yet.
 - Finite-field Diffie-Hellman (`diffie-hellman-group*` and `diffie-hellman-group-exchange-*`): the `symcrypt` crate has no API for it.
 - Legacy algorithms, which this backend doesn't implement: SHA-1 signatures and MACs (`ssh-rsa`, `hmac-sha1`, `hmac-sha1-etm@openssh.com`), the CBC modes, `3des-cbc` and `ssh-dss`.
 - Security key signatures (`sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`): not implemented in this backend.
@@ -82,7 +81,7 @@ Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to th
 - multi-prime RSA keys;
 - Ed25519 PKCS#8 v1 keys, which hold only the seed.
 
-Other Ed25519 keys and P-521 keys load, but signing with them fails with `ssh_key::Error::AlgorithmUnsupported`. A password given with an unencrypted key is ignored, and `keys::pkcs8::encode_pkcs8_encrypted` always fails. Russh has no SymCrypt key generation, and with `symcrypt` as the only backend it doesn't enable ssh-key's RustCrypto features: `PrivateKey::random` (from `ssh-key`) fails with `ssh_key::Error::AlgorithmUnknown`, and `PrivateKey::encrypt` and `decrypt` don't exist, unless another crate in your build enables those features. Create keys with a tool such as `ssh-keygen`.
+Other Ed25519 keys load, but signing with them fails with `ssh_key::Error::AlgorithmUnsupported`. A password given with an unencrypted key is ignored, and `keys::pkcs8::encode_pkcs8_encrypted` always fails. Russh has no SymCrypt key generation, and with `symcrypt` as the only backend it doesn't enable ssh-key's RustCrypto features: `PrivateKey::random` (from `ssh-key`) fails with `ssh_key::Error::AlgorithmUnknown`, and `PrivateKey::encrypt` and `decrypt` don't exist, unless another crate in your build enables those features. Create keys with a tool such as `ssh-keygen`.
 
 **Releases.** The backend depends on `symcrypt` 0.6, for ML-KEM, and on `symcrypt-sys` 0.5. Neither version is on crates.io yet, so russh pins both to a commit of [microsoft/rust-symcrypt](https://github.com/microsoft/rust-symcrypt). crates.io doesn't accept git dependencies, even optional ones, so russh can't be published there with the `symcrypt` feature until these versions are. Until then, use russh as a git dependency, as shown above.
 
@@ -105,8 +104,7 @@ The available algorithms depend on the [crypto backend](#crypto-backends); `aws-
 | `diffie-hellman-group-exchange-sha256` (GEX) | default | — |
 | `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512` | default | — |
 | `diffie-hellman-group14-sha256` | default | — |
-| `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384` | opt-in | default |
-| `ecdh-sha2-nistp521` | opt-in | — |
+| `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` | opt-in | default |
 | `diffie-hellman-group14-sha1` | opt-in | — |
 | `diffie-hellman-group1-sha1` | opt-in | — |
 | `diffie-hellman-group-exchange-sha1` (GEX) | opt-in | — |
@@ -142,8 +140,7 @@ All backends support OpenSSH strict key exchange (Terrapin mitigation). `aws-lc-
 | Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
 |---|---|---|
 | `ssh-ed25519` | default | — |
-| `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384` | default | default |
-| `ecdsa-sha2-nistp521` | default | — |
+| `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521` | default | default |
 | `rsa-sha2-256`, `rsa-sha2-512` | default | default |
 | `ssh-rsa` (SHA-1) | default | — |
 | `ssh-dss` (requires the `dsa` crate feature) | opt-in | — |

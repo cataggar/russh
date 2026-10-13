@@ -24,25 +24,21 @@ async fn kex() {
             kex::CURVE25519_PRE_RFC_8731,
             kex::ECDH_SHA2_NISTP256,
             kex::ECDH_SHA2_NISTP384,
+            kex::ECDH_SHA2_NISTP521,
         ],
     )
     .await;
 }
 
-/// NIST P-521 and finite-field Diffie-Hellman, which OpenSSH implements and
-/// the backend doesn't, are neither offered nor accepted.
+/// Finite-field Diffie-Hellman, which OpenSSH implements and the backend
+/// doesn't, is neither offered nor accepted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsupported_kex_is_refused() {
     openssh::check_refused(
         "unsupported kex",
         Refused::Kex,
-        [
-            kex::ECDH_SHA2_NISTP521,
-            kex::DH_G14_SHA256,
-            kex::DH_G16_SHA512,
-            kex::DH_GEX_SHA256,
-        ]
-        .map(|kex| Case::default().with_kex(kex)),
+        [kex::DH_G14_SHA256, kex::DH_G16_SHA512, kex::DH_GEX_SHA256]
+            .map(|kex| Case::default().with_kex(kex)),
     )
     .await;
 }

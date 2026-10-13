@@ -276,8 +276,8 @@ pub const EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER: Name = Name("kex-strict-s-v00@
 
 // The key exchange methods, written once over the provider's primitives
 // (`crypto::provider::{kex, hash}`). Each provider's `kex::ALGORITHMS` lists
-// the ones it can run: `symcrypt` leaves out finite-field DH and P-521 (its
-// `Dh` and `NistP521` are `Unsupported`), so nothing uses those there.
+// the ones it can run: `symcrypt` leaves out finite-field DH (its `Dh` is
+// `Unsupported`), so nothing uses those there.
 pub(crate) const _CURVE25519: Curve25519KexType = Curve25519KexType {};
 #[cfg_attr(russh_backend = "symcrypt", allow(dead_code))]
 pub(crate) const _DH_GEX_SHA1: DhGexSha1KexType = DhGexSha1KexType {};
@@ -299,7 +299,6 @@ pub(crate) const _DH_G17_SHA512: DhGroup17Sha512KexType = DhGroup17Sha512KexType
 pub(crate) const _DH_G18_SHA512: DhGroup18Sha512KexType = DhGroup18Sha512KexType {};
 pub(crate) const _ECDH_SHA2_NISTP256: EcdhNistP256KexType = EcdhNistP256KexType {};
 pub(crate) const _ECDH_SHA2_NISTP384: EcdhNistP384KexType = EcdhNistP384KexType {};
-#[cfg_attr(russh_backend = "symcrypt", allow(dead_code))]
 pub(crate) const _ECDH_SHA2_NISTP521: EcdhNistP521KexType = EcdhNistP521KexType {};
 pub(crate) const _MLKEM768X25519_SHA256: MlKem768X25519KexType = MlKem768X25519KexType {};
 const _NONE: none::NoneKexType = none::NoneKexType {};

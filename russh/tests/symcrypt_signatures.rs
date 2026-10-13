@@ -1,12 +1,12 @@
-//! OpenSSH interop of the SymCrypt backend's signatures: ECDSA P-256 and
-//! P-384, and RSA with `rsa-sha2-256` and `rsa-sha2-512`, for host keys,
+//! OpenSSH interop of the SymCrypt backend's signatures: ECDSA P-256, P-384
+//! and P-521, and RSA with `rsa-sha2-256` and `rsa-sha2-512`, for host keys,
 //! user keys and certificates. Both directions are covered:
 //!
 //! * The russh **client** against `sshd`, through `common::openssh`. It
 //!   verifies host key signatures, signs publickey authentication with plain
 //!   keys (loaded from OpenSSH, PKCS#8 and PEM files) and with user
 //!   certificates, and fails clearly with the algorithms the backend lacks
-//!   (Ed25519, ECDSA P-521 and `ssh-rsa`).
+//!   (Ed25519 and `ssh-rsa`).
 //! * The OpenSSH `ssh` client against an in-process russh **server**. The
 //!   server signs with host keys and host certificates, verifies user key
 //!   signatures, and verifies the CA signature of user certificates. Its
@@ -45,9 +45,10 @@ use tokio::time::timeout;
 
 /// The signature algorithms the backend implements, with 2048- and 3072-bit
 /// RSA keys.
-const ALGORITHMS: [KeyAlg; 6] = [
+const ALGORITHMS: [KeyAlg; 7] = [
     KeyAlg::ECDSA_P256,
     KeyAlg::ECDSA_P384,
+    KeyAlg::ECDSA_P521,
     KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha256)),
     KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha512)),
     KeyAlg::RSA_SHA2_256,
@@ -55,7 +56,7 @@ const ALGORITHMS: [KeyAlg; 6] = [
 ];
 
 /// Key types OpenSSH has and the backend lacks.
-const UNSUPPORTED: [KeyType; 2] = [KeyType::Ed25519, KeyType::EcdsaP521];
+const UNSUPPORTED: [KeyType; 1] = [KeyType::Ed25519];
 
 /// Time limit for each `ssh` run and each russh client step.
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -79,15 +80,21 @@ async fn client_signs_user_keys() {
     openssh::check_user_keys(Case::default().with_round_trip(0), &ALGORITHMS).await;
 }
 
-/// Each ECDSA or RSA host key with each ECDSA or RSA user key. The 12 cases
+/// Each ECDSA or RSA host key with each ECDSA or RSA user key. The 20 cases
 /// cycle through the user key file formats, so that each user key algorithm
-/// is loaded from an OpenSSH, a PKCS#8 and a PEM file once.
+/// is loaded from an OpenSSH, a PKCS#8 and a PEM file at least once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_with_each_host_and_user_key() {
-    const HOST_KEYS: [KeyAlg; 3] = [KeyAlg::ECDSA_P256, KeyAlg::ECDSA_P384, KeyAlg::RSA_SHA2_512];
-    const USER_KEYS: [KeyAlg; 4] = [
+    const HOST_KEYS: [KeyAlg; 4] = [
         KeyAlg::ECDSA_P256,
         KeyAlg::ECDSA_P384,
+        KeyAlg::ECDSA_P521,
+        KeyAlg::RSA_SHA2_512,
+    ];
+    const USER_KEYS: [KeyAlg; 5] = [
+        KeyAlg::ECDSA_P256,
+        KeyAlg::ECDSA_P384,
+        KeyAlg::ECDSA_P521,
         KeyAlg::RSA_SHA2_256,
         KeyAlg::RSA_SHA2_512,
     ];
@@ -115,8 +122,8 @@ async fn client_signs_with_certificates() {
     openssh::check_user_certificates(Case::default().with_round_trip(0), &ALGORITHMS).await;
 }
 
-/// With Ed25519, ECDSA P-521 and `ssh-rsa` (SHA-1) user keys,
-/// authentication fails with an error naming the algorithm.
+/// With Ed25519 and `ssh-rsa` (SHA-1) user keys, authentication fails with
+/// an error naming the algorithm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_refuses_unsupported_keys() {
     let Some(openssh) = openssh::available() else {
@@ -148,19 +155,15 @@ async fn client_refuses_unsupported_keys() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// sshd with only a host key algorithm the backend lacks (Ed25519, ECDSA
-/// P-521, or `ssh-rsa` with SHA-1) has none in common with the client.
+/// sshd with only a host key algorithm the backend lacks (Ed25519, or
+/// `ssh-rsa` with SHA-1) has none in common with the client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_refuses_unsupported_host_keys() {
     openssh::check_refused(
         "unsupported host keys",
         Refused::Key,
-        [
-            KeyAlg::ED25519,
-            KeyAlg::ECDSA_P521,
-            KeyAlg::rsa(KeyType::Rsa3072, None),
-        ]
-        .map(|host_key| Case::default().with_host_key(host_key)),
+        [KeyAlg::ED25519, KeyAlg::rsa(KeyType::Rsa3072, None)]
+            .map(|host_key| Case::default().with_host_key(host_key)),
     )
     .await;
 }
@@ -215,6 +218,7 @@ async fn server_signs_host_keys() {
     let host_types = [
         KeyType::EcdsaP256,
         KeyType::EcdsaP384,
+        KeyType::EcdsaP521,
         KeyType::Rsa2048,
         KeyType::Rsa3072,
     ];
@@ -244,7 +248,12 @@ async fn server_signs_with_host_certificates() {
     let Some(setup) = Setup::new() else {
         return;
     };
-    let host_types = [KeyType::EcdsaP256, KeyType::EcdsaP384, KeyType::Rsa2048];
+    let host_types = [
+        KeyType::EcdsaP256,
+        KeyType::EcdsaP384,
+        KeyType::EcdsaP521,
+        KeyType::Rsa2048,
+    ];
     let (hosts, ca, user) = tokio::try_join!(
         setup.keys.generate_all("host", &host_types),
         setup.keys.generate("ca", KeyType::EcdsaP256),
@@ -264,6 +273,7 @@ async fn server_signs_with_host_certificates() {
     let algorithms = [
         KeyAlg::ECDSA_P256,
         KeyAlg::ECDSA_P384,
+        KeyAlg::ECDSA_P521,
         KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha256)),
         KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha512)),
     ];
@@ -296,6 +306,7 @@ async fn server_verifies_user_keys() {
     let mut user_types = vec![
         KeyType::EcdsaP256,
         KeyType::EcdsaP384,
+        KeyType::EcdsaP521,
         KeyType::Rsa2048,
         KeyType::Rsa3072,
     ];
@@ -340,6 +351,7 @@ async fn server_verifies_certificate_cas() {
     let mut cases: Vec<(KeyAlg, &[&str], Expect)> = vec![
         (KeyAlg::ECDSA_P256, &[][..], Expect::Success),
         (KeyAlg::ECDSA_P384, &[][..], Expect::Success),
+        (KeyAlg::ECDSA_P521, &[][..], Expect::Success),
         (
             KeyAlg::RSA_SHA2_256,
             &["-t", "rsa-sha2-256"][..],
@@ -361,7 +373,12 @@ async fn server_verifies_certificate_cas() {
             .iter()
             .map(|&key_type| (KeyAlg::new(key_type), &[][..], Expect::Denied)),
     );
-    let mut ca_types = vec![KeyType::EcdsaP256, KeyType::EcdsaP384, KeyType::Rsa3072];
+    let mut ca_types = vec![
+        KeyType::EcdsaP256,
+        KeyType::EcdsaP384,
+        KeyType::EcdsaP521,
+        KeyType::Rsa3072,
+    ];
     ca_types.extend(&unsupported);
     let (host, user, cas) = tokio::try_join!(
         setup.keys.generate("host", KeyType::EcdsaP256),
