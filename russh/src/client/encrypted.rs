@@ -382,6 +382,9 @@ impl Session {
                                 }
                                 _ => {}
                             }
+                            // Free what the backend kept from the key that
+                            // signed, unless the user still holds it.
+                            crate::crypto::release_dropped_keys();
                         }
                         Some((&msg::USERAUTH_GSSAPI_TOKEN, mut r)) => {
                             if let Some(auth::CurrentRequest::GssapiWithMic) = auth_request.current
@@ -1800,7 +1803,7 @@ impl Encrypted {
                 // Extend with self-signature. RSA signs with the hash the
                 // request is named after; other keys ignore the hash.
                 let hash_alg = certificate_hash_alg.unwrap_or(HashAlg::Sha512);
-                crate::crypto::sign(key, Some(hash_alg), buffer)?
+                crate::crypto::sign_held(key, 0, Some(hash_alg), buffer)?
                     .encoded()?
                     .encode(&mut *buffer)?;
 

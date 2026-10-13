@@ -7,10 +7,9 @@ use ssh_encoding::Encode;
 use ssh_key::Algorithm;
 
 use super::*;
-use crate::helpers::sign_with_hash_alg;
 use crate::crypto::mpint_body;
+use crate::helpers::EncodedExt;
 use crate::kex::{KEXES, KexAlgorithm, KexAlgorithmImplementor, KexCause};
-use crate::keys::key::PrivateKeyWithHashAlg;
 use crate::negotiation::{Names, Select, is_key_compatible_with_algo};
 use crate::parsing::ensure_end;
 use crate::{msg, negotiation};
@@ -264,7 +263,7 @@ impl ServerKex {
                 // Present a certificate only when one was negotiated;
                 // `names.key` is then the plain algorithm the certificate
                 // contains, which is what signs the exchange below.
-                let (key, certificate) = if names.host_key_is_certificate {
+                let (slot, certificate) = if names.host_key_is_certificate {
                     self.config
                         .certificates
                         .iter()
@@ -287,19 +286,20 @@ impl ServerKex {
                             self.config
                                 .keys
                                 .iter()
-                                .find(|k| k.public_key().key_data() == c.public_key())
-                                .map(|k| (k, Some(c)))
+                                .position(|k| k.public_key().key_data() == c.public_key())
+                                .map(|slot| (slot, Some(c)))
                         })
                         .ok_or(Error::UnknownKey)?
                 } else {
-                    let key = self
+                    let slot = self
                         .config
                         .keys
                         .iter()
-                        .find(|key| is_key_compatible_with_algo(key, &names.key))
+                        .position(|key| is_key_compatible_with_algo(key, &names.key))
                         .ok_or(Error::UnknownKey)?;
-                    (key, None)
+                    (slot, None)
                 };
+                let key = self.config.keys.get(slot).ok_or(Error::UnknownKey)?;
 
                 let certificate_blob = certificate
                     .map(|cert| {
@@ -331,13 +331,14 @@ impl ServerKex {
                     Ok::<_, Error>(hash)
                 })?;
 
-                // Hash signature
+                // Hash signature, with the key held by the shared
+                // configuration, which the crypto backend may have prepared
+                // for an earlier session.
                 debug!("signing with key {key:?}");
-                let signature = sign_with_hash_alg(
-                    &PrivateKeyWithHashAlg::new(Arc::new(key.clone()), signature_hash_alg),
-                    &hash,
-                )
-                .map_err(Into::into)?;
+                let signature =
+                    crate::crypto::sign_held(&self.config, slot, signature_hash_alg, &hash)
+                        .and_then(|signature| signature.encoded())
+                        .map_err(Into::into)?;
 
                 output.write_packet(|w| {
                     match kex.is_dh_gex() {

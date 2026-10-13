@@ -60,7 +60,9 @@
 //!   backend signs and verifies. They answer `keys::supports_signing` and
 //!   `keys::supports_verifying`, and the client and server check keys with
 //!   them before using them. The first `DEFAULT_ORDER` entry is the key
-//!   type `keys::generate_secret_key` generates.
+//!   type `keys::generate_secret_key` generates. A backend whose keys are
+//!   costly to prepare may override [`Signer::sign_held`] to prepare each
+//!   key once, and [`Signer::release_dropped_keys`].
 //! - `cipher`: `ALGORITHMS: &[(&cipher::Name, &(dyn Cipher + Send + Sync))]`
 //!   and `DEFAULT_ORDER: &[cipher::Name]`. Entries instantiate the generic
 //!   SSH glue with the provider's primitives, e.g.
@@ -96,6 +98,7 @@
 //! `cargo test -p russh --no-default-features --features symcrypt --lib -- crypto::symcrypt`.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use ssh_encoding::Encode;
 use ssh_key::public::KeyData;
@@ -292,6 +295,53 @@ pub(crate) trait Signer: Verifier {
         hash_alg: Option<HashAlg>,
         message: &[u8],
     ) -> ssh_key::Result<Signature>;
+
+    /// Signs like [`Signer::sign`] with key `slot` of `holder`. A backend
+    /// may keep what it derives from that key, to sign with it again, for
+    /// as long as `holder` lives (see [`KeyHolder`]).
+    fn sign_held<H: KeyHolder>(
+        holder: &Arc<H>,
+        slot: usize,
+        hash_alg: Option<HashAlg>,
+        message: &[u8],
+    ) -> ssh_key::Result<Signature> {
+        Self::sign(held_key(holder.as_ref(), slot)?, hash_alg, message)
+    }
+
+    /// Frees what [`Signer::sign_held`] kept from the keys of holders that
+    /// were dropped, which the backend may otherwise free later.
+    fn release_dropped_keys() {}
+}
+
+/// Private keys shared through an `Arc` and numbered from 0: a
+/// [`PrivateKey`], or the host keys of a `server::Config`.
+///
+/// While a `Weak` to an `Arc` exists, nothing can change the value it
+/// shares in place: `Arc::get_mut` fails, and `Arc::make_mut`,
+/// `Arc::try_unwrap` and `Arc::into_inner` move the value out of the
+/// allocation, after which it counts as dropped. A backend that keeps a
+/// `Weak` to the holder may therefore keep what it derived from a key for
+/// as long as the holder lives, without comparing the key again: the same
+/// allocation and slot always hold the same key.
+pub(crate) trait KeyHolder: Send + Sync + 'static {
+    fn private_keys(&self) -> &[PrivateKey];
+}
+
+impl KeyHolder for PrivateKey {
+    fn private_keys(&self) -> &[PrivateKey] {
+        std::slice::from_ref(self)
+    }
+}
+
+/// Key `slot` of `holder`.
+pub(crate) fn held_key<H: KeyHolder + ?Sized>(
+    holder: &H,
+    slot: usize,
+) -> ssh_key::Result<&PrivateKey> {
+    holder
+        .private_keys()
+        .get(slot)
+        .ok_or(ssh_key::Error::Crypto)
 }
 
 /// A cryptographically secure random number generator.
@@ -483,6 +533,23 @@ pub(crate) fn sign(
     message: &[u8],
 ) -> ssh_key::Result<Signature> {
     <provider::sign::Signatures as Signer>::sign(key, hash_alg, message)
+}
+
+/// Sign `message` with key `slot` of `holder` (see [`Signer::sign_held`]).
+pub(crate) fn sign_held<H: KeyHolder>(
+    holder: &Arc<H>,
+    slot: usize,
+    hash_alg: Option<HashAlg>,
+    message: &[u8],
+) -> ssh_key::Result<Signature> {
+    <provider::sign::Signatures as Signer>::sign_held(holder, slot, hash_alg, message)
+}
+
+/// Frees what the backend kept from the keys of dropped holders (see
+/// [`Signer::release_dropped_keys`]), once russh dropped keys it no longer
+/// needs.
+pub(crate) fn release_dropped_keys() {
+    <provider::sign::Signatures as Signer>::release_dropped_keys()
 }
 
 /// The body of the SSH mpint encoding (RFC 4251) of an unsigned big-endian

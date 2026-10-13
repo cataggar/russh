@@ -20,6 +20,15 @@
 //! RustCrypto signing and verification are never used, so RSA works without
 //! the `rsa` feature.
 //!
+//! Importing a private key costs about as much as a signature, or more for
+//! RSA: SymCrypt derives the RSA private exponent and CRT values, checks
+//! that the private and public parts match, and, as FIPS 140-3 requires,
+//! runs a pairwise consistency test. `Signatures::sign_held`, which russh
+//! uses for its own keys (server host keys, client and agent keys), imports
+//! a key once and keeps it for as long as its holder lives (see
+//! `key_cache`), so these checks run once per key. `Signatures::sign`
+//! imports the key for every signature.
+//!
 //! Not implemented, so neither offered nor accepted: `ssh-ed25519` (SymCrypt
 //! has no EdDSA), `ssh-rsa` (SHA-1), `ssh-dss` and the security-key (`sk-*`)
 //! algorithms. Signing with such a key fails with
@@ -27,6 +36,7 @@
 //! this backend.
 
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use ::symcrypt::ecc::{CurveType, EcKey, EcKeyUsage};
 use ::symcrypt::errors::SymCryptError;
@@ -39,7 +49,16 @@ use ssh_key::private::{EcdsaKeypair, KeypairData, RsaKeypair};
 use ssh_key::public::{EcdsaPublicKey, KeyData, RsaPublicKey};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature};
 
-use crate::crypto::{Signer, Verifier};
+use self::key_cache::KeyCache;
+use crate::crypto::{KeyHolder, Signer, Verifier, held_key};
+
+mod key_cache;
+
+/// How many imported keys `Signatures::sign_held` keeps at most.
+const KEY_CACHE_CAPACITY: usize = 32;
+
+/// The keys `Signatures::sign_held` imported.
+static SIGNING_KEYS: KeyCache<SigningKey> = KeyCache::new(KEY_CACHE_CAPACITY);
 
 pub(crate) struct Signatures;
 
@@ -79,19 +98,92 @@ impl Signer for Signatures {
         hash_alg: Option<HashAlg>,
         message: &[u8],
     ) -> ssh_key::Result<Signature> {
-        match key.key_data() {
-            KeypairData::Ecdsa(keypair) => {
-                sign_ecdsa(Curve::new(keypair.curve()), keypair, message)
+        let algorithm = signature_algorithm(key, hash_alg)?;
+        SigningKey::import(key)?.sign(algorithm, message)
+    }
+
+    fn sign_held<H: KeyHolder>(
+        holder: &Arc<H>,
+        slot: usize,
+        hash_alg: Option<HashAlg>,
+        message: &[u8],
+    ) -> ssh_key::Result<Signature> {
+        sign_cached(&SIGNING_KEYS, holder, slot, hash_alg, message)
+    }
+
+    fn release_dropped_keys() {
+        SIGNING_KEYS.remove_dropped();
+    }
+}
+
+/// Signs with key `slot` of `holder`, imported into `cache` unless it
+/// already is.
+fn sign_cached<H: KeyHolder>(
+    cache: &KeyCache<SigningKey>,
+    holder: &Arc<H>,
+    slot: usize,
+    hash_alg: Option<HashAlg>,
+    message: &[u8],
+) -> ssh_key::Result<Signature> {
+    let key = held_key(holder.as_ref(), slot)?;
+    // Checked first, so that no key is imported that cannot sign.
+    let algorithm = signature_algorithm(key, hash_alg)?;
+    let imported = cache.get_or_try_insert_with(holder, slot, || SigningKey::import(key))?;
+    #[cfg(test)]
+    tests::signed_with(&imported);
+    imported.sign(algorithm, message)
+}
+
+/// The algorithm of the signatures `key` makes with `hash_alg` (see
+/// [`Signer::sign`]), if this backend implements it.
+fn signature_algorithm(key: &PrivateKey, hash_alg: Option<HashAlg>) -> ssh_key::Result<Algorithm> {
+    match key.key_data() {
+        KeypairData::Ecdsa(keypair) => Ok(keypair.algorithm()),
+        KeypairData::Rsa(_) => match hash_alg {
+            Some(hash @ (HashAlg::Sha256 | HashAlg::Sha512)) => {
+                Ok(Algorithm::Rsa { hash: Some(hash) })
             }
-            KeypairData::Rsa(keypair) => match hash_alg {
-                Some(hash @ (HashAlg::Sha256 | HashAlg::Sha512)) => {
-                    sign_rsa(keypair, hash, message)
-                }
-                _ => Err(unsupported(Algorithm::Rsa { hash: hash_alg })),
-            },
+            _ => Err(unsupported(Algorithm::Rsa { hash: hash_alg })),
+        },
+        KeypairData::Encrypted(_) => Err(ssh_key::Error::Encrypted),
+        _ => Err(unsupported(key.algorithm())),
+    }
+}
+
+/// A private key imported into SymCrypt, which checked that its private and
+/// public parts match. Dropping it frees and wipes it.
+enum SigningKey {
+    Ecdsa(Curve, EcKey),
+    Rsa(RsaKey),
+}
+
+impl SigningKey {
+    fn import(key: &PrivateKey) -> ssh_key::Result<Self> {
+        #[cfg(test)]
+        tests::count_import();
+        match key.key_data() {
+            KeypairData::Ecdsa(keypair) => import_ecdsa(Curve::new(keypair.curve()), keypair),
+            KeypairData::Rsa(keypair) => import_rsa(keypair),
             KeypairData::Encrypted(_) => Err(ssh_key::Error::Encrypted),
             _ => Err(unsupported(key.algorithm())),
         }
+    }
+
+    /// Signs `message` as `algorithm`, which [`signature_algorithm`] gave
+    /// for the key this was imported from.
+    fn sign(&self, algorithm: Algorithm, message: &[u8]) -> ssh_key::Result<Signature> {
+        let blob = match (self, &algorithm) {
+            (SigningKey::Ecdsa(curve, key), Algorithm::Ecdsa { curve: signing })
+                if Curve::new(*signing) == *curve =>
+            {
+                sign_ecdsa(*curve, key, message)?
+            }
+            (SigningKey::Rsa(key), Algorithm::Rsa { hash: Some(hash) }) => {
+                sign_rsa(key, *hash, message)?
+            }
+            _ => return Err(ssh_key::Error::Crypto),
+        };
+        Signature::new(algorithm, blob)
     }
 }
 
@@ -249,7 +341,7 @@ fn verify_ecdsa(
         .map_err(|_| signature::Error::new())
 }
 
-fn sign_ecdsa(curve: Curve, keypair: &EcdsaKeypair, message: &[u8]) -> ssh_key::Result<Signature> {
+fn import_ecdsa(curve: Curve, keypair: &EcdsaKeypair) -> ssh_key::Result<SigningKey> {
     let point = curve
         .coordinates(keypair.public_key_bytes())
         .ok_or(ssh_key::Error::PublicKey)?;
@@ -260,6 +352,11 @@ fn sign_ecdsa(curve: Curve, keypair: &EcdsaKeypair, message: &[u8]) -> ssh_key::
         EcKeyUsage::EcDsa,
     )
     .map_err(|error| signing_error("import an ECDSA key", error))?;
+    Ok(SigningKey::Ecdsa(curve, key))
+}
+
+/// The SSH signature blob of `message`.
+fn sign_ecdsa(curve: Curve, key: &EcKey, message: &[u8]) -> ssh_key::Result<Vec<u8>> {
     let fixed = key
         .ecdsa_sign(&curve.digest(message))
         .map_err(|error| signing_error("sign with an ECDSA key", error))?;
@@ -270,7 +367,7 @@ fn sign_ecdsa(curve: Curve, keypair: &EcdsaKeypair, message: &[u8]) -> ssh_key::
     let mut blob = Vec::new();
     Mpint::from_positive_bytes(r).encode(&mut blob)?;
     Mpint::from_positive_bytes(s).encode(&mut blob)?;
-    Signature::new(keypair.algorithm(), blob)
+    Ok(blob)
 }
 
 /// The RSA modulus sizes accepted, in bits: from OpenSSH's minimum
@@ -342,7 +439,7 @@ fn verify_rsa(
         .map_err(|_| signature::Error::new())
 }
 
-fn sign_rsa(keypair: &RsaKeypair, hash: HashAlg, message: &[u8]) -> ssh_key::Result<Signature> {
+fn import_rsa(keypair: &RsaKeypair) -> ssh_key::Result<SigningKey> {
     let (n, e) = rsa_public_components(keypair.public()).inspect_err(|_| {
         error!(
             "cannot sign with this RSA key: the symcrypt backend takes moduli of 1024 to \
@@ -354,31 +451,42 @@ fn sign_rsa(keypair: &RsaKeypair, hash: HashAlg, message: &[u8]) -> ssh_key::Res
     else {
         return Err(ssh_key::Error::Crypto);
     };
-    let (digest, hash_algorithm) = rsa_digest(hash, message)?;
     // SymCrypt derives the private exponent and the CRT values from p and q.
     let key = RsaKey::set_key_pair(n, e, p, q, RsaKeyUsage::Sign)
         .map_err(|error| signing_error("import an RSA key", error))?;
-    let blob = key
-        .pkcs1_sign(&digest, hash_algorithm)
-        .map_err(|error| signing_error("sign with an RSA key", error))?;
-    Signature::new(Algorithm::Rsa { hash: Some(hash) }, blob)
+    Ok(SigningKey::Rsa(key))
+}
+
+/// The SSH signature blob of `message`.
+fn sign_rsa(key: &RsaKey, hash: HashAlg, message: &[u8]) -> ssh_key::Result<Vec<u8>> {
+    let (digest, hash_algorithm) = rsa_digest(hash, message)?;
+    key.pkcs1_sign(&digest, hash_algorithm)
+        .map_err(|error| signing_error("sign with an RSA key", error))
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeSet;
+    use std::sync::{Arc, Weak};
 
     use hex_literal::hex;
     use ssh_encoding::{Decode, Encode};
-    use ssh_key::private::{EcdsaKeypair, EcdsaPrivateKey, KeypairData, RsaKeypair};
+    use ssh_key::private::{EcdsaKeypair, EcdsaPrivateKey, KeypairData, RsaKeypair, RsaPrivateKey};
     use ssh_key::public::{EcdsaPublicKey, KeyData, RsaPublicKey};
     use ssh_key::{
         Algorithm, Certificate, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature, SshSig,
     };
 
-    use super::{Curve, DEFAULT_ORDER, rsa_public_components};
-    use crate::crypto::{is_supported_signature_algorithm, sign, verify, verify_certificate};
+    use super::key_cache::KeyCache;
+    use super::{
+        Curve, DEFAULT_ORDER, KEY_CACHE_CAPACITY, SigningKey, rsa_public_components, sign_cached,
+    };
+    use crate::crypto::{
+        KeyHolder, is_supported_signature_algorithm, sign, sign_held, verify, verify_certificate,
+    };
+    use crate::keys::PrivateKeyWithHashAlg;
 
     const P256: Algorithm = Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP256,
@@ -1119,5 +1227,413 @@ mod tests {
                 }
             );
         }
+    }
+
+    thread_local! {
+        /// How many keys this thread imported to sign with.
+        static IMPORTS: Cell<usize> = const { Cell::new(0) };
+        /// The imported key this thread last signed with.
+        static SIGNED_WITH: RefCell<Weak<SigningKey>> = const { RefCell::new(Weak::new()) };
+    }
+
+    pub(super) fn count_import() {
+        IMPORTS.set(IMPORTS.get() + 1);
+    }
+
+    pub(super) fn signed_with(key: &Arc<SigningKey>) {
+        SIGNED_WITH.set(Arc::downgrade(key));
+    }
+
+    /// The imported key this thread last signed with, unless it was freed.
+    fn last_signed_with() -> Weak<SigningKey> {
+        SIGNED_WITH.with_borrow(Weak::clone)
+    }
+
+    /// How many keys this thread imports to sign with while running `f`.
+    fn count_imports(f: impl FnOnce()) -> usize {
+        let before = IMPORTS.get();
+        f();
+        IMPORTS.get() - before
+    }
+
+    const MESSAGE: &[u8] = b"message";
+
+    /// Signs [`MESSAGE`] with key `slot` of `holder` through `cache`, and
+    /// checks the signature.
+    fn sign_checked<H: KeyHolder>(
+        cache: &KeyCache<SigningKey>,
+        holder: &Arc<H>,
+        slot: usize,
+        hash_alg: Option<HashAlg>,
+    ) {
+        let signature = sign_cached(cache, holder, slot, hash_alg, MESSAGE).unwrap();
+        let public_key = holder.private_keys()[slot].public_key();
+        verify(public_key.key_data(), MESSAGE, &signature).unwrap();
+    }
+
+    fn server_config(keys: Vec<PrivateKey>) -> Arc<crate::server::Config> {
+        Arc::new(crate::server::Config {
+            keys,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn held_keys_are_imported_once() {
+        let cache = KeyCache::new(KEY_CACHE_CAPACITY);
+        let sha2 = [Some(HashAlg::Sha256), Some(HashAlg::Sha512)];
+        for (key, hash_algs) in [
+            (ecdsa_p256(), &[None][..]),
+            (ecdsa_p384(), &[None]),
+            (ecdsa_p521(), &[None]),
+            (rsa_2048(), &sha2),
+        ] {
+            let key = Arc::new(key);
+            let imports = count_imports(|| {
+                for _ in 0..3 {
+                    for &hash_alg in hash_algs {
+                        sign_checked(&cache, &key, 0, hash_alg);
+                    }
+                }
+            });
+            assert_eq!(imports, 1, "{}", key.algorithm());
+        }
+    }
+
+    /// The host keys of a server configuration are imported once for all
+    /// the sessions that share it.
+    #[test]
+    fn host_keys_are_imported_once_per_config() {
+        let cache = KeyCache::new(KEY_CACHE_CAPACITY);
+        let keys = vec![ecdsa_p256(), rsa_2048(), ecdsa_p521()];
+        let configs = [server_config(keys.clone()), server_config(keys)];
+        for config in &configs {
+            let imports = count_imports(|| {
+                for _ in 0..3 {
+                    for (slot, hash_alg) in [(0, None), (1, Some(HashAlg::Sha512)), (2, None)] {
+                        sign_checked(&cache, config, slot, hash_alg);
+                    }
+                }
+            });
+            assert_eq!(imports, 3);
+        }
+        assert_eq!(cache.len(), 6);
+        assert_eq!(
+            sign_cached(&cache, &configs[0], 3, None, MESSAGE).unwrap_err(),
+            ssh_key::Error::Crypto
+        );
+    }
+
+    /// A key is freed once it is evicted, or its holder dropped, and no
+    /// signature uses it.
+    #[test]
+    fn evicted_and_released_keys_are_freed() {
+        let cache = KeyCache::new(2);
+        let import = |holder: &Arc<PrivateKey>| {
+            cache
+                .get_or_try_insert_with(holder, 0, || SigningKey::import(holder))
+                .unwrap()
+        };
+        let a = Arc::new(ecdsa_p256());
+        let b = Arc::new(ecdsa_p384());
+        let c = Arc::new(rsa_1024());
+        let imported_a = Arc::downgrade(&import(&a));
+        let imported_b = Arc::downgrade(&import(&b));
+        // After `a` is used again, `b` is the least recently used key, which
+        // makes room for `c`.
+        assert_eq!(count_imports(|| drop(import(&a))), 0);
+        let imported_c = Arc::downgrade(&import(&c));
+        assert!(imported_b.upgrade().is_none());
+        assert!(imported_a.upgrade().is_some());
+        assert!(imported_c.upgrade().is_some());
+
+        // The key of a dropped holder is freed at the next lookup.
+        drop(a);
+        assert!(imported_a.upgrade().is_some());
+        assert_eq!(cache.len(), 1);
+        assert!(imported_a.upgrade().is_none());
+
+        // A key in use is freed when no longer used.
+        let in_use = import(&c);
+        let imported_b = Arc::downgrade(&import(&b));
+        let d = Arc::new(ecdsa_p521());
+        let imported_d = Arc::downgrade(&import(&d));
+        assert_eq!(cache.len(), 2);
+        assert!(imported_c.upgrade().is_some());
+        let signature = in_use.sign(RSA_SHA256, MESSAGE).unwrap();
+        verify(c.public_key().key_data(), MESSAGE, &signature).unwrap();
+        drop(in_use);
+        assert!(imported_c.upgrade().is_none());
+
+        // Importing `c` again evicts `b`; dropping the cache frees the rest.
+        let before = IMPORTS.get();
+        let imported_c = Arc::downgrade(&import(&c));
+        assert_eq!(IMPORTS.get() - before, 1);
+        assert!(imported_b.upgrade().is_none());
+        assert!(imported_d.upgrade().is_some());
+        drop(cache);
+        assert!(imported_c.upgrade().is_none());
+        assert!(imported_d.upgrade().is_none());
+    }
+
+    /// `keypair`'s public key with the private scalar `scalar`.
+    fn ecdsa_forgery(keypair: &EcdsaKeypair, scalar: &[u8]) -> PrivateKey {
+        let forgery = match keypair {
+            EcdsaKeypair::NistP256 { public, .. } => EcdsaKeypair::NistP256 {
+                public: *public,
+                private: EcdsaPrivateKey::from(<[u8; 32]>::try_from(scalar).unwrap()),
+            },
+            EcdsaKeypair::NistP384 { public, .. } => EcdsaKeypair::NistP384 {
+                public: *public,
+                private: EcdsaPrivateKey::from(<[u8; 48]>::try_from(scalar).unwrap()),
+            },
+            EcdsaKeypair::NistP521 { public, .. } => EcdsaKeypair::NistP521 {
+                public: *public,
+                private: EcdsaPrivateKey::from(<[u8; 66]>::try_from(scalar).unwrap()),
+            },
+        };
+        PrivateKey::new(KeypairData::Ecdsa(forgery), "").unwrap()
+    }
+
+    /// Keys, and keys with the same public key but the private part of
+    /// another key or an invalid one, with the hash to sign with.
+    fn forgeries() -> Vec<(PrivateKey, PrivateKey, Option<HashAlg>)> {
+        let mut forgeries = Vec::new();
+        let (rsa_1024, rsa_2048) = (rsa_1024(), rsa_2048());
+        let (KeypairData::Rsa(other), KeypairData::Rsa(real)) =
+            (rsa_1024.key_data(), rsa_2048.key_data())
+        else {
+            panic!("not RSA keys");
+        };
+        let junk = Mpint::from_positive_bytes(&[0xff; 128]);
+        let one = Mpint::from_positive_bytes(&[1]);
+        let junk = RsaPrivateKey::new(one.clone(), one, junk.clone(), junk).unwrap();
+        for private in [other.private().clone(), junk] {
+            let forgery = RsaKeypair::new(real.public().clone(), private).unwrap();
+            let forgery = PrivateKey::new(KeypairData::Rsa(forgery), "").unwrap();
+            forgeries.push((rsa_2048.clone(), forgery, Some(HashAlg::Sha512)));
+        }
+        for (real, rfc6979) in [ecdsa_p256(), ecdsa_p384(), ecdsa_p521()]
+            .into_iter()
+            .zip(&RFC6979)
+        {
+            let KeypairData::Ecdsa(keypair) = real.key_data() else {
+                panic!("not an ECDSA key");
+            };
+            for scalar in [rfc6979.x.to_vec(), vec![0; rfc6979.x.len()]] {
+                forgeries.push((real.clone(), ecdsa_forgery(keypair, &scalar), None));
+            }
+        }
+        forgeries
+    }
+
+    /// A key with the public key of another but not its private key cannot
+    /// sign with the other key, whether or not that one was imported: it is
+    /// imported on its own, which fails. Neither can it in a new holder at
+    /// the address of a dropped holder of the other key, as the cache keeps
+    /// that address allocated.
+    #[test]
+    fn forged_keys_never_sign_with_cached_keys() {
+        let cache = KeyCache::new(KEY_CACHE_CAPACITY);
+        for (real, forgery, hash_alg) in forgeries() {
+            assert_eq!(
+                real.public_key().key_data(),
+                forgery.public_key().key_data()
+            );
+            let config = server_config(vec![real.clone(), forgery.clone()]);
+            let real = Arc::new(real);
+            let cannot_sign = |forgery: &Arc<PrivateKey>| {
+                for result in [
+                    sign_cached(&cache, forgery, 0, hash_alg, MESSAGE),
+                    sign_cached(&cache, &config, 1, hash_alg, MESSAGE),
+                    sign_held(forgery, 0, hash_alg, MESSAGE),
+                ] {
+                    assert_eq!(result.unwrap_err(), ssh_key::Error::Crypto);
+                }
+            };
+            let forgery = Arc::new(forgery);
+            cannot_sign(&forgery);
+            assert_eq!(cache.len(), 0);
+            sign_checked(&cache, &real, 0, hash_alg);
+            sign_checked(&cache, &config, 0, hash_alg);
+            sign_held(&real, 0, hash_alg, MESSAGE).unwrap();
+            cannot_sign(&forgery);
+            assert_eq!(cache.len(), 2);
+
+            let address = Arc::as_ptr(&real);
+            drop(real);
+            let forgery = Arc::new(PrivateKey::clone(&forgery));
+            assert_ne!(Arc::as_ptr(&forgery), address);
+            cannot_sign(&forgery);
+            assert_eq!(cache.len(), 1);
+        }
+    }
+
+    #[test]
+    fn keys_sign_from_several_threads() {
+        const THREADS: usize = 8;
+        let cache = KeyCache::new(KEY_CACHE_CAPACITY);
+        let holders = [Arc::new(ecdsa_p256()), Arc::new(rsa_2048())];
+        let sign_everywhere = || -> usize {
+            std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            count_imports(|| {
+                                for _ in 0..8 {
+                                    for holder in &holders {
+                                        sign_checked(&cache, holder, 0, Some(HashAlg::Sha256));
+                                    }
+                                }
+                            })
+                        })
+                    })
+                    .collect();
+                threads
+                    .into_iter()
+                    .map(|thread| thread.join().unwrap())
+                    .sum()
+            })
+        };
+        let imports = sign_everywhere();
+        assert!(
+            (holders.len()..=holders.len() * THREADS).contains(&imports),
+            "{imports} imports"
+        );
+        assert_eq!(sign_everywhere(), 0);
+        assert_eq!(cache.len(), holders.len());
+    }
+
+    #[test]
+    fn sign_held_imports_once() {
+        let key = Arc::new(ecdsa_p384());
+        let imports = count_imports(|| {
+            for _ in 0..3 {
+                let signature = sign_held(&key, 0, None, MESSAGE).unwrap();
+                verify(key.public_key().key_data(), MESSAGE, &signature).unwrap();
+            }
+        });
+        assert_eq!(imports, 1);
+    }
+
+    /// Sessions that share a server configuration and a user key import
+    /// each key once: the host key to sign the exchange hash, and the user
+    /// key to sign the authentication request. A user key that only the
+    /// session holds is freed once the session signed with it.
+    #[tokio::test]
+    async fn sessions_import_shared_keys_once() {
+        struct Server;
+
+        impl crate::server::Handler for Server {
+            type Error = crate::Error;
+
+            async fn auth_publickey(
+                &mut self,
+                _: &str,
+                _: &ssh_key::PublicKey,
+            ) -> Result<crate::server::Auth, Self::Error> {
+                Ok(crate::server::Auth::Accept)
+            }
+        }
+
+        struct Client;
+
+        impl crate::client::Handler for Client {
+            type Error = crate::Error;
+
+            async fn check_server_key(
+                &mut self,
+                _: &crate::cert::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+
+        /// Authenticates with `key` in a new session with a server of
+        /// `config`, and returns the client side.
+        async fn authenticate(
+            config: &Arc<crate::server::Config>,
+            key: PrivateKeyWithHashAlg,
+        ) -> crate::client::Handle<Client> {
+            let (client_stream, server_stream) = tokio::io::duplex(1 << 16);
+            tokio::spawn(crate::server::run_stream(
+                Arc::clone(config),
+                server_stream,
+                Server,
+            ));
+            let client_config = Arc::new(crate::client::Config::default());
+            let mut session = crate::client::connect_stream(client_config, client_stream, Client)
+                .await
+                .unwrap();
+            let result = session.authenticate_publickey("user", key).await.unwrap();
+            assert!(result.success());
+            session
+        }
+
+        let config = server_config(vec![ecdsa_p256()]);
+        let user_key = Arc::new(rsa_2048());
+        let mut imports = Vec::new();
+        for _ in 0..3 {
+            let before = IMPORTS.get();
+            let key = PrivateKeyWithHashAlg::new(Arc::clone(&user_key), Some(HashAlg::Sha256));
+            let session = authenticate(&config, key).await;
+            imports.push(IMPORTS.get() - before);
+            assert!(last_signed_with().upgrade().is_some());
+            session
+                .disconnect(crate::Disconnect::ByApplication, "", "")
+                .await
+                .unwrap();
+        }
+        assert_eq!(imports, [2, 0, 0]);
+
+        let key = PrivateKeyWithHashAlg::new(Arc::new(ecdsa_p384()), None);
+        let session = authenticate(&config, key).await;
+        assert!(last_signed_with().upgrade().is_none());
+        session
+            .disconnect(crate::Disconnect::ByApplication, "", "")
+            .await
+            .unwrap();
+    }
+
+    /// The keys that the agent removes or replaces are freed at once.
+    #[tokio::test]
+    async fn keys_removed_from_the_agent_are_freed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use crate::keys::agent::AgentIdentity;
+        use crate::keys::agent::client::AgentClient;
+
+        let (server, client) = tokio::io::duplex(1 << 16);
+        let listener = futures::stream::iter([Ok(server)]);
+        tokio::spawn(crate::keys::agent::server::serve(listener, ()));
+        let mut client = AgentClient::connect(client);
+        let keys = [ecdsa_p256(), ecdsa_p384(), rsa_2048()];
+        let mut imported = Vec::new();
+        for key in &keys {
+            client.add_identity(key, &[]).await.unwrap();
+            let identity = AgentIdentity::from(key.public_key().clone());
+            client
+                .sign_request(&identity, Some(HashAlg::Sha256), MESSAGE.to_vec())
+                .await
+                .unwrap();
+            imported.push(last_signed_with());
+        }
+        assert!(imported.iter().all(|key| key.upgrade().is_some()));
+
+        client.add_identity(&keys[0], &[]).await.unwrap();
+        client.remove_identity(keys[1].public_key()).await.unwrap();
+        assert!(imported[0].upgrade().is_none());
+        assert!(imported[1].upgrade().is_none());
+        assert!(imported[2].upgrade().is_some());
+
+        // `SSH_AGENTC_REMOVE_ALL_IDENTITIES`, which the agent answers with
+        // `SSH_AGENT_SUCCESS`. (`AgentClient::remove_all_identities` frames
+        // it with a zero length.)
+        let mut stream = client.into_inner();
+        stream.write_all(&[0, 0, 0, 1, 19]).await.unwrap();
+        let mut response = [0; 5];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, [0, 0, 0, 1, 6]);
+        assert!(imported[2].upgrade().is_none());
     }
 }

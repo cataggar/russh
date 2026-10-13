@@ -165,6 +165,15 @@ impl Debug for Config {
     }
 }
 
+/// Host keys sign as key `i` of the session's `Arc<Config>`, so that a
+/// crypto backend can prepare each one once for all the sessions that share
+/// the configuration.
+impl crate::crypto::KeyHolder for Config {
+    fn private_keys(&self) -> &[PrivateKey] {
+        &self.keys
+    }
+}
+
 /// A client's response in a challenge-response authentication.
 ///
 /// You should iterate it to get `&[u8]` response slices.
