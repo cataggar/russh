@@ -85,6 +85,11 @@ mod private_key_with_hash_alg {
         pub fn hash_alg(&self) -> Option<crate::keys::HashAlg> {
             self.hash_alg
         }
+
+        /// The key, shared with the clones of `self`.
+        pub(crate) fn shared_key(&self) -> &Arc<crate::keys::PrivateKey> {
+            &self.key
+        }
     }
 
     impl Deref for PrivateKeyWithHashAlg {

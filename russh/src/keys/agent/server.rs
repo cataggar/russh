@@ -183,6 +183,7 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
             {
                 // remove identity
                 if let Ok(true) = self.remove_identity(&mut r) {
+                    crate::crypto::release_dropped_keys();
                     writebuf.push(msg::SUCCESS)
                 } else {
                     writebuf.push(msg::FAILURE)
@@ -198,6 +199,7 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
                 } else {
                     writebuf.push(msg::FAILURE)
                 }
+                crate::crypto::release_dropped_keys();
             }
             Some((&22, mut r))
                 if !is_locked && agentref.confirm_request(MessageType::Lock).await =>
@@ -301,11 +303,16 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
             }
         }
         let now = SystemTime::now();
-        self.keys
+        let replaced = self
+            .keys
             .0
             .write()
             .or(Err(Error::AgentFailure))?
             .insert(blob.clone(), (Arc::new(key_pair), now, c));
+        if replaced.is_some() {
+            drop(replaced);
+            crate::crypto::release_dropped_keys();
+        }
         if let Some(seconds) = lifetime {
             let keys = self.keys.clone();
             russh_util::runtime::spawn(async move {
@@ -320,6 +327,7 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
                         keys.remove(&blob);
                     }
                 }
+                crate::crypto::release_dropped_keys();
             });
         }
         writebuf.push(msg::SUCCESS);

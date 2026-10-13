@@ -211,3 +211,8 @@ features = [
 [[bench]]
 name = "ciphers"
 harness = false
+
+[[bench]]
+name = "symcrypt_sign"
+harness = false
+required-features = ["_bench", "symcrypt"]

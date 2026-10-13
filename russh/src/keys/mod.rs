@@ -72,6 +72,9 @@ use thiserror::Error;
 
 use crate::helpers::EncodedExt;
 
+#[cfg(all(feature = "_bench", russh_backend = "symcrypt"))]
+#[doc(hidden)]
+pub mod benchmark;
 pub mod certificate;
 pub mod key;
 pub use key::PrivateKeyWithHashAlg;

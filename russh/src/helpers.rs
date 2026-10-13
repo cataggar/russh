@@ -195,10 +195,11 @@ pub(crate) mod macros {
 pub(crate) use macros::map_err;
 
 /// Sign `data` with `key` (with the negotiated hash for RSA) through the
-/// crypto backend, returning the encoded signature.
+/// crypto backend, returning the encoded signature. The backend may keep
+/// what it prepares from the key for as long as the key's `Arc` lives.
 #[doc(hidden)]
 pub fn sign_with_hash_alg(key: &PrivateKeyWithHashAlg, data: &[u8]) -> ssh_key::Result<Vec<u8>> {
-    crate::crypto::sign(key, key.hash_alg(), data)?.encoded()
+    crate::crypto::sign_held(key.shared_key(), 0, key.hash_alg(), data)?.encoded()
 }
 
 mod algorithm {
