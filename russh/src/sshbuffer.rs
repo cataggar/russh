@@ -17,13 +17,13 @@ use core::fmt;
 use std::borrow::Cow;
 use std::num::Wrapping;
 
-use super::cipher::SealingKey;
 use bytes::{Bytes, BytesMut};
-use compression::Compress;
 use log::debug;
 use ssh_encoding::Writer;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+use super::cipher::SealingKey;
+use super::compression::Compress;
 use super::*;
 
 /// The SSH client/server identification string.
