@@ -65,6 +65,62 @@ pub(crate) mod mac;
 pub(crate) mod rng;
 pub(crate) mod sign;
 
+/// Prints the path of the `symcrypt.dll` that the doctests loaded and, if
+/// `RUSSH_EXPECTED_SYMCRYPT_DLL` is set, fails unless that DLL has the same contents as the file it
+/// names. rustdoc builds and runs doctests in a temporary directory, where Windows would load
+/// `C:\Windows\System32\symcrypt.dll` (an OS copy that some images have) rather than the SymCrypt
+/// on `PATH`. CI runs them with `ci/symcrypt-doctest-runner.ps1` as the Cargo runner, which copies
+/// the pinned DLL next to each doctest executable, and sets `RUSSH_EXPECTED_SYMCRYPT_DLL` to the
+/// pinned DLL.
+///
+/// ```
+/// use std::ffi::{OsString, c_void};
+/// use std::os::windows::ffi::OsStringExt;
+/// use std::path::Path;
+///
+/// #[link(name = "kernel32")]
+/// unsafe extern "system" {
+///     fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+///     fn GetModuleFileNameW(module: *mut c_void, path: *mut u16, size: u32) -> u32;
+/// }
+///
+/// // A SymCrypt call makes sure the doctest executable imports symcrypt.dll.
+/// let mut bytes = [0u8; 16];
+/// symcrypt::symcrypt_random(&mut bytes);
+///
+/// let name: Vec<u16> = "symcrypt.dll\0".encode_utf16().collect();
+/// // SAFETY: `name` is a NUL-terminated UTF-16 string; the handle is not freed.
+/// let module = unsafe { GetModuleHandleW(name.as_ptr()) };
+/// assert!(!module.is_null(), "symcrypt.dll is not loaded");
+/// let mut path = vec![0u16; 32 * 1024];
+/// // SAFETY: `path` is writable for `path.len()` UTF-16 units.
+/// let len = unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) } as usize;
+/// assert!(
+///     len > 0 && len < path.len(),
+///     "cannot get the path of symcrypt.dll"
+/// );
+/// let loaded = OsString::from_wide(&path[..len]);
+/// let loaded = Path::new(&loaded);
+/// println!("symcrypt.dll loaded from {}", loaded.display());
+///
+/// if let Some(expected) =
+///     std::env::var_os("RUSSH_EXPECTED_SYMCRYPT_DLL").filter(|p| !p.is_empty())
+/// {
+///     let expected = Path::new(&expected);
+///     let read = |path: &Path| {
+///         std::fs::read(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+///     };
+///     assert!(
+///         read(loaded) == read(expected),
+///         "loaded {}, which differs from {}",
+///         loaded.display(),
+///         expected.display(),
+///     );
+/// }
+/// ```
+#[cfg(windows)]
+mod windows_doctest_dll {}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
