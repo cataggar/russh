@@ -364,21 +364,21 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         writebuf.push(msg::SIGN_RESPONSE);
         let data = Bytes::decode(r)?;
 
-        // SymCrypt has no SHA-1 RSA signatures (`ssh-rsa`): sign RSA with the
-        // SHA-2 hash that the flags ask for, as OpenSSH's agent does.
-        #[cfg(russh_backend = "symcrypt")]
-        let hash_alg = {
-            let flags = u32::decode(r).unwrap_or(0);
-            if flags & msg::RSA_SHA2_256 != 0 {
-                Some(crate::keys::HashAlg::Sha256)
-            } else if flags & msg::RSA_SHA2_512 != 0 {
-                Some(crate::keys::HashAlg::Sha512)
-            } else {
-                None
-            }
+        // Sign RSA with the hash that the flags select, as OpenSSH's agent
+        // does (`agent_decode_alg` in ssh-agent.c): SHA-256 if
+        // SSH_AGENT_RSA_SHA2_256 is set, else SHA-512 if
+        // SSH_AGENT_RSA_SHA2_512 is, else SHA-1 (`ssh-rsa`), which the
+        // SymCrypt backend cannot make. `PrivateKeyWithHashAlg::new` drops
+        // the hash of other keys, so they ignore the flags. A request without
+        // flags counts as one with none set.
+        let flags = u32::decode(r).unwrap_or(0);
+        let hash_alg = if flags & msg::RSA_SHA2_256 != 0 {
+            Some(crate::keys::HashAlg::Sha256)
+        } else if flags & msg::RSA_SHA2_512 != 0 {
+            Some(crate::keys::HashAlg::Sha512)
+        } else {
+            None
         };
-        #[cfg(not(russh_backend = "symcrypt"))]
-        let hash_alg = None;
 
         sign_with_hash_alg(&PrivateKeyWithHashAlg::new(key, hash_alg), &data)?.encode(writebuf)?;
 
@@ -429,6 +429,102 @@ mod tests {
         })?;
 
         Ok(())
+    }
+
+    /// An RSA key signs with the hash that the sign request's flags select,
+    /// as in OpenSSH's agent (`agent_decode_alg` in ssh-agent.c): SHA-256 if
+    /// `SSH_AGENT_RSA_SHA2_256` is set, else SHA-512 if
+    /// `SSH_AGENT_RSA_SHA2_512` is, else SHA-1 (`ssh-rsa`). Other keys
+    /// ignore the flags.
+    #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
+    #[tokio::test]
+    async fn agent_signs_rsa_with_the_hash_the_flags_select()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::msg::{RSA_SHA2_256, RSA_SHA2_512};
+        use crate::keys::agent::client::AgentClient;
+        use crate::keys::decode_secret_key;
+
+        let rsa = decode_secret_key(include_str!("../../../tests/data/keys/rsa-2048"), None)?;
+        let ecdsa = decode_secret_key(include_str!("../../../tests/data/keys/ecdsa-p256"), None)?;
+        let (server, client) = tokio::io::duplex(1 << 16);
+        let connection = Connection {
+            lock: Lock(std::sync::Arc::new(std::sync::RwLock::new(
+                crate::CryptoVec::new(),
+            ))),
+            keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ))),
+            agent: Some(()),
+            s: server,
+            buf: Vec::new(),
+        };
+        tokio::spawn(async move { connection.run().await });
+        let mut client = AgentClient::connect(client);
+        client.add_identity(&rsa, &[]).await?;
+        client.add_identity(&ecdsa, &[]).await?;
+        let mut stream = client.into_inner();
+
+        let data = b"signed by the agent";
+        #[allow(unused_mut)]
+        let mut cases = vec![
+            (&rsa, RSA_SHA2_256, "rsa-sha2-256"),
+            (&rsa, RSA_SHA2_512, "rsa-sha2-512"),
+            (&rsa, RSA_SHA2_256 | RSA_SHA2_512, "rsa-sha2-256"),
+            (&ecdsa, 0, "ecdsa-sha2-nistp256"),
+            (&ecdsa, RSA_SHA2_256 | RSA_SHA2_512, "ecdsa-sha2-nistp256"),
+        ];
+        #[cfg(not(russh_backend = "symcrypt"))]
+        cases.push((&rsa, 0, "ssh-rsa"));
+        for (key, flags, name) in cases {
+            let signature = sign_request(&mut stream, key.public_key(), data, flags).await?;
+            assert_eq!(signature.algorithm().as_str(), name, "flags {flags}");
+            crate::crypto::verify(key.public_key().key_data(), data, &signature)?;
+        }
+
+        // SymCrypt has no SHA-1 RSA signatures: the request fails.
+        #[cfg(russh_backend = "symcrypt")]
+        assert!(
+            sign_request(&mut stream, rsa.public_key(), data, 0)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// Sends an `SSH_AGENTC_SIGN_REQUEST` of `data` for `key` with `flags`,
+    /// and returns the signature of the `SSH_AGENT_SIGN_RESPONSE`.
+    #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
+    async fn sign_request(
+        stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+        key: &ssh_key::PublicKey,
+        data: &[u8],
+        flags: u32,
+    ) -> Result<ssh_key::Signature, Box<dyn std::error::Error>> {
+        use ssh_encoding::{Decode, Encode};
+        use tokio::io::AsyncReadExt;
+
+        use super::msg;
+        use crate::helpers::EncodedExt;
+
+        let mut request = vec![0; 4];
+        msg::SIGN_REQUEST.encode(&mut request)?;
+        key.key_data().encoded()?.encode(&mut request)?;
+        data.encode(&mut request)?;
+        flags.encode(&mut request)?;
+        let len = request.len() - 4;
+        BigEndian::write_u32(&mut request, len as u32);
+        stream.write_all(&request).await?;
+
+        let mut len = [0; 4];
+        stream.read_exact(&mut len).await?;
+        let mut response = vec![0; BigEndian::read_u32(&len) as usize];
+        stream.read_exact(&mut response).await?;
+        let mut response = &response[..];
+        if u8::decode(&mut response)? != msg::SIGN_RESPONSE {
+            return Err("the agent did not sign".into());
+        }
+        let signature = Vec::<u8>::decode(&mut response)?;
+        Ok(ssh_key::Signature::decode(&mut &signature[..])?)
     }
 
     /// With SymCrypt, keys added to the agent are decoded with SymCrypt's
