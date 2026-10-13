@@ -17,7 +17,7 @@ Add russh to your `Cargo.toml`, choosing a crypto backend feature (see below):
 
 ```toml
 [dependencies]
-russh = { version = "0.63", features = ["aws-lc-rs"] }
+russh = { version = "0.64", features = ["aws-lc-rs"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -41,10 +41,10 @@ Russh needs a crypto backend, selected with a crate feature:
 
 ```toml
 # aws-lc-rs (default in most setups)
-russh = { version = "0.63", features = ["aws-lc-rs"] }
+russh = { version = "0.64", features = ["aws-lc-rs"] }
 
 # or ring (keep `flate2` and `rsa` when disabling default features)
-russh = { version = "0.63", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
 
 # or symcrypt, which is not in a crates.io release (keep `flate2`; RSA works without `rsa`)
 russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "flate2"] }
