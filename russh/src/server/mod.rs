@@ -289,6 +289,11 @@ pub trait Handler: Sized {
     /// is called after the signature has been verified and key
     /// ownership has been confirmed.
     ///
+    /// Russh has checked the validity period and the CA signature of the
+    /// certificate, but not that the CA is trusted, nor the type, principals
+    /// or critical options of the certificate. See [`keys::certificate::validate`]
+    /// and [`check_principal`](crate::keys::certificate::check_principal).
+    ///
     /// Russh makes sure rejection takes a constant [`Config::auth_rejection_time`],
     /// except if this method takes more than that.
     #[allow(unused_variables)]

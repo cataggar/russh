@@ -9,8 +9,8 @@ use super::*;
 /// With the RustCrypto-based backends they are random Ed25519 keys. The
 /// SymCrypt backend can neither generate keys nor use Ed25519, so it gets the
 /// committed ECDSA P-256 keys of `tests/data/test-keys` (made with
-/// `ssh-keygen -t ecdsa -b 256 -N "" -C russh-test`) and signs certificates
-/// itself. `tests/common/test_keys.rs` is the same for the integration tests.
+/// `ssh-keygen -t ecdsa -b 256 -N "" -C russh-test`). `tests/common/test_keys.rs`
+/// is the same for the integration tests.
 pub(crate) mod test_keys {
     use ssh_key::certificate::Builder;
     use ssh_key::{Algorithm, Certificate, PrivateKey};
@@ -44,57 +44,9 @@ pub(crate) mod test_keys {
         crate::keys::decode_secret_key(KEYS[n], None).unwrap()
     }
 
-    /// The certificate `builder` describes, signed by `ca`.
-    #[cfg(not(russh_backend = "symcrypt"))]
+    /// The certificate `builder` describes, signed by `ca` with the backend.
     pub(crate) fn certify(builder: Builder, ca: &PrivateKey) -> Certificate {
-        builder.sign(ca).unwrap()
-    }
-
-    /// The certificate `builder` describes, signed by `ca`.
-    ///
-    /// ssh-key signs, and checks its signature in debug builds, with
-    /// RustCrypto only: this signs through the backend instead, then
-    /// assembles the certificate from the signed data and the signature.
-    #[cfg(russh_backend = "symcrypt")]
-    pub(crate) fn certify(builder: Builder, ca: &PrivateKey) -> Certificate {
-        use std::cell::RefCell;
-
-        use ssh_encoding::Encode;
-        use ssh_key::{HashAlg, Signature, public};
-
-        struct BackendSigner<'a> {
-            key: &'a PrivateKey,
-            signed: RefCell<Option<(Vec<u8>, Signature)>>,
-        }
-
-        impl signature::Signer<Signature> for BackendSigner<'_> {
-            fn try_sign(&self, message: &[u8]) -> signature::Result<Signature> {
-                let hash_alg = match self.key.algorithm() {
-                    Algorithm::Rsa { .. } => Some(HashAlg::Sha512),
-                    _ => None,
-                };
-                let signature = crate::crypto::sign(self.key, hash_alg, message)
-                    .map_err(|_| signature::Error::new())?;
-                *self.signed.borrow_mut() = Some((message.to_vec(), signature.clone()));
-                Ok(signature)
-            }
-        }
-
-        impl From<&BackendSigner<'_>> for public::KeyData {
-            fn from(signer: &BackendSigner<'_>) -> Self {
-                signer.key.public_key().key_data().clone()
-            }
-        }
-
-        let signer = BackendSigner {
-            key: ca,
-            signed: RefCell::new(None),
-        };
-        // Fails in debug builds if ssh-key cannot verify the signature.
-        let _ = builder.sign(&signer);
-        let (mut encoded, signature) = signer.signed.into_inner().expect("incomplete certificate");
-        signature.encode_prefixed(&mut encoded).unwrap();
-        Certificate::from_bytes(&encoded).unwrap()
+        crate::keys::certificate::sign(builder, ca).unwrap()
     }
 }
 

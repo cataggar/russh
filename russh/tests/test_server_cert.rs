@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::test_keys;
 use russh::keys::PublicKeyOrCertificate;
-use russh::keys::ssh_key::certificate::{Builder, CertType};
+use russh::keys::certificate::{self, Builder, CertType};
 use russh::keys::ssh_key::{self, Algorithm, HashAlg, PrivateKey};
 use russh::*;
 use tokio::net::TcpListener;
@@ -254,34 +254,14 @@ impl client::Handler for TestClient {
     ) -> Result<bool, Self::Error> {
         match server_public_key {
             PublicKeyOrCertificate::Certificate(cert) => {
-                // Check that the certificate was signed by the trusted CA.
-                let fingerprint = self.ca_public_key.fingerprint(HashAlg::Sha256);
-                if let Err(e) = test_keys::validate(cert, &fingerprint) {
-                    eprintln!("Host certificate signature verification failed: {e}");
-                    return Ok(false);
+                // Check the CA, the validity period and the principal.
+                match certificate::validate_host(cert, "localhost", [&self.ca_public_key]) {
+                    Ok(()) => Ok(true),
+                    Err(e) => {
+                        eprintln!("Host certificate rejected: {e}");
+                        Ok(false)
+                    }
                 }
-
-                // Check the certificate's validity period.
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                if now < cert.valid_after() || now > cert.valid_before() {
-                    eprintln!("Host certificate is outside its validity period.");
-                    return Ok(false);
-                }
-
-                // Check the certificate's valid principals.
-                let target_hostname = "localhost";
-                if !cert
-                    .valid_principals()
-                    .contains(&target_hostname.to_string())
-                {
-                    eprintln!("Host certificate is not valid for principal: {target_hostname}");
-                    return Ok(false);
-                }
-
-                Ok(true)
             }
             PublicKeyOrCertificate::PublicKey { .. } => {
                 // Certificate-only environment: reject plain host keys.

@@ -2723,6 +2723,12 @@ pub trait Handler: Sized + Send {
     /// The library verifies the key exchange signature before this call,
     /// but it's up to the implementation to decide whether the key or certificate
     /// is trusted.
+    ///
+    /// The server presents a certificate only if the client asks for one with
+    /// [`Preferred::host_key_certificates`](crate::Preferred::host_key_certificates).
+    /// The library doesn't check it, not even its CA signature:
+    /// [`keys::certificate::validate_host`](crate::keys::certificate::validate_host)
+    /// does what `ssh` does.
     #[allow(unused_variables)]
     fn check_server_key(
         &mut self,
