@@ -36,9 +36,9 @@
 //! - A password is ignored for unencrypted keys. The other backends reject
 //!   an unencrypted PKCS#8 key when they are given a password.
 //! - ssh-key rejects OpenSSH ECDSA keys whose private scalar is an mpint
-//!   shorter than 32 bytes (1 in 512 P-256 keys from `ssh-keygen`). These
-//!   keys load here: the scalar is checked against the public point with
-//!   SymCrypt, padded, and the key is parsed again.
+//!   shorter than 32 bytes (1 in 512 P-256 keys from `ssh-keygen`). Every
+//!   backend pads the scalar and parses the key again; here the scalar is
+//!   also checked against the public point with SymCrypt first.
 //! - A SEC1 private key may have 1 to N bytes, where N is the curve's size
 //!   in bytes; leading zeros are ignored. The other backends need at least
 //!   24 bytes and at most N.
@@ -243,12 +243,14 @@ mod tests {
     //!   chacha20-poly1305@openssh.com` for `ed25519-encrypted`, `-m PEM`
     //!   for `*-encrypted.pem`), `openssl ec -aes256`, and `openssl pkcs8
     //!   -topk8` with `-v2 aes-256-cbc` or `-scrypt`.
+    //! - The other keys with a short ECDSA scalar (`*-short*`): see
+    //!   `keys::format::openssh::tests`.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::path::Path;
 
     use der::{Decode, Encode};
-    use ssh_key::{LineEnding, PrivateKey, PublicKey};
+    use ssh_key::{PrivateKey, PublicKey};
 
     use crate::keys::pkcs8::{decode_pkcs8, encode_pkcs8, encode_pkcs8_encrypted};
     use crate::keys::{Error, decode_pkcs5, decode_secret_key, encode_pkcs8_pem};
@@ -356,31 +358,16 @@ mod tests {
         }
     }
 
-    /// The ssh-key bug: a P-256 scalar of 31 bytes in an OpenSSH key.
-    #[test]
-    fn loads_short_ecdsa_scalar() {
-        let text = fixture("ecdsa-p256-short");
-        assert!(
-            PrivateKey::from_openssh(&text).is_err(),
-            "ssh-key loads short scalars now: the workaround in `decode_openssh` can go"
-        );
-        let key = decode_secret_key(&text, None).unwrap();
-        assert_eq!(key.comment().as_bytes(), b"russh-test");
-        assert_eq!(key.public_key().key_data(), public("ecdsa-p256-short").key_data());
-        let ssh_key::private::KeypairData::Ecdsa(pair) = key.key_data() else {
-            panic!("not ECDSA");
-        };
-        assert_eq!(pair.private_key_bytes().first(), Some(&0));
-        // ssh-key writes the scalar with its leading zero, which it reads.
-        let written = key.to_openssh(LineEnding::LF).unwrap();
-        assert!(PrivateKey::from_openssh(&written).unwrap() == key);
-    }
-
     #[test]
     fn rejects_encrypted_keys() {
         let cases = [
             ("ecdsa-p256-encrypted", "OpenSSH (aes256-ctr)"),
             ("ed25519-encrypted", "OpenSSH (chacha20-poly1305@openssh.com)"),
+            ("ecdsa-p256-short-encrypted", "OpenSSH (aes256-ctr)"),
+            (
+                "ecdsa-p384-short-encrypted",
+                "OpenSSH (chacha20-poly1305@openssh.com)",
+            ),
             ("ecdsa-p256-encrypted.pem", "PEM"),
             ("rsa-2048-encrypted.pem", "PEM"),
             ("ecdsa-p384-aes256.pem", "PEM"),

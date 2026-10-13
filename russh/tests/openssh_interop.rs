@@ -193,12 +193,11 @@ async fn host_key_selection() {
     }
 }
 
-/// Known bug in the ssh-key crate, which parses keys for `russh::keys`. A
-/// P-256 private scalar below 2^247 (1 in 512 keys) is an mpint of at most
-/// 31 bytes in OpenSSH's key format, and `EcdsaPrivateKey::decode` rejects
-/// anything shorter than 32 bytes with `length invalid`. With 4000 keys this
-/// test finds such a key with a probability above 99.9%.
-#[ignore = "ssh-key bug: 1 in 512 ssh-keygen ECDSA P-256 private keys fail to load with `length invalid`"]
+/// A P-256 private scalar below 2^247 (1 in 512 keys) is an mpint of at most
+/// 31 bytes in OpenSSH's key format. The ssh-key crate, which parses keys for
+/// `russh::keys`, rejects anything shorter than 32 bytes with `length
+/// invalid`, so russh pads the scalar and parses the key again. With 4000
+/// keys this test finds such a key with a probability above 99.9%.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ecdsa_p256_key_loading() {
     openssh::check_key_loading(KeyType::EcdsaP256, 4000).await;

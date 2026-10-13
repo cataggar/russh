@@ -801,36 +801,25 @@ impl KeyDir {
     async fn generate(&self, name: impl Into<String>, key_type: KeyType) -> anyhow::Result<Key> {
         let name = name.into();
         let path = self.root.join(&name);
-        let mut attempt = 1;
-        loop {
-            let mut command = self.ssh_keygen();
-            command
-                .args(["-q", "-N", "", "-C", &name])
-                .args(key_type.keygen_args())
-                .arg("-f")
-                .arg(&path);
-            run(command).await?;
-            match russh::keys::load_secret_key(&path, None) {
-                Ok(private) => {
-                    let public_line = fs::read_to_string(public_path(&path))?.trim().to_owned();
-                    return Ok(Key {
-                        name,
-                        key_type,
-                        path,
-                        public_line,
-                        private,
-                    });
-                }
-                // The ssh-key bug with short ECDSA P-256 scalars, see
-                // common/openssh.rs: 1 in 512 keys.
-                Err(_) if attempt < 5 => {
-                    attempt += 1;
-                    fs::remove_file(&path)?;
-                    fs::remove_file(public_path(&path))?;
-                }
-                Err(error) => bail!("russh cannot load {}: {error}", path.display()),
-            }
-        }
+        let mut command = self.ssh_keygen();
+        command
+            .args(["-q", "-N", "", "-C", &name])
+            .args(key_type.keygen_args())
+            .arg("-f")
+            .arg(&path);
+        run(command).await?;
+        let private = match russh::keys::load_secret_key(&path, None) {
+            Ok(private) => private,
+            Err(error) => bail!("russh cannot load {}: {error}", path.display()),
+        };
+        let public_line = fs::read_to_string(public_path(&path))?.trim().to_owned();
+        Ok(Key {
+            name,
+            key_type,
+            path,
+            public_line,
+            private,
+        })
     }
 
     /// Generates a key of each type, concurrently, named `{prefix}_{type}`.

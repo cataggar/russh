@@ -275,9 +275,6 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         writebuf: &mut Vec<u8>,
     ) -> Result<bool, Error> {
         let (blob, key_pair) = {
-            #[cfg(not(russh_backend = "symcrypt"))]
-            let keypair = ssh_key::private::KeypairData::decode(r)?;
-            #[cfg(russh_backend = "symcrypt")]
             let keypair = crate::keys::format::openssh::decode_keypair(r)?;
             let private_key = ssh_key::private::PrivateKey::new(keypair, "")?;
             let _comment = String::decode(r)?;
@@ -572,6 +569,108 @@ mod tests {
             let data = b"signed by the agent".to_vec();
             let identity = AgentIdentity::from(key.public_key().clone());
             let signed = client.sign_request(&identity, hash_alg, data.clone()).await?;
+            let mut signature = signed.strip_prefix(&data[..]).ok_or("no data")?;
+            u32::decode(&mut signature)?;
+            let signature = ssh_key::Signature::decode(&mut signature)?;
+            crate::crypto::verify(key.public_key().key_data(), &data, &signature)?;
+        }
+        Ok(())
+    }
+
+    /// ECDSA keys whose private scalar is an `mpint` shorter than ssh-key
+    /// reads, added as OpenSSH's `ssh-add` adds them (without leading zeros;
+    /// russh's client writes them padded), with and without constraints, are
+    /// added and sign with every backend (cataggar/russh#31).
+    #[tokio::test]
+    async fn adds_short_ecdsa_scalars_and_signs() -> Result<(), Box<dyn std::error::Error>> {
+        use ssh_encoding::{Decode, Encode};
+        use ssh_key::private::KeypairData;
+        use tokio::io::AsyncReadExt;
+
+        use super::msg;
+        use crate::keys::agent::AgentIdentity;
+        use crate::keys::agent::client::AgentClient;
+        use crate::keys::decode_secret_key;
+
+        let (server, mut stream) = tokio::io::duplex(1 << 16);
+        let connection = Connection {
+            lock: Lock(std::sync::Arc::new(std::sync::RwLock::new(
+                crate::CryptoVec::new(),
+            ))),
+            keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ))),
+            agent: Some(()),
+            s: server,
+            buf: Vec::new(),
+        };
+        tokio::spawn(async move { connection.run().await });
+
+        let mut keys = Vec::new();
+        for (key, constraints) in [
+            (
+                include_str!("../../../tests/data/keys/ecdsa-p256-short"),
+                &[][..],
+            ),
+            (
+                include_str!("../../../tests/data/keys/ecdsa-p384-short"),
+                &[msg::CONSTRAIN_CONFIRM][..],
+            ),
+            (
+                include_str!("../../../tests/data/keys/ecdsa-p521-short"),
+                &[msg::CONSTRAIN_LIFETIME, 0, 0, 0x0e, 0x10][..],
+            ),
+        ] {
+            let key = decode_secret_key(key, None)?;
+            let KeypairData::Ecdsa(pair) = key.key_data() else {
+                return Err("not ECDSA".into());
+            };
+            let scalar = pair.private_key_bytes();
+            let scalar = scalar
+                .get(scalar.iter().take_while(|&&b| b == 0).count()..)
+                .ok_or("no scalar")?;
+            assert_eq!(scalar.len(), 31, "{:?}", key.algorithm());
+
+            let mut frame = vec![0; 4];
+            frame.push(if constraints.is_empty() {
+                msg::ADD_IDENTITY
+            } else {
+                msg::ADD_ID_CONSTRAINED
+            });
+            key.algorithm().as_str().encode(&mut frame)?;
+            pair.curve().as_str().encode(&mut frame)?;
+            pair.public_key_bytes().encode(&mut frame)?;
+            scalar.encode(&mut frame)?;
+            "russh-test".encode(&mut frame)?;
+            frame.extend_from_slice(constraints);
+            let len = u32::try_from(frame.len() - 4)?;
+            BigEndian::write_u32(&mut frame, len);
+            stream.write_all(&frame).await?;
+            let mut reply = [0; 5];
+            stream.read_exact(&mut reply).await?;
+            assert_eq!(reply, [0, 0, 0, 1, msg::SUCCESS], "{:?}", key.algorithm());
+            keys.push(key);
+        }
+
+        let mut client = AgentClient::connect(stream);
+        assert_eq!(client.request_identities().await?.len(), keys.len());
+        for key in keys {
+            // The symcrypt backend does not sign with P-521 yet.
+            if !crate::crypto::is_supported_signature_algorithm(&key.algorithm()) {
+                assert!(
+                    cfg!(russh_backend = "symcrypt")
+                        && key.algorithm()
+                            == ssh_key::Algorithm::Ecdsa {
+                                curve: ssh_key::EcdsaCurve::NistP521
+                            },
+                    "{:?}",
+                    key.algorithm()
+                );
+                continue;
+            }
+            let data = b"signed by the agent".to_vec();
+            let identity = AgentIdentity::from(key.public_key().clone());
+            let signed = client.sign_request(&identity, None, data.clone()).await?;
             let mut signature = signed.strip_prefix(&data[..]).ok_or("no data")?;
             u32::decode(&mut signature)?;
             let signature = ssh_key::Signature::decode(&mut signature)?;
