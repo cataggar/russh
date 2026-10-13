@@ -85,22 +85,27 @@ fn partial_success_reject() -> server::Auth {
 }
 
 async fn connect() -> client::Handle<AcceptServerKey> {
-    let mut server_config = server::Config::default();
-    server_config.auth_rejection_time = Duration::from_millis(1);
-    server_config.auth_rejection_time_initial = Some(Duration::from_millis(1));
-    // A partial success must not count as a failed attempt: every test below
-    // that sends a second request after a partial success relies on this.
-    server_config.max_auth_attempts = 1;
-    server_config.keys.push(test_keys::key(0));
+    let server_config = server::Config {
+        auth_rejection_time: Duration::from_millis(1),
+        auth_rejection_time_initial: Some(Duration::from_millis(1)),
+        // A partial success must not count as a failed attempt: every test below
+        // that sends a second request after a partial success relies on this.
+        max_auth_attempts: 1,
+        keys: vec![test_keys::key(0)],
+        ..Default::default()
+    };
     let server_config = Arc::new(server_config);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
-        let _ = server::run_stream(server_config, socket, PartialSuccessServer)
-            .await
-            .unwrap();
+        // Dropping the `RunningSession` detaches the session; it keeps running.
+        drop(
+            server::run_stream(server_config, socket, PartialSuccessServer)
+                .await
+                .unwrap(),
+        );
     });
 
     client::connect(Arc::new(client::Config::default()), addr, AcceptServerKey)

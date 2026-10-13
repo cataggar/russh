@@ -99,11 +99,13 @@ mod tests {
         let client_key = test_keys::key(1);
 
         // Configure the server
-        let mut config = server::Config::default();
-        config.auth_rejection_time = std::time::Duration::from_secs(1);
-        config.server_id = SshId::Standard("SSH-1.99-CustomServer_1.0".into());
-        config.inactivity_timeout = None;
-        config.keys.push(test_keys::key(0));
+        let config = server::Config {
+            auth_rejection_time: std::time::Duration::from_secs(1),
+            server_id: SshId::Standard("SSH-1.99-CustomServer_1.0".into()),
+            inactivity_timeout: None,
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        };
         let config = Arc::new(config);
 
         // Create server struct
@@ -177,10 +179,12 @@ mod tests {
 
         let client_key = test_keys::key(1);
 
-        let mut config = server::Config::default();
-        config.auth_rejection_time = std::time::Duration::from_secs(1);
-        config.inactivity_timeout = None;
-        config.keys.push(test_keys::key(0));
+        let config = server::Config {
+            auth_rejection_time: std::time::Duration::from_secs(1),
+            inactivity_timeout: None,
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        };
         let config = Arc::new(config);
 
         let mut server = TestServer {

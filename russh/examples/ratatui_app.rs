@@ -56,12 +56,8 @@ impl std::io::Write for TerminalHandle {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let result = self.sender.send(self.sink.clone());
-        if result.is_err() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                result.unwrap_err(),
-            ));
+        if let Err(e) = self.sender.send(self.sink.clone()) {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e));
         }
 
         self.sink.clear();

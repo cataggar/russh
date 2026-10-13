@@ -2100,7 +2100,9 @@ async fn reply<H: Handler>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
+    #[cfg(feature = "flate2")]
+    use std::collections::VecDeque;
     #[cfg(feature = "flate2")]
     use std::io::Write;
     use std::num::Wrapping;
@@ -2115,7 +2117,9 @@ mod tests {
     use crate::helpers::EncodedExt;
     use crate::kex::{KEXES, NONE};
     use crate::session::{CommonSession, Encrypted, EncryptedState, Exchange};
-    use crate::sshbuffer::{IncomingSshPacket, PacketWriter, SSHBuffer};
+    #[cfg(feature = "flate2")]
+    use crate::sshbuffer::IncomingSshPacket;
+    use crate::sshbuffer::{PacketWriter, SSHBuffer};
     use crate::{CryptoVec, cipher, mac};
 
     pub(super) struct TestHandler;

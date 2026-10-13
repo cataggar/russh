@@ -1147,6 +1147,258 @@ impl Session {
     }
 }
 
+impl Encrypted {
+    /// Writes the first `USERAUTH_REQUEST` for `auth_method`; for a public key
+    /// that is a probe. `certificate_hash_alg` names an
+    /// [`auth::Method::OpenSshCertificate`] (see [`certificate_hash_alg`]).
+    fn write_auth_request(
+        &mut self,
+        user: &str,
+        auth_method: &auth::Method,
+        certificate_hash_alg: Option<HashAlg>,
+    ) -> Result<bool, crate::Error> {
+        // The server is waiting for our USERAUTH_REQUEST.
+        Ok(push_packet!(self.write, {
+            self.write.push(msg::USERAUTH_REQUEST);
+
+            match *auth_method {
+                auth::Method::None => {
+                    user.encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "none".encode(&mut self.write)?;
+                    true
+                }
+                auth::Method::Password { ref password } => {
+                    user.encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "password".encode(&mut self.write)?;
+                    0u8.encode(&mut self.write)?;
+                    password.encode(&mut self.write)?;
+                    true
+                }
+                auth::Method::PublicKey { ref key } => {
+                    user.encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "publickey".encode(&mut self.write)?;
+                    self.write.push(0); // This is a probe
+
+                    debug!("write_auth_request: key - {:?}", key.algorithm());
+                    key.algorithm().as_str().encode(&mut self.write)?;
+                    key.public_key().to_bytes()?.encode(&mut self.write)?;
+                    true
+                }
+                auth::Method::OpenSshCertificate { ref cert, .. } => {
+                    user.as_bytes().encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "publickey".encode(&mut self.write)?;
+                    self.write.push(0); // This is a probe
+
+                    debug!("write_auth_request: cert - {:?}", cert.algorithm());
+                    cert.algorithm()
+                        .with_hash_alg(certificate_hash_alg)
+                        .to_certificate_type()
+                        .encode(&mut self.write)?;
+                    cert.to_bytes()?.as_slice().encode(&mut self.write)?;
+                    true
+                }
+                auth::Method::FuturePublicKey { ref key, hash_alg } => {
+                    user.as_bytes().encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "publickey".encode(&mut self.write)?;
+                    self.write.push(0); // This is a probe
+
+                    key.algorithm()
+                        .with_hash_alg(hash_alg)
+                        .as_str()
+                        .encode(&mut self.write)?;
+
+                    key.to_bytes()?.as_slice().encode(&mut self.write)?;
+                    true
+                }
+                auth::Method::FutureCertificate { ref cert, hash_alg } => {
+                    user.as_bytes().encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "publickey".encode(&mut self.write)?;
+                    self.write.push(0); // This is a probe
+
+                    cert.algorithm()
+                        .with_hash_alg(hash_alg)
+                        .to_certificate_type()
+                        .encode(&mut self.write)?;
+                    cert.to_bytes()?.as_slice().encode(&mut self.write)?;
+                    true
+                }
+                auth::Method::KeyboardInteractive { ref submethods } => {
+                    debug!("Keyboard interactive");
+                    user.as_bytes().encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "keyboard-interactive".encode(&mut self.write)?;
+                    "".encode(&mut self.write)?; // lang tag is deprecated. Should be empty
+                    submethods.as_bytes().encode(&mut self.write)?;
+                    true
+                }
+                auth::Method::GssapiWithMic { ref mechanism_oids } => {
+                    user.as_bytes().encode(&mut self.write)?;
+                    "ssh-connection".encode(&mut self.write)?;
+                    "gssapi-with-mic".encode(&mut self.write)?;
+                    (mechanism_oids.len() as u32).encode(&mut self.write)?;
+                    for oid in mechanism_oids {
+                        oid.as_slice().encode(&mut self.write)?;
+                    }
+                    true
+                }
+            }
+        }))
+    }
+
+    fn client_make_gssapi_mic_data(
+        &mut self,
+        user: &str,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Vec<u8>, crate::Error> {
+        buffer.clear();
+        self.session_id.as_ref().encode(buffer)?;
+        buffer.push(msg::USERAUTH_REQUEST);
+        user.encode(buffer)?;
+        "ssh-connection".encode(buffer)?;
+        "gssapi-with-mic".encode(buffer)?;
+        Ok(buffer.clone())
+    }
+
+    pub(crate) fn client_send_gssapi_token(&mut self, token: &[u8]) -> Result<(), crate::Error> {
+        push_packet!(self.write, {
+            msg::USERAUTH_GSSAPI_TOKEN.encode(&mut self.write)?;
+            token.encode(&mut self.write)?;
+        });
+        Ok(())
+    }
+
+    pub(crate) fn client_send_gssapi_mic(
+        &mut self,
+        token: Option<&[u8]>,
+        mic: &[u8],
+    ) -> Result<(), crate::Error> {
+        if let Some(token) = token.filter(|t| !t.is_empty()) {
+            self.client_send_gssapi_token(token)?;
+        }
+        push_packet!(self.write, {
+            msg::USERAUTH_GSSAPI_MIC.encode(&mut self.write)?;
+            mic.encode(&mut self.write)?;
+        });
+        Ok(())
+    }
+
+    pub(crate) fn client_send_gssapi_exchange_complete(
+        &mut self,
+        token: Option<&[u8]>,
+    ) -> Result<(), crate::Error> {
+        if let Some(token) = token.filter(|t| !t.is_empty()) {
+            self.client_send_gssapi_token(token)?;
+        }
+        push_packet!(self.write, {
+            msg::USERAUTH_GSSAPI_EXCHANGE_COMPLETE.encode(&mut self.write)?;
+        });
+        Ok(())
+    }
+
+    fn client_make_to_sign(
+        &mut self,
+        user: &str,
+        key: &PublicKeyOrCertificate,
+        certificate_hash_alg: Option<ssh_key::HashAlg>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<usize, crate::Error> {
+        buffer.clear();
+        self.session_id.as_ref().encode(buffer)?;
+
+        let i0 = buffer.len();
+        buffer.push(msg::USERAUTH_REQUEST);
+        user.encode(buffer)?;
+        "ssh-connection".encode(buffer)?;
+        "publickey".encode(buffer)?;
+        1u8.encode(buffer)?;
+
+        match key {
+            PublicKeyOrCertificate::Certificate(cert) => {
+                cert.algorithm()
+                    .with_hash_alg(certificate_hash_alg)
+                    .to_certificate_type()
+                    .encode(buffer)?;
+                cert.to_bytes()?.encode(buffer)?;
+            }
+            PublicKeyOrCertificate::PublicKey { key, hash_alg } => {
+                key.algorithm().with_hash_alg(*hash_alg).encode(buffer)?;
+                key.to_bytes()?.encode(buffer)?;
+            }
+        }
+        Ok(i0)
+    }
+
+    /// Sends the signed request answering `USERAUTH_PK_OK`.
+    /// `certificate_hash_alg` is the one [`Encrypted::write_auth_request`]
+    /// named the probe after.
+    fn client_send_signature(
+        &mut self,
+        user: &str,
+        method: &auth::Method,
+        certificate_hash_alg: Option<HashAlg>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), crate::Error> {
+        match method {
+            auth::Method::PublicKey { key } => {
+                let i0 = self.client_make_to_sign(
+                    user,
+                    &PublicKeyOrCertificate::from(key),
+                    None,
+                    buffer,
+                )?;
+
+                // Extend with self-signature.
+                sign_with_hash_alg(key, buffer)?.encode(&mut *buffer)?;
+
+                push_packet!(self.write, {
+                    #[allow(clippy::indexing_slicing)] // length checked
+                    self.write.extend_from_slice(&buffer[i0..]);
+                })
+            }
+            auth::Method::OpenSshCertificate { key, cert } => {
+                let i0 = self.client_make_to_sign(
+                    user,
+                    &PublicKeyOrCertificate::Certificate(cert.clone()),
+                    certificate_hash_alg,
+                    buffer,
+                )?;
+
+                // Extend with self-signature. RSA signs with the hash the
+                // request is named after; other keys ignore the hash.
+                let hash_alg = certificate_hash_alg.unwrap_or(HashAlg::Sha512);
+                crate::crypto::sign_held(key, 0, Some(hash_alg), buffer)?
+                    .encoded()?
+                    .encode(&mut *buffer)?;
+
+                push_packet!(self.write, {
+                    #[allow(clippy::indexing_slicing)] // length checked
+                    self.write.extend_from_slice(&buffer[i0..]);
+                })
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn client_send_auth_response(&mut self, responses: &[String]) -> Result<(), crate::Error> {
+        push_packet!(self.write, {
+            msg::USERAUTH_INFO_RESPONSE.encode(&mut self.write)?;
+            (responses.len().try_into().unwrap_or(0) as u32).encode(&mut self.write)?; // number of responses
+
+            for r in responses {
+                r.encode(&mut self.write)?; // write the reponses
+            }
+        });
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1575,257 +1827,5 @@ mod tests {
                 expected
             );
         }
-    }
-}
-
-impl Encrypted {
-    /// Writes the first `USERAUTH_REQUEST` for `auth_method`; for a public key
-    /// that is a probe. `certificate_hash_alg` names an
-    /// [`auth::Method::OpenSshCertificate`] (see [`certificate_hash_alg`]).
-    fn write_auth_request(
-        &mut self,
-        user: &str,
-        auth_method: &auth::Method,
-        certificate_hash_alg: Option<HashAlg>,
-    ) -> Result<bool, crate::Error> {
-        // The server is waiting for our USERAUTH_REQUEST.
-        Ok(push_packet!(self.write, {
-            self.write.push(msg::USERAUTH_REQUEST);
-
-            match *auth_method {
-                auth::Method::None => {
-                    user.encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "none".encode(&mut self.write)?;
-                    true
-                }
-                auth::Method::Password { ref password } => {
-                    user.encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "password".encode(&mut self.write)?;
-                    0u8.encode(&mut self.write)?;
-                    password.encode(&mut self.write)?;
-                    true
-                }
-                auth::Method::PublicKey { ref key } => {
-                    user.encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "publickey".encode(&mut self.write)?;
-                    self.write.push(0); // This is a probe
-
-                    debug!("write_auth_request: key - {:?}", key.algorithm());
-                    key.algorithm().as_str().encode(&mut self.write)?;
-                    key.public_key().to_bytes()?.encode(&mut self.write)?;
-                    true
-                }
-                auth::Method::OpenSshCertificate { ref cert, .. } => {
-                    user.as_bytes().encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "publickey".encode(&mut self.write)?;
-                    self.write.push(0); // This is a probe
-
-                    debug!("write_auth_request: cert - {:?}", cert.algorithm());
-                    cert.algorithm()
-                        .with_hash_alg(certificate_hash_alg)
-                        .to_certificate_type()
-                        .encode(&mut self.write)?;
-                    cert.to_bytes()?.as_slice().encode(&mut self.write)?;
-                    true
-                }
-                auth::Method::FuturePublicKey { ref key, hash_alg } => {
-                    user.as_bytes().encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "publickey".encode(&mut self.write)?;
-                    self.write.push(0); // This is a probe
-
-                    key.algorithm()
-                        .with_hash_alg(hash_alg)
-                        .as_str()
-                        .encode(&mut self.write)?;
-
-                    key.to_bytes()?.as_slice().encode(&mut self.write)?;
-                    true
-                }
-                auth::Method::FutureCertificate { ref cert, hash_alg } => {
-                    user.as_bytes().encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "publickey".encode(&mut self.write)?;
-                    self.write.push(0); // This is a probe
-
-                    cert.algorithm()
-                        .with_hash_alg(hash_alg)
-                        .to_certificate_type()
-                        .encode(&mut self.write)?;
-                    cert.to_bytes()?.as_slice().encode(&mut self.write)?;
-                    true
-                }
-                auth::Method::KeyboardInteractive { ref submethods } => {
-                    debug!("Keyboard interactive");
-                    user.as_bytes().encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "keyboard-interactive".encode(&mut self.write)?;
-                    "".encode(&mut self.write)?; // lang tag is deprecated. Should be empty
-                    submethods.as_bytes().encode(&mut self.write)?;
-                    true
-                }
-                auth::Method::GssapiWithMic { ref mechanism_oids } => {
-                    user.as_bytes().encode(&mut self.write)?;
-                    "ssh-connection".encode(&mut self.write)?;
-                    "gssapi-with-mic".encode(&mut self.write)?;
-                    (mechanism_oids.len() as u32).encode(&mut self.write)?;
-                    for oid in mechanism_oids {
-                        oid.as_slice().encode(&mut self.write)?;
-                    }
-                    true
-                }
-            }
-        }))
-    }
-
-    fn client_make_gssapi_mic_data(
-        &mut self,
-        user: &str,
-        buffer: &mut Vec<u8>,
-    ) -> Result<Vec<u8>, crate::Error> {
-        buffer.clear();
-        self.session_id.as_ref().encode(buffer)?;
-        buffer.push(msg::USERAUTH_REQUEST);
-        user.encode(buffer)?;
-        "ssh-connection".encode(buffer)?;
-        "gssapi-with-mic".encode(buffer)?;
-        Ok(buffer.clone())
-    }
-
-    pub(crate) fn client_send_gssapi_token(&mut self, token: &[u8]) -> Result<(), crate::Error> {
-        push_packet!(self.write, {
-            msg::USERAUTH_GSSAPI_TOKEN.encode(&mut self.write)?;
-            token.encode(&mut self.write)?;
-        });
-        Ok(())
-    }
-
-    pub(crate) fn client_send_gssapi_mic(
-        &mut self,
-        token: Option<&[u8]>,
-        mic: &[u8],
-    ) -> Result<(), crate::Error> {
-        if let Some(token) = token.filter(|t| !t.is_empty()) {
-            self.client_send_gssapi_token(token)?;
-        }
-        push_packet!(self.write, {
-            msg::USERAUTH_GSSAPI_MIC.encode(&mut self.write)?;
-            mic.encode(&mut self.write)?;
-        });
-        Ok(())
-    }
-
-    pub(crate) fn client_send_gssapi_exchange_complete(
-        &mut self,
-        token: Option<&[u8]>,
-    ) -> Result<(), crate::Error> {
-        if let Some(token) = token.filter(|t| !t.is_empty()) {
-            self.client_send_gssapi_token(token)?;
-        }
-        push_packet!(self.write, {
-            msg::USERAUTH_GSSAPI_EXCHANGE_COMPLETE.encode(&mut self.write)?;
-        });
-        Ok(())
-    }
-
-    fn client_make_to_sign(
-        &mut self,
-        user: &str,
-        key: &PublicKeyOrCertificate,
-        certificate_hash_alg: Option<ssh_key::HashAlg>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<usize, crate::Error> {
-        buffer.clear();
-        self.session_id.as_ref().encode(buffer)?;
-
-        let i0 = buffer.len();
-        buffer.push(msg::USERAUTH_REQUEST);
-        user.encode(buffer)?;
-        "ssh-connection".encode(buffer)?;
-        "publickey".encode(buffer)?;
-        1u8.encode(buffer)?;
-
-        match key {
-            PublicKeyOrCertificate::Certificate(cert) => {
-                cert.algorithm()
-                    .with_hash_alg(certificate_hash_alg)
-                    .to_certificate_type()
-                    .encode(buffer)?;
-                cert.to_bytes()?.encode(buffer)?;
-            }
-            PublicKeyOrCertificate::PublicKey { key, hash_alg } => {
-                key.algorithm().with_hash_alg(*hash_alg).encode(buffer)?;
-                key.to_bytes()?.encode(buffer)?;
-            }
-        }
-        Ok(i0)
-    }
-
-    /// Sends the signed request answering `USERAUTH_PK_OK`.
-    /// `certificate_hash_alg` is the one [`Encrypted::write_auth_request`]
-    /// named the probe after.
-    fn client_send_signature(
-        &mut self,
-        user: &str,
-        method: &auth::Method,
-        certificate_hash_alg: Option<HashAlg>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<(), crate::Error> {
-        match method {
-            auth::Method::PublicKey { key } => {
-                let i0 = self.client_make_to_sign(
-                    user,
-                    &PublicKeyOrCertificate::from(key),
-                    None,
-                    buffer,
-                )?;
-
-                // Extend with self-signature.
-                sign_with_hash_alg(key, buffer)?.encode(&mut *buffer)?;
-
-                push_packet!(self.write, {
-                    #[allow(clippy::indexing_slicing)] // length checked
-                    self.write.extend_from_slice(&buffer[i0..]);
-                })
-            }
-            auth::Method::OpenSshCertificate { key, cert } => {
-                let i0 = self.client_make_to_sign(
-                    user,
-                    &PublicKeyOrCertificate::Certificate(cert.clone()),
-                    certificate_hash_alg,
-                    buffer,
-                )?;
-
-                // Extend with self-signature. RSA signs with the hash the
-                // request is named after; other keys ignore the hash.
-                let hash_alg = certificate_hash_alg.unwrap_or(HashAlg::Sha512);
-                crate::crypto::sign_held(key, 0, Some(hash_alg), buffer)?
-                    .encoded()?
-                    .encode(&mut *buffer)?;
-
-                push_packet!(self.write, {
-                    #[allow(clippy::indexing_slicing)] // length checked
-                    self.write.extend_from_slice(&buffer[i0..]);
-                })
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn client_send_auth_response(&mut self, responses: &[String]) -> Result<(), crate::Error> {
-        push_packet!(self.write, {
-            msg::USERAUTH_INFO_RESPONSE.encode(&mut self.write)?;
-            (responses.len().try_into().unwrap_or(0) as u32).encode(&mut self.write)?; // number of responses
-
-            for r in responses {
-                r.encode(&mut self.write)?; // write the reponses
-            }
-        });
-        Ok(())
     }
 }

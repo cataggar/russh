@@ -703,13 +703,12 @@ mod tests {
 
     use super::*;
 
+    type TestMsg = (ChannelId, ChannelMsg);
+
     fn test_write_half(
         window_size: WindowSizeRef,
         max_packet_size: u32,
-    ) -> (
-        ChannelWriteHalf<(ChannelId, ChannelMsg)>,
-        mpsc::Receiver<(ChannelId, ChannelMsg)>,
-    ) {
+    ) -> (ChannelWriteHalf<TestMsg>, mpsc::Receiver<TestMsg>) {
         let (sender, receiver) = mpsc::channel(8);
         (
             ChannelWriteHalf {

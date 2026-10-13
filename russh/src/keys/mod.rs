@@ -286,9 +286,6 @@ fn is_base64_char(c: char) -> bool {
 #[cfg(test)]
 mod test {
 
-    #[cfg(unix)]
-    use futures::Future;
-
     use super::*;
     #[cfg(unix)]
     use crate::keys::agent::AgentIdentity;

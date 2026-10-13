@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::test_keys;
 use russh::keys::PublicKeyOrCertificate;
 use russh::keys::certificate::{self, Builder, CertType};
-use russh::keys::ssh_key::{self, Algorithm, HashAlg, PrivateKey};
+use russh::keys::ssh_key::{self, Algorithm, PrivateKey};
 use russh::*;
 use tokio::net::TcpListener;
 
@@ -47,9 +47,12 @@ async fn serve_and_connect(
 
     tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
-        let _ = server::run_stream(config, socket, TestServer {})
-            .await
-            .unwrap();
+        // Dropping the `RunningSession` detaches the session; it keeps running.
+        drop(
+            server::run_stream(config, socket, TestServer {})
+                .await
+                .unwrap(),
+        );
     });
 
     let mut client_config = client::Config::default();
@@ -147,7 +150,7 @@ async fn test_server_rsa_sha2_512_certificate_auth() {
     let _ = env_logger::try_init();
 
     let rsa = Algorithm::Rsa {
-        hash: Some(HashAlg::Sha512),
+        hash: Some(ssh_key::HashAlg::Sha512),
     };
     let ca_key = test_keys::rsa_key(0);
     let now = SystemTime::now()

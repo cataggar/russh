@@ -73,11 +73,13 @@ mod compress {
         let _ = env_logger::try_init();
 
         let client_key = test_keys::key(1);
-        let mut config = server::Config::default();
-        config.preferred = preferred_zlib();
-        config.inactivity_timeout = None; // Some(std::time::Duration::from_secs(3));
-        config.auth_rejection_time = std::time::Duration::from_secs(3);
-        config.keys.push(test_keys::key(0));
+        let config = server::Config {
+            preferred: preferred_zlib(),
+            inactivity_timeout: None, // Some(std::time::Duration::from_secs(3));
+            auth_rejection_time: std::time::Duration::from_secs(3),
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        };
         let config = Arc::new(config);
         let mut sh = Server {
             clients: Arc::new(Mutex::new(HashMap::new())),
@@ -93,8 +95,10 @@ mod compress {
             server::run_stream(config, socket, server).await.unwrap();
         });
 
-        let mut config = client::Config::default();
-        config.preferred = preferred_zlib();
+        let config = client::Config {
+            preferred: preferred_zlib(),
+            ..Default::default()
+        };
         let config = Arc::new(config);
 
         let mut session = client::connect(config, addr, Client {}).await.unwrap();
@@ -214,6 +218,10 @@ mod compress {
     }
 }
 
+// The client and server tasks hand their session (a `client::Handle` or a
+// `server::RunningSession`, both futures) back to `test_session` rather than
+// awaiting it, so that the connection stays open until both sides are done.
+#[allow(clippy::async_yields_async)]
 mod channels {
     use keys::PrivateKeyWithHashAlg;
     use server::Session;
@@ -243,10 +251,12 @@ mod channels {
         let _ = env_logger::try_init();
 
         let client_key = test_keys::key(1);
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
-        config.auth_rejection_time = std::time::Duration::from_secs(3);
-        config.keys.push(test_keys::key(0));
+        let config = server::Config {
+            inactivity_timeout: None,
+            auth_rejection_time: std::time::Duration::from_secs(3),
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        };
         let config = Arc::new(config);
         let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = socket.local_addr().unwrap();
@@ -1077,10 +1087,11 @@ pub(crate) mod raw_no_crypto {
     pub(crate) const MSG_IGNORE: u8 = 2;
 
     fn strict_kex_server_config() -> Arc<server::Config> {
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
-        config.keys.push(test_keys::key(0));
-        Arc::new(config)
+        Arc::new(server::Config {
+            inactivity_timeout: None,
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        })
     }
 
     /// KEXINIT advertising algorithms the default server config accepts, so
@@ -1137,14 +1148,15 @@ pub(crate) mod raw_no_crypto {
     /// negotiate curve25519, so a rekey offering only curve25519 parks it
     /// waiting for a KEX_ECDH_INIT the raw client never sends.
     fn stalled_rekey_server_config() -> Arc<server::Config> {
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
-        config.preferred = Preferred {
-            kex: Cow::Owned(vec![kex::NONE, kex::CURVE25519]),
-            ..no_crypto_preferred()
-        };
-        config.keys.push(test_keys::key(0));
-        Arc::new(config)
+        Arc::new(server::Config {
+            inactivity_timeout: None,
+            preferred: Preferred {
+                kex: Cow::Owned(vec![kex::NONE, kex::CURVE25519]),
+                ..no_crypto_preferred()
+            },
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        })
     }
 
     /// Authenticate, then start a rekey and leave it hanging.
@@ -1193,13 +1205,14 @@ pub(crate) mod raw_no_crypto {
     }
 
     fn no_crypto_server_config() -> Arc<server::Config> {
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
-        config.auth_rejection_time = Duration::from_millis(1);
-        config.auth_rejection_time_initial = Some(Duration::from_millis(1));
-        config.preferred = no_crypto_preferred();
-        config.keys.push(test_keys::key(0));
-        Arc::new(config)
+        Arc::new(server::Config {
+            inactivity_timeout: None,
+            auth_rejection_time: Duration::from_millis(1),
+            auth_rejection_time_initial: Some(Duration::from_millis(1)),
+            preferred: no_crypto_preferred(),
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        })
     }
 
     fn no_crypto_preferred() -> Preferred {
@@ -1329,12 +1342,13 @@ pub(crate) mod raw_no_crypto {
     }
 
     pub(crate) async fn capture_panics<T>(future: impl Future<Output = T>) -> (T, bool) {
-        static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        // Held across `future.await`, hence tokio's mutex.
+        static PANIC_HOOK_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
         let _guard = PANIC_HOOK_LOCK
-            .get_or_init(|| Mutex::new(()))
+            .get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
-            .unwrap();
+            .await;
         let panicked = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let panicked_hook = panicked.clone();
         let previous_hook = std::panic::take_hook();
@@ -1584,16 +1598,20 @@ mod future_certificate {
         assert!(status.success(), "ssh-add failed");
 
         // 5. Set up test server that accepts certificate auth
-        let mut server_config = server::Config::default();
-        server_config.inactivity_timeout = None;
-        server_config.auth_rejection_time = std::time::Duration::from_secs(3);
-        server_config.keys.push(test_keys::key(2));
+        let server_config = server::Config {
+            inactivity_timeout: None,
+            auth_rejection_time: std::time::Duration::from_secs(3),
+            keys: vec![test_keys::key(2)],
+            ..Default::default()
+        };
         let server_config = Arc::new(server_config);
 
         let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = socket.local_addr().unwrap();
 
-        // Server that accepts certificate auth
+        // Server that accepts certificate auth. The task returns the running
+        // session, which stays alive until the test ends.
+        #[allow(clippy::async_yields_async)]
         let server_join = tokio::spawn(async move {
             let (socket, _) = socket.accept().await.unwrap();
 
@@ -1756,11 +1774,13 @@ mod rekey_under_load {
     async fn client_traffic_in_flight_during_server_rekey_survives() {
         let _ = env_logger::try_init();
 
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
-        // Rekey every 64 KiB written: ~16 rekeys over the transfer below.
-        config.limits = Limits::new(64 * 1024, 1 << 30, std::time::Duration::from_secs(3600));
-        config.keys.push(test_keys::key(0));
+        let config = server::Config {
+            inactivity_timeout: None,
+            // Rekey every 64 KiB written: ~16 rekeys over the transfer below.
+            limits: Limits::new(64 * 1024, 1 << 30, std::time::Duration::from_secs(3600)),
+            keys: vec![test_keys::key(0)],
+            ..Default::default()
+        };
         let config = Arc::new(config);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
