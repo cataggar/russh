@@ -100,7 +100,10 @@ mod tests {
     #[test]
     fn offers_hmac_sha2() {
         assert_eq!(
-            ALGORITHMS.iter().map(|(name, _)| **name).collect::<Vec<_>>(),
+            ALGORITHMS
+                .iter()
+                .map(|(name, _)| **name)
+                .collect::<Vec<_>>(),
             [
                 mac::HMAC_SHA256,
                 mac::HMAC_SHA512,

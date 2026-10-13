@@ -289,7 +289,10 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
                 // This avoids parsing the blob twice for regular keys.
                 let identity = if Self::is_certificate_blob(&key_blob) {
                     match Certificate::decode(&mut key_blob.as_ref()) {
-                        Ok(cert) => AgentIdentity::Certificate { certificate: cert, comment },
+                        Ok(cert) => AgentIdentity::Certificate {
+                            certificate: cert,
+                            comment,
+                        },
                         Err(_) => {
                             // Fallback to public key if certificate parsing fails
                             let key = key::parse_public_key(&key_blob)?;

@@ -1727,7 +1727,10 @@ mod tests {
     #[test]
     fn limit_triggered_rekey_waits_for_authentication() {
         let mut session = authenticated_session();
-        allow_rekey(&mut session, crate::Limits::new(0, 0, Duration::from_secs(3600)));
+        allow_rekey(
+            &mut session,
+            crate::Limits::new(0, 0, Duration::from_secs(3600)),
+        );
         let enc = session.common.encrypted.as_mut().unwrap();
         enc.state = EncryptedState::WaitingAuthServiceRequest {
             accepted: false,
@@ -1736,7 +1739,10 @@ mod tests {
         enc.server_compression = Compression::ZlibOpenSSH;
 
         session.flush().unwrap();
-        assert!(!session.kex.active(), "write limit hit before authentication");
+        assert!(
+            !session.kex.active(),
+            "write limit hit before authentication"
+        );
         assert_eq!(session.rekey_time_remaining(), None);
 
         // USERAUTH_SUCCESS has been flushed; the next peer packet would

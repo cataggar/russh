@@ -3,13 +3,13 @@ use log::debug;
 use ssh_encoding::{Encode, Writer};
 use zeroize::Zeroizing;
 
-use super::{compute_keys, KexAlgorithm, KexAlgorithmImplementor, KexType, SharedSecret};
+use super::{KexAlgorithm, KexAlgorithmImplementor, KexType, SharedSecret, compute_keys};
 use crate::crypto::provider::hash::Sha256;
 use crate::crypto::provider::kex::{MlKem768, X25519};
 use crate::crypto::{Hash, Kem, KeyAgreement};
 use crate::mac;
 use crate::session::Exchange;
-use crate::{cipher, msg, CryptoVec, Error};
+use crate::{CryptoVec, Error, cipher, msg};
 
 const MLKEM768_PUBLIC_KEY_SIZE: usize = 1184;
 const MLKEM768_CIPHERTEXT_SIZE: usize = 1088;

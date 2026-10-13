@@ -829,7 +829,9 @@ mod channels {
         )
         .await;
 
-        received.try_recv().expect("server never saw the pty request")
+        received
+            .try_recv()
+            .expect("server never saw the pty request")
     }
 }
 
@@ -989,9 +991,7 @@ pub(crate) mod raw_no_crypto {
             Self::connect_without_kex_with_config(no_crypto_server_config()).await
         }
 
-        pub(crate) async fn connect_without_kex_with_config(
-            config: Arc<server::Config>,
-        ) -> Self {
+        pub(crate) async fn connect_without_kex_with_config(config: Arc<server::Config>) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let events = Arc::new(Mutex::new(Vec::new()));
@@ -1116,8 +1116,8 @@ pub(crate) mod raw_no_crypto {
     }
 
     async fn ignore_during_initial_kex(kex_names: &[&str]) -> ServerSignal {
-        let mut session = RawSession::connect_without_kex_with_config(strict_kex_server_config())
-            .await;
+        let mut session =
+            RawSession::connect_without_kex_with_config(strict_kex_server_config()).await;
         session
             .send_packet(&real_kexinit_payload(kex_names))
             .await
@@ -1787,7 +1787,10 @@ mod rekey_under_load {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            server::run_stream(config, socket, Echo).await.unwrap().await
+            server::run_stream(config, socket, Echo)
+                .await
+                .unwrap()
+                .await
         });
 
         let key = test_keys::key(1);

@@ -273,7 +273,10 @@ mod tests {
         // `Rsa { hash: None }` the bare signer would report.
         match sign_with_hash_alg(&key, b"payload") {
             Err(ssh_key::Error::AlgorithmUnsupported {
-                algorithm: ssh_key::Algorithm::Rsa { hash: Some(HashAlg::Sha512) },
+                algorithm:
+                    ssh_key::Algorithm::Rsa {
+                        hash: Some(HashAlg::Sha512),
+                    },
             }) => {}
             other => panic!("expected AlgorithmUnsupported naming rsa-sha2-512, got {other:?}"),
         }

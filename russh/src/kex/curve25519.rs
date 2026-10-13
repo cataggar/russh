@@ -77,8 +77,7 @@ impl KexAlgorithmImplementor for Curve25519Kex {
         // fill exchange.
         exchange.server_ephemeral.clear();
         exchange.server_ephemeral.extend_from_slice(&server_pubkey);
-        let shared =
-            X25519::agree(server_secret, client_pubkey).map_err(|_| crate::Error::Kex)?;
+        let shared = X25519::agree(server_secret, client_pubkey).map_err(|_| crate::Error::Kex)?;
         if shared.iter().all(|&b| b == 0) {
             // Non-contributory: the client sent a low-order point.
             debug!("client sent a low-order curve25519 pubkey");
@@ -207,7 +206,8 @@ mod tests {
             };
             let mut exchange = Exchange::new(b"client", b"server");
             assert!(
-                kex.server_dh(&mut exchange, &kex_ecdh_init(pubkey)).is_err(),
+                kex.server_dh(&mut exchange, &kex_ecdh_init(pubkey))
+                    .is_err(),
                 "accepted low-order point {pubkey:02x?}"
             );
         }

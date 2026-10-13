@@ -251,8 +251,8 @@ pub(crate) struct RsaCrt {
 pub(crate) fn rsa_crt(n: &[u8], e: &[u8], p: &[u8], q: &[u8]) -> Result<RsaCrt, Error> {
     // SymCrypt takes the modulus size from the length of `n`.
     let n = trim_leading_zeros(n);
-    let key = RsaKey::set_key_pair(n, e, p, q, RsaKeyUsage::Sign)
-        .map_err(|_| Error::KeyIsCorrupt)?;
+    let key =
+        RsaKey::set_key_pair(n, e, p, q, RsaKeyUsage::Sign).map_err(|_| Error::KeyIsCorrupt)?;
     let RsaKeyPairExportBlob {
         modulus: _,
         pub_exp: _,
@@ -386,7 +386,11 @@ mod tests {
             for password in [None, Some("password")] {
                 let key = decode_secret_key(&fixture(file), password)
                     .unwrap_or_else(|e| panic!("{file} ({password:?}): {e}"));
-                assert_eq!(key.public_key().key_data(), public(name).key_data(), "{file}");
+                assert_eq!(
+                    key.public_key().key_data(),
+                    public(name).key_data(),
+                    "{file}"
+                );
                 assert!(key.key_data() == openssh.key_data(), "{file}");
             }
         }
@@ -521,7 +525,10 @@ mod tests {
     fn rejects_encrypted_keys() {
         let cases = [
             ("ecdsa-p256-encrypted", "OpenSSH (aes256-ctr)"),
-            ("ed25519-encrypted", "OpenSSH (chacha20-poly1305@openssh.com)"),
+            (
+                "ed25519-encrypted",
+                "OpenSSH (chacha20-poly1305@openssh.com)",
+            ),
             ("ecdsa-p256-short-encrypted", "OpenSSH (aes256-ctr)"),
             (
                 "ecdsa-p384-short-encrypted",
@@ -564,12 +571,21 @@ mod tests {
     #[test]
     fn rejects_unsupported_keys() {
         let message = error(decode_secret_key(&fixture("ed25519-v1.pk8.pem"), None)).to_string();
-        assert!(message.contains("Ed25519") && message.contains("symcrypt"), "{message}");
+        assert!(
+            message.contains("Ed25519") && message.contains("symcrypt"),
+            "{message}"
+        );
         let ppk = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n";
         let message = error(decode_secret_key(ppk, None)).to_string();
-        assert!(message.contains("PPK") && message.contains("symcrypt"), "{message}");
+        assert!(
+            message.contains("PPK") && message.contains("symcrypt"),
+            "{message}"
+        );
         let message = error(decode_secret_key(&fixture("rsa-3prime.pem"), None)).to_string();
-        assert!(message.contains("multi-prime") && message.contains("symcrypt"), "{message}");
+        assert!(
+            message.contains("multi-prime") && message.contains("symcrypt"),
+            "{message}"
+        );
     }
 
     fn sec1_der(key: &sec1::EcPrivateKey<'_>) -> Vec<u8> {

@@ -396,9 +396,7 @@ impl ChaCha20 {
         // SAFETY: the state was initialized by `new`; `data_ptr` is valid for
         // `data.len()` bytes, and SymCrypt allows the same source and
         // destination.
-        unsafe {
-            ffi::SymCryptChaCha20Crypt(&mut self.0, data_ptr, data_ptr, data.len() as SIZE_T)
-        }
+        unsafe { ffi::SymCryptChaCha20Crypt(&mut self.0, data_ptr, data_ptr, data.len() as SIZE_T) }
     }
 
     /// The first 32 bytes of the key stream.
@@ -480,7 +478,10 @@ mod tests {
     #[test]
     fn offers_aeads_and_aes_ctr() {
         assert_eq!(
-            ALGORITHMS.iter().map(|(name, _)| **name).collect::<Vec<_>>(),
+            ALGORITHMS
+                .iter()
+                .map(|(name, _)| **name)
+                .collect::<Vec<_>>(),
             [
                 cipher::AES_128_GCM,
                 cipher::AES_256_GCM,
@@ -583,9 +584,7 @@ mod tests {
             hex!("5bc94fbc3221a5db94fae95ae7121a47"),
         );
         check_gcm::<SymCryptAes256Gcm>(
-            &hex!(
-                "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308"
-            ),
+            &hex!("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308"),
             nonce,
             &aad,
             &plaintext,
@@ -794,8 +793,7 @@ mod tests {
     #[tokio::test]
     async fn packets_round_trip() {
         for &(name, cipher) in ALGORITHMS {
-            let macs: Vec<(&mac::Name, &(dyn MacAlgorithm + Send + Sync))> = if cipher.needs_mac()
-            {
+            let macs: Vec<(&mac::Name, &(dyn MacAlgorithm + Send + Sync))> = if cipher.needs_mac() {
                 super::super::mac::ALGORITHMS.to_vec()
             } else {
                 vec![(&mac::NONE, &mac::_NONE)]

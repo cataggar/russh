@@ -46,10 +46,7 @@ impl KeyAgreement for X25519 {
         Ok((private_key, public_key))
     }
 
-    fn agree(
-        private_key: Self::PrivateKey,
-        peer_public_key: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>> {
+    fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let peer_public_key = decode_u_coordinate(peer_public_key)?;
         let peer_public_key =
             EcKey::set_public_key(CurveType::Curve25519, &peer_public_key, EcKeyUsage::EcDh)
@@ -133,10 +130,7 @@ impl<C: NistCurve> KeyAgreement for Ecdh<C> {
         Ok((private_key, public_key))
     }
 
-    fn agree(
-        private_key: Self::PrivateKey,
-        peer_public_key: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>> {
+    fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let xy = match peer_public_key.split_first() {
             Some((&UNCOMPRESSED, xy)) if xy.len() == 2 * C::CURVE.get_size() as usize => xy,
             _ => return Err(CryptoError),
@@ -632,7 +626,11 @@ mod tests {
     /// The exchange hash framing of RFC 8731 §3.1 and RFC 5656 §4 (as in
     /// `compute_exchange_hash`), with fixed identification strings, KEXINIT
     /// payloads and host key.
-    fn exchange_hash<H: Hash>(client_ephemeral: &[u8], server_ephemeral: &[u8], k: &[u8]) -> Vec<u8> {
+    fn exchange_hash<H: Hash>(
+        client_ephemeral: &[u8],
+        server_ephemeral: &[u8],
+        k: &[u8],
+    ) -> Vec<u8> {
         let mut host_key = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
         host_key.extend(0..32);
         let mut buffer = CryptoVec::new();
@@ -852,8 +850,14 @@ mod tests {
             let mut client_keys = keys(&client, false);
             let mut server_keys = keys(&server, true);
             for (sealing, opening) in [
-                (&mut client_keys.local_to_remote, &mut server_keys.remote_to_local),
-                (&mut server_keys.local_to_remote, &mut client_keys.remote_to_local),
+                (
+                    &mut client_keys.local_to_remote,
+                    &mut server_keys.remote_to_local,
+                ),
+                (
+                    &mut server_keys.local_to_remote,
+                    &mut client_keys.remote_to_local,
+                ),
             ] {
                 let mut packet = seal(&mut **sealing);
                 let plaintext = opening.open(3, &mut packet).unwrap();

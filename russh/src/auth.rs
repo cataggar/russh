@@ -185,9 +185,7 @@ pub trait Signer: Sized {
 pub enum GssapiStep {
     /// The context is not established yet; send `token` to the server and
     /// wait for its next token.
-    Continue {
-        token: Vec<u8>,
-    },
+    Continue { token: Vec<u8> },
     /// The context is established. `token` is the final output token, if any.
     /// `mic` is the MIC computed over the `mic_data` passed to
     /// [`GssapiAuthenticator::gssapi_step`]. Implementations MUST produce a

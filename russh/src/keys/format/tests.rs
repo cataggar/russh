@@ -45,11 +45,18 @@ YyVRAgEBoUQDQgAEqZqnpFc/+9yfQh7B/sx5dms/sccAtE+PoGTqAa4y399K1S0H\n\
 b6KBhA+L9No0qBbsdpwaMewJChyf5AIft0Un3A==\n\
 -----END EC PRIVATE KEY-----";
     let result = decode_secret_key(key, None);
-    assert!(result.is_ok(), "Failed to parse EC key with full domain params: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to parse EC key with full domain params: {:?}",
+        result.err()
+    );
     let pk = result.unwrap();
-    assert_eq!(pk.algorithm(), Algorithm::Ecdsa {
-        curve: ssh_key::EcdsaCurve::NistP256,
-    });
+    assert_eq!(
+        pk.algorithm(),
+        Algorithm::Ecdsa {
+            curve: ssh_key::EcdsaCurve::NistP256,
+        }
+    );
 }
 
 #[test]
@@ -74,20 +81,33 @@ vVH8f9/FHwjQjBWEtctiQzPShusqnD5I3hTBBbX/qh0XaLcLMz0bA0o/HHQ+0xUw\n\
 Aak=\n\
 -----END EC PRIVATE KEY-----";
     let result = decode_secret_key(key, None);
-    assert!(result.is_ok(), "Failed to parse P-521 key with full domain params: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to parse P-521 key with full domain params: {:?}",
+        result.err()
+    );
     let pk = result.unwrap();
-    assert_eq!(pk.algorithm(), Algorithm::Ecdsa {
-        curve: ssh_key::EcdsaCurve::NistP521,
-    });
+    assert_eq!(
+        pk.algorithm(),
+        Algorithm::Ecdsa {
+            curve: ssh_key::EcdsaCurve::NistP521,
+        }
+    );
 }
 
 #[test]
 fn test_ec_malformed_der_returns_error() {
     // Completely invalid data — not valid SEC1 or PKCS#8
-    let result = decode_secret_key("-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----", None);
+    let result = decode_secret_key(
+        "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----",
+        None,
+    );
     assert!(result.is_err(), "Should fail on malformed DER");
 
     // Truncated SEC1 key
-    let result = decode_secret_key("-----BEGIN EC PRIVATE KEY-----\nMIIBaAIBAQQg\n-----END EC PRIVATE KEY-----", None);
+    let result = decode_secret_key(
+        "-----BEGIN EC PRIVATE KEY-----\nMIIBaAIBAQQg\n-----END EC PRIVATE KEY-----",
+        None,
+    );
     assert!(result.is_err(), "Should fail on truncated key");
 }

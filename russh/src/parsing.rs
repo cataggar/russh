@@ -95,7 +95,6 @@ impl OpenChannelMessage {
         })
     }
 
-
     /// Pushes a failure message to the vec.
     pub fn fail(
         &self,
