@@ -555,6 +555,7 @@ mod tests {
             (include_str!("../../../tests/data/keys/ecdsa-p256"), None),
             (include_str!("../../../tests/data/keys/ecdsa-p256-short"), None),
             (include_str!("../../../tests/data/keys/ecdsa-p384"), None),
+            (include_str!("../../../tests/data/keys/ecdsa-p521"), None),
             (
                 include_str!("../../../tests/data/keys/rsa-2048"),
                 Some(HashAlg::Sha256),
@@ -655,19 +656,6 @@ mod tests {
         let mut client = AgentClient::connect(stream);
         assert_eq!(client.request_identities().await?.len(), keys.len());
         for key in keys {
-            // The symcrypt backend does not sign with P-521 yet.
-            if !crate::crypto::is_supported_signature_algorithm(&key.algorithm()) {
-                assert!(
-                    cfg!(russh_backend = "symcrypt")
-                        && key.algorithm()
-                            == ssh_key::Algorithm::Ecdsa {
-                                curve: ssh_key::EcdsaCurve::NistP521
-                            },
-                    "{:?}",
-                    key.algorithm()
-                );
-                continue;
-            }
             let data = b"signed by the agent".to_vec();
             let identity = AgentIdentity::from(key.public_key().clone());
             let signed = client.sign_request(&identity, None, data.clone()).await?;

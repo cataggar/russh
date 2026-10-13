@@ -51,6 +51,7 @@ async fn openssh_with_default_algorithms() {
     let host_keys = [
         KeyAlg::ECDSA_P256,
         KeyAlg::ECDSA_P384,
+        KeyAlg::ECDSA_P521,
         KeyAlg::RSA_SHA2_256,
         KeyAlg::RSA_SHA2_512,
     ];

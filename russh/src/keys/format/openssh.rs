@@ -494,14 +494,6 @@ mod tests {
 
     /// Signs with `key`, and verifies the signature with its public key.
     fn check_signs(name: &str, key: &PrivateKey) {
-        if !crate::crypto::is_supported_signature_algorithm(&key.algorithm()) {
-            // The symcrypt backend does not sign with P-521 yet.
-            assert!(
-                cfg!(russh_backend = "symcrypt") && name == "ecdsa-p521-short",
-                "{name}: the backend does not sign with it"
-            );
-            return;
-        }
         let message = b"signed with a short scalar";
         let signature =
             crate::crypto::sign(key, None, message).unwrap_or_else(|e| panic!("{name}: {e}"));

@@ -42,9 +42,9 @@
 //! - `symcrypt`: all of the SSH protocol's cryptography and randomness from
 //!   Microsoft's [SymCrypt](https://github.com/microsoft/SymCrypt) library,
 //!   which must be installed both to build and to run. It offers fewer
-//!   algorithms (no Ed25519, P-521, finite-field Diffie-Hellman or security
-//!   keys, and none of the legacy SHA-1, CBC, 3DES or DSA ones) and loads
-//!   only unencrypted private keys.
+//!   algorithms (no Ed25519, finite-field Diffie-Hellman or security keys,
+//!   and none of the legacy SHA-1, CBC, 3DES or DSA ones) and loads only
+//!   unencrypted private keys.
 //!
 //! If several backend features are enabled, the first of `aws-lc-rs`, `ring`
 //! and `symcrypt` is used, so selecting `ring` or `symcrypt` needs

@@ -5,6 +5,7 @@
 //! |---|---|---|
 //! | `ecdsa-sha2-nistp256` | SHA-256 | `EcKey::ecdsa_sign`/`ecdsa_verify` on `NistP256` |
 //! | `ecdsa-sha2-nistp384` | SHA-384 | `EcKey::ecdsa_sign`/`ecdsa_verify` on `NistP384` |
+//! | `ecdsa-sha2-nistp521` | SHA-512 | `EcKey::ecdsa_sign`/`ecdsa_verify` on `NistP521` |
 //! | `rsa-sha2-256` | SHA-256 | `RsaKey::pkcs1_sign`/`pkcs1_verify` |
 //! | `rsa-sha2-512` | SHA-512 | `RsaKey::pkcs1_sign`/`pkcs1_verify` |
 //!
@@ -12,7 +13,7 @@
 //! public-key user authentication (client and server side) and the CA
 //! signature of OpenSSH certificates (`*-cert-v01@openssh.com`, through
 //! `crate::crypto::verify_certificate`). `Signatures::is_supported` limits
-//! negotiation to these four algorithms and their certificate forms.
+//! negotiation to these five algorithms and their certificate forms.
 //!
 //! Keys are imported into SymCrypt from their raw components only (RSA `n`,
 //! `e`, `p` and `q`; the ECDSA point and private scalar): `ssh-key`'s
@@ -20,8 +21,8 @@
 //! the `rsa` feature.
 //!
 //! Not implemented, so neither offered nor accepted: `ssh-ed25519` (SymCrypt
-//! has no EdDSA), `ecdsa-sha2-nistp521`, `ssh-rsa` (SHA-1), `ssh-dss` and
-//! the security-key (`sk-*`) algorithms. Signing with such a key fails with
+//! has no EdDSA), `ssh-rsa` (SHA-1), `ssh-dss` and the security-key (`sk-*`)
+//! algorithms. Signing with such a key fails with
 //! `ssh_key::Error::AlgorithmUnsupported`, after logging an error that names
 //! this backend.
 
@@ -47,7 +48,7 @@ impl Verifier for Signatures {
         matches!(
             algorithm,
             Algorithm::Ecdsa {
-                curve: EcdsaCurve::NistP256 | EcdsaCurve::NistP384
+                curve: EcdsaCurve::NistP256 | EcdsaCurve::NistP384 | EcdsaCurve::NistP521
             } | Algorithm::Rsa {
                 hash: Some(HashAlg::Sha256 | HashAlg::Sha512)
             }
@@ -62,8 +63,7 @@ impl Verifier for Signatures {
         }
         match (key, algorithm) {
             (KeyData::Ecdsa(key), Algorithm::Ecdsa { curve }) if key.curve() == curve => {
-                let curve = Curve::new(curve).ok_or_else(signature::Error::new)?;
-                verify_ecdsa(curve, key, message, signature.as_bytes())
+                verify_ecdsa(Curve::new(curve), key, message, signature.as_bytes())
             }
             (KeyData::Rsa(key), Algorithm::Rsa { hash: Some(hash) }) => {
                 verify_rsa(key, hash, message, signature.as_bytes())
@@ -80,10 +80,9 @@ impl Signer for Signatures {
         message: &[u8],
     ) -> ssh_key::Result<Signature> {
         match key.key_data() {
-            KeypairData::Ecdsa(keypair) => match Curve::new(keypair.curve()) {
-                Some(curve) => sign_ecdsa(curve, keypair, message),
-                None => Err(unsupported(keypair.algorithm())),
-            },
+            KeypairData::Ecdsa(keypair) => {
+                sign_ecdsa(Curve::new(keypair.curve()), keypair, message)
+            }
             KeypairData::Rsa(keypair) => match hash_alg {
                 Some(hash @ (HashAlg::Sha256 | HashAlg::Sha512)) => {
                     sign_rsa(keypair, hash, message)
@@ -103,6 +102,9 @@ pub(crate) const DEFAULT_ORDER: &[Algorithm] = &[
     },
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP384,
+    },
+    Algorithm::Ecdsa {
+        curve: EcdsaCurve::NistP521,
     },
     Algorithm::Rsa {
         hash: Some(HashAlg::Sha512),
@@ -139,19 +141,27 @@ const P384_ORDER: [u8; 48] = hex!(
     "581a0db248b0a77aecec196accc52973"
 );
 
-/// An ECDSA curve this backend implements.
+/// The order `n` of the P-521 base point (SEC 2 version 2, section 2.6.1).
+const P521_ORDER: [u8; 66] = hex!(
+    "01ff"
+    "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa"
+    "51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409"
+);
+
+/// An ECDSA curve: this backend implements all of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Curve {
     NistP256,
     NistP384,
+    NistP521,
 }
 
 impl Curve {
-    fn new(curve: EcdsaCurve) -> Option<Self> {
+    fn new(curve: EcdsaCurve) -> Self {
         match curve {
-            EcdsaCurve::NistP256 => Some(Curve::NistP256),
-            EcdsaCurve::NistP384 => Some(Curve::NistP384),
-            EcdsaCurve::NistP521 => None,
+            EcdsaCurve::NistP256 => Curve::NistP256,
+            EcdsaCurve::NistP384 => Curve::NistP384,
+            EcdsaCurve::NistP521 => Curve::NistP521,
         }
     }
 
@@ -159,6 +169,7 @@ impl Curve {
         match self {
             Curve::NistP256 => CurveType::NistP256,
             Curve::NistP384 => CurveType::NistP384,
+            Curve::NistP521 => CurveType::NistP521,
         }
     }
 
@@ -167,11 +178,13 @@ impl Curve {
         match self {
             Curve::NistP256 => &P256_ORDER,
             Curve::NistP384 => &P384_ORDER,
+            Curve::NistP521 => &P521_ORDER,
         }
     }
 
     /// The size in bytes of a coordinate, of the private scalar, and of `r`
-    /// and `s`: on these curves, that of the order.
+    /// and `s`: on these curves, that of the order (66 bytes for P-521,
+    /// whose top byte is 0 or 1).
     fn size(self) -> usize {
         self.order().len()
     }
@@ -181,6 +194,7 @@ impl Curve {
         match self {
             Curve::NistP256 => sha256(message).to_vec(),
             Curve::NistP384 => sha384(message).to_vec(),
+            Curve::NistP521 => sha512(message).to_vec(),
         }
     }
 
@@ -353,11 +367,15 @@ fn sign_rsa(keypair: &RsaKeypair, hash: HashAlg, message: &[u8]) -> ssh_key::Res
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use hex_literal::hex;
     use ssh_encoding::{Decode, Encode};
     use ssh_key::private::{EcdsaKeypair, EcdsaPrivateKey, KeypairData, RsaKeypair};
     use ssh_key::public::{EcdsaPublicKey, KeyData, RsaPublicKey};
-    use ssh_key::{Algorithm, Certificate, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature};
+    use ssh_key::{
+        Algorithm, Certificate, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature, SshSig,
+    };
 
     use super::{Curve, DEFAULT_ORDER, rsa_public_components};
     use crate::crypto::{is_supported_signature_algorithm, sign, verify, verify_certificate};
@@ -396,6 +414,10 @@ mod tests {
 
     fn ecdsa_p384() -> PrivateKey {
         key(fixture!("ecdsa_p384.key"))
+    }
+
+    fn ecdsa_p521() -> PrivateKey {
+        key(fixture!("ecdsa_p521.key"))
     }
 
     fn rsa_1024() -> PrivateKey {
@@ -438,8 +460,9 @@ mod tests {
         difference
     }
 
-    /// RFC 6979, appendix A.2.5 (P-256 with SHA-256) and A.2.6 (P-384 with
-    /// SHA-384).
+    /// RFC 6979, appendix A.2.5 (P-256 with SHA-256), A.2.6 (P-384 with
+    /// SHA-384) and A.2.7 (P-521 with SHA-512; the "sample" `r` and `s` are
+    /// 65 bytes long, the "test" ones 66).
     struct Rfc6979 {
         curve: EcdsaCurve,
         x: &'static [u8],
@@ -449,7 +472,7 @@ mod tests {
         signatures: [(&'static [u8], &'static [u8], &'static [u8]); 2],
     }
 
-    const RFC6979: [Rfc6979; 2] = [
+    const RFC6979: [Rfc6979; 3] = [
         Rfc6979 {
             curve: EcdsaCurve::NistP256,
             x: &hex!("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"),
@@ -507,6 +530,52 @@ mod tests {
                 ),
             ],
         },
+        Rfc6979 {
+            curve: EcdsaCurve::NistP521,
+            x: &hex!(
+                "00fa"
+                "d06daa62ba3b25d2fb40133da757205de67f5bb0018fee8c86e1b68c7e75caa8"
+                "96eb32f1f47c70855836a6d16fcc1466f6d8fbec67db89ec0c08b0e996b83538"
+            ),
+            ux: &hex!(
+                "0189"
+                "4550d0785932e00eaa23b694f213f8c3121f86dc97a04e5a7167db4e5bcd3711"
+                "23d46e45db6b5d5370a7f20fb633155d38ffa16d2bd761dcac474b9a2f5023a4"
+            ),
+            uy: &hex!(
+                "0049"
+                "3101c962cd4d2fddf782285e64584139c2f91b47f87ff82354d6630f746a28a0"
+                "db25741b5b34a828008b22acc23f924faafbd4d33f81ea66956dfeaa2bfdfcf5"
+            ),
+            signatures: [
+                (
+                    b"sample",
+                    &hex!(
+                        "00c3"
+                        "28fafcbd79dd77850370c46325d987cb525569fb63c5d3bc53950e6d4c5f174e"
+                        "25a1ee9017b5d450606add152b534931d7d4e8455cc91f9b15bf05ec36e377fa"
+                    ),
+                    &hex!(
+                        "0061"
+                        "7cce7cf5064806c467f678d3b4080d6f1cc50af26ca209417308281b68af2826"
+                        "23eaa63e5b5c0723d8b8c37ff0777b1a20f8ccb1dccc43997f1ee0e44da4a67a"
+                    ),
+                ),
+                (
+                    b"test",
+                    &hex!(
+                        "013e"
+                        "99020abf5cee7525d16b69b229652ab6bdf2affcaef38773b4b7d08725f10cdb"
+                        "93482fdcc54edcee91eca4166b2a7c6265ef0ce2bd7051b7cef945babd47ee6d"
+                    ),
+                    &hex!(
+                        "01fb"
+                        "d0013c674aa79cb39849527916ce301c66ea7ce8b80682786ad60f98f7e78a19"
+                        "ca69eff5c57400e3b3a0ad66ce0978214d13baf4e9ac60752f7b155e2de4dce3"
+                    ),
+                ),
+            ],
+        },
     ];
 
     impl Rfc6979 {
@@ -532,7 +601,10 @@ mod tests {
                     public,
                     private: EcdsaPrivateKey::from(<[u8; 48]>::try_from(self.x).unwrap()),
                 },
-                other => panic!("unexpected key {other:?}"),
+                EcdsaPublicKey::NistP521(public) => EcdsaKeypair::NistP521 {
+                    public,
+                    private: EcdsaPrivateKey::from(<[u8; 66]>::try_from(self.x).unwrap()),
+                },
             };
             PrivateKey::new(KeypairData::Ecdsa(keypair), "").unwrap()
         }
@@ -572,15 +644,14 @@ mod tests {
     );
 
     #[test]
-    fn implements_exactly_ecdsa_p256_p384_and_rsa_sha2() {
-        assert_eq!(DEFAULT_ORDER, [P256, P384, RSA_SHA512, RSA_SHA256]);
+    fn implements_exactly_ecdsa_and_rsa_sha2() {
+        assert_eq!(DEFAULT_ORDER, [P256, P384, P521, RSA_SHA512, RSA_SHA256]);
         assert_eq!(crate::Preferred::DEFAULT.key.as_ref(), DEFAULT_ORDER);
         for algorithm in DEFAULT_ORDER {
             assert!(is_supported_signature_algorithm(algorithm), "{algorithm}");
         }
         for algorithm in [
             Algorithm::Ed25519,
-            P521,
             SSH_RSA,
             Algorithm::Dsa,
             Algorithm::SkEd25519,
@@ -595,7 +666,7 @@ mod tests {
     fn ecdsa_rfc6979_signatures_verify() {
         for vector in &RFC6979 {
             let key = vector.public_key();
-            let order = Curve::new(vector.curve).unwrap().order();
+            let order = Curve::new(vector.curve).order();
             for (message, r, s) in vector.signatures {
                 let signature = Signature::new(vector.algorithm(), ecdsa_blob(r, s)).unwrap();
                 verify(&key, message, &signature).unwrap();
@@ -619,8 +690,10 @@ mod tests {
         let keys = [
             ecdsa_p256(),
             ecdsa_p384(),
+            ecdsa_p521(),
             RFC6979[0].private_key(),
             RFC6979[1].private_key(),
+            RFC6979[2].private_key(),
         ];
         for key in &keys {
             let public = key.public_key().key_data();
@@ -635,27 +708,121 @@ mod tests {
     }
 
     /// SymCrypt's fixed-size `r` and `s` with leading zero bytes become
-    /// shorter mpints, which are padded back when verifying.
+    /// shorter mpints, which are padded back when verifying. Each of `r` and
+    /// `s` has a leading zero byte with probability 1/256 on P-256; on P-521,
+    /// whose 66-byte values start with 0 or 1, with probability 1/2, and two
+    /// with probability 1/512.
     #[test]
     fn ecdsa_short_r_and_s_round_trip() {
-        let key = ecdsa_p256();
-        let public = key.public_key().key_data();
-        let (mut short_r, mut short_s) = (false, false);
-        // Each of `r` and `s` is short with probability 1/256.
-        for i in 0..4096u32 {
-            let message = i.to_be_bytes();
-            let signature = sign(&key, None, &message).unwrap();
-            verify(public, &message, &signature).unwrap();
-            let mut blob = signature.as_bytes();
-            let r = Mpint::decode(&mut blob).unwrap();
-            let s = Mpint::decode(&mut blob).unwrap();
-            short_r |= r.as_positive_bytes().unwrap().len() < 32;
-            short_s |= s.as_positive_bytes().unwrap().len() < 32;
-            if short_r && short_s {
-                return;
+        for (key, size, max_zeros) in [(ecdsa_p256(), 32, 1), (ecdsa_p521(), 66, 2)] {
+            let public = key.public_key().key_data();
+            // The numbers of leading zero bytes (up to `max_zeros`) seen in
+            // `r` and in `s`.
+            let expected: BTreeSet<usize> = (0..=max_zeros).collect();
+            let mut seen = [BTreeSet::new(), BTreeSet::new()];
+            for i in 0..8192u32 {
+                if seen.iter().all(|zeros| *zeros == expected) {
+                    break;
+                }
+                let message = i.to_be_bytes();
+                let signature = sign(&key, None, &message).unwrap();
+                verify(public, &message, &signature).unwrap();
+                let mut blob = signature.as_bytes();
+                for zeros in &mut seen {
+                    let len = Mpint::decode(&mut blob)
+                        .unwrap()
+                        .as_positive_bytes()
+                        .unwrap()
+                        .len();
+                    assert!(len <= size);
+                    zeros.insert((size - len).min(max_zeros));
+                }
+            }
+            assert_eq!(seen, [expected.clone(), expected], "{}", key.algorithm());
+        }
+    }
+
+    /// P-521 `r` and `s` are mpints of up to 66 bytes, below `n`, padded to
+    /// 66 bytes for SymCrypt.
+    #[test]
+    fn p521_signature_encoding() {
+        let curve = Curve::NistP521;
+        let n = curve.order();
+        let n_minus_one = sub(n, &[[0; 65].as_slice(), &[1]].concat());
+        // 65 bytes with the top bit set, so a 66-byte mpint with a sign byte.
+        let high = [[0x80].as_slice(), &[0x5a; 64]].concat();
+        assert_eq!(mpint(&high).len(), 4 + 66);
+        let short = [0x01; 64];
+        let pad = |value: &[u8]| [vec![0; 66 - value.len()], value.to_vec()].concat();
+        for (r, s) in [
+            (&high[..], &n_minus_one[..]),
+            (&short[..], &high[..]),
+            (&n_minus_one[..], &short[..]),
+        ] {
+            assert_eq!(
+                curve.fixed_signature(&ecdsa_blob(r, s)),
+                Some([pad(r), pad(s)].concat())
+            );
+        }
+        let one = mpint(&[1]);
+        let mut two_to_521 = [0; 66];
+        two_to_521[0] = 2;
+        for (case, blob) in [
+            ("r = n", [mpint(n), one.clone()].concat()),
+            ("s = n", [one.clone(), mpint(n)].concat()),
+            ("s = 2^521", [one.clone(), mpint(&two_to_521)].concat()),
+            ("r = 2^528 - 1", [mpint(&[0xff; 66]), one.clone()].concat()),
+            ("s of 67 bytes", [one.clone(), mpint(&[1; 67])].concat()),
+        ] {
+            assert_eq!(curve.fixed_signature(&blob), None, "{case}");
+        }
+    }
+
+    /// Signatures by OpenSSH 10.2 (with OpenSSL), `ssh-keygen -Y sign -f
+    /// ecdsa_p521.key -n russh`, of the messages "russh <n>". Their `r` and
+    /// `s` are mpints of 64 to 66 bytes, with and without a sign byte: 0, 1
+    /// or 2 bytes shorter than 66 once the sign byte is removed.
+    #[test]
+    fn verifies_openssh_p521_signatures() {
+        // What an SSHSIG signature covers (PROTOCOL.sshsig), hashed by
+        // SymCrypt: `SshSig::signed_data` would use `sha2` (#27).
+        fn signed_data(message: &[u8]) -> Vec<u8> {
+            let mut data = b"SSHSIG".to_vec();
+            let digest = symcrypt::hash::sha512(message);
+            for field in [b"russh".as_slice(), b"", b"sha512", &digest] {
+                field.encode(&mut data).unwrap();
+            }
+            data
+        }
+        let public = ecdsa_p521().public_key().key_data().clone();
+        // The body length of the mpints `r` and `s`, and whether it starts
+        // with a sign byte.
+        let expected = BTreeSet::from([
+            (64, false),
+            (65, false),
+            (65, true),
+            (66, false),
+            (66, true),
+        ]);
+        let mut seen = [BTreeSet::new(), BTreeSet::new()];
+        let signatures = fixture!("ecdsa_p521.sshsig");
+        for signature in signatures.split_inclusive("-----END SSH SIGNATURE-----\n") {
+            let (message, pem) = signature.split_once('\n').unwrap();
+            let sshsig = SshSig::from_pem(pem).unwrap();
+            assert_eq!(sshsig.public_key(), &public);
+            assert_eq!(sshsig.namespace(), "russh");
+            assert_eq!(sshsig.hash_alg(), HashAlg::Sha512);
+            let data = signed_data(message.as_bytes());
+            verify(&public, &data, sshsig.signature()).unwrap();
+            assert!(verify(&public, &signed_data(b"russh"), sshsig.signature()).is_err());
+            let mut blob = sshsig.signature().as_bytes();
+            for shapes in &mut seen {
+                let mpint = Mpint::decode(&mut blob).unwrap();
+                let body = mpint.as_bytes();
+                shapes.insert((body.len(), body[0] == 0));
             }
         }
-        panic!("no short r and s in 4096 signatures");
+        assert_eq!(seen, [expected.clone(), expected]);
     }
 
     #[test]
@@ -697,31 +864,43 @@ mod tests {
 
     #[test]
     fn mismatched_keys_and_algorithms_are_rejected() {
-        let (p256, p384, rsa) = (ecdsa_p256(), ecdsa_p384(), rsa_2048());
+        let (p256, p384, p521, rsa) = (ecdsa_p256(), ecdsa_p384(), ecdsa_p521(), rsa_2048());
         let message = b"message";
         let p256_signature = sign(&p256, None, message).unwrap();
+        let p521_signature = sign(&p521, None, message).unwrap();
         let rsa_signature = sign(&rsa, Some(HashAlg::Sha256), message).unwrap();
         assert!(verify(p384.public_key().key_data(), message, &p256_signature).is_err());
+        assert!(verify(p521.public_key().key_data(), message, &p256_signature).is_err());
+        assert!(verify(p256.public_key().key_data(), message, &p521_signature).is_err());
+        assert!(verify(p384.public_key().key_data(), message, &p521_signature).is_err());
         assert!(verify(rsa.public_key().key_data(), message, &p256_signature).is_err());
         assert!(verify(p256.public_key().key_data(), message, &rsa_signature).is_err());
         assert!(verify(&RFC6979[0].public_key(), message, &p256_signature).is_err());
-        // The P-256 signature, labelled as P-384.
+        assert!(verify(&RFC6979[2].public_key(), message, &p521_signature).is_err());
+        // Relabelled signatures: P-256 as P-384, and as P-521 (its `r` and
+        // `s` are short enough to be padded). ssh-key refuses to label the
+        // longer P-521 ones as P-256.
         let relabelled = Signature::new(P384, p256_signature.as_bytes()).unwrap();
         assert!(verify(p256.public_key().key_data(), message, &relabelled).is_err());
+        let relabelled = Signature::new(P521, p256_signature.as_bytes()).unwrap();
+        assert!(verify(p521.public_key().key_data(), message, &relabelled).is_err());
+        assert!(Signature::new(P256, p521_signature.as_bytes()).is_err());
     }
 
     #[test]
     fn invalid_ecdsa_public_keys_are_rejected() {
-        let vector = &RFC6979[0];
-        let (message, r, s) = vector.signatures[0];
-        let signature = Signature::new(P256, ecdsa_blob(r, s)).unwrap();
-        let mut off_curve = vector.sec1();
-        *off_curve.last_mut().unwrap() ^= 1;
-        // The right point, compressed (its Y is odd).
-        let compressed = [&[0x03], vector.ux].concat();
-        for sec1 in [off_curve, compressed] {
-            let key = KeyData::Ecdsa(EcdsaPublicKey::from_sec1_bytes(&sec1).unwrap());
-            assert!(verify(&key, message, &signature).is_err());
+        for vector in [&RFC6979[0], &RFC6979[2]] {
+            let (message, r, s) = vector.signatures[0];
+            let signature = Signature::new(vector.algorithm(), ecdsa_blob(r, s)).unwrap();
+            let mut off_curve = vector.sec1();
+            *off_curve.last_mut().unwrap() ^= 1;
+            // The right point, compressed.
+            let y_parity = vector.uy.last().unwrap() & 1;
+            let compressed = [&[0x02 | y_parity], vector.ux].concat();
+            for sec1 in [off_curve, compressed] {
+                let key = KeyData::Ecdsa(EcdsaPublicKey::from_sec1_bytes(&sec1).unwrap());
+                assert!(verify(&key, message, &signature).is_err());
+            }
         }
     }
 
@@ -868,13 +1047,26 @@ mod tests {
             sign(&mixed, None, b"message").unwrap_err(),
             ssh_key::Error::Crypto
         );
+
+        let p521 = ecdsa_p521();
+        let KeypairData::Ecdsa(EcdsaKeypair::NistP521 { public, .. }) = p521.key_data() else {
+            panic!("not a P-521 key");
+        };
+        let mixed = EcdsaKeypair::NistP521 {
+            public: *public,
+            private: EcdsaPrivateKey::from(<[u8; 66]>::try_from(RFC6979[2].x).unwrap()),
+        };
+        let mixed = PrivateKey::new(KeypairData::Ecdsa(mixed), "").unwrap();
+        assert_eq!(
+            sign(&mixed, None, b"message").unwrap_err(),
+            ssh_key::Error::Crypto
+        );
     }
 
     #[test]
     fn unsupported_keys_cannot_sign() {
         for (key, hash_alg, algorithm) in [
             (key(fixture!("ed25519.key")), None, Algorithm::Ed25519),
-            (key(fixture!("ecdsa_p521.key")), None, P521),
             (rsa_2048(), None, SSH_RSA),
         ] {
             assert_eq!(
@@ -892,6 +1084,7 @@ mod tests {
         for (openssh, ca_algorithm) in [
             (fixture!("cert_ca_ecdsa_p256.pub"), P256),
             (fixture!("cert_ca_ecdsa_p384.pub"), P384),
+            (fixture!("cert_ca_ecdsa_p521.pub"), P521),
             (fixture!("cert_ca_rsa_sha2_256.pub"), RSA_SHA256),
             (fixture!("cert_ca_rsa_sha2_512.pub"), RSA_SHA512),
         ] {
@@ -915,7 +1108,6 @@ mod tests {
         }
         for (openssh, ca_algorithm) in [
             (fixture!("cert_ca_ed25519.pub"), Algorithm::Ed25519),
-            (fixture!("cert_ca_ecdsa_p521.pub"), P521),
             (fixture!("cert_ca_ssh_rsa.pub"), SSH_RSA),
         ] {
             let certificate = Certificate::from_openssh(openssh.trim()).unwrap();

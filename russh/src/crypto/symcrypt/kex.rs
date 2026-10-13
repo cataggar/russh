@@ -1,10 +1,10 @@
-//! Key agreement for the SymCrypt backend: X25519 and ECDH on NIST P-256
-//! and P-384 (`symcrypt::ecc`), and ML-KEM-768 (`symcrypt::mlkem`), which
-//! run `curve25519-sha256` (and `@libssh.org`), `ecdh-sha2-nistp256`,
-//! `ecdh-sha2-nistp384` and `mlkem768x25519-sha256`.
+//! Key agreement for the SymCrypt backend: X25519 and ECDH on NIST P-256,
+//! P-384 and P-521 (`symcrypt::ecc`), and ML-KEM-768 (`symcrypt::mlkem`),
+//! which run `curve25519-sha256` (and `@libssh.org`), `ecdh-sha2-nistp256`,
+//! `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` and `mlkem768x25519-sha256`.
 //!
-//! ECDH on P-521 and finite-field Diffie-Hellman are not offered: `NistP521`
-//! and `Dh` are [`Unsupported`], and `ecdh-sha2-nistp521`,
+//! Finite-field Diffie-Hellman is not offered: `symcrypt-sys` has no
+//! bindings for SymCrypt's DL groups or DH, so `Dh` is [`Unsupported`], and
 //! `diffie-hellman-group*` and `diffie-hellman-group-exchange-*` are not in
 //! [`ALGORITHMS`].
 //!
@@ -31,8 +31,6 @@ use zeroize::Zeroizing;
 use crate::crypto::{CryptoError, Kem, KeyAgreement, Result, Unsupported};
 use crate::kex::{self, KexType};
 
-/// Not offered by this backend.
-pub(crate) type NistP521 = Unsupported;
 /// Not offered by this backend.
 pub(crate) type Dh = Unsupported;
 
@@ -97,12 +95,20 @@ impl NistCurve for P384 {
     const CURVE: CurveType = CurveType::NistP384;
 }
 
+pub(crate) struct P521;
+
+impl NistCurve for P521 {
+    const CURVE: CurveType = CurveType::NistP521;
+}
+
 /// ECDH with ephemeral keys on curve `C`; public keys are uncompressed SEC1
-/// points and the shared secret is the x-coordinate.
+/// points and the shared secret is the x-coordinate, as many bytes as a
+/// field element (66 for P-521, whose top byte is 0 or 1).
 pub(crate) struct Ecdh<C>(PhantomData<C>);
 
 pub(crate) type NistP256 = Ecdh<P256>;
 pub(crate) type NistP384 = Ecdh<P384>;
+pub(crate) type NistP521 = Ecdh<P521>;
 
 /// SEC1 tag of an uncompressed point.
 const UNCOMPRESSED: u8 = 0x04;
@@ -185,6 +191,7 @@ pub(crate) static ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))] = &[
     (&kex::CURVE25519_PRE_RFC_8731, &kex::_CURVE25519),
     (&kex::ECDH_SHA2_NISTP256, &kex::_ECDH_SHA2_NISTP256),
     (&kex::ECDH_SHA2_NISTP384, &kex::_ECDH_SHA2_NISTP384),
+    (&kex::ECDH_SHA2_NISTP521, &kex::_ECDH_SHA2_NISTP521),
 ];
 
 /// Default key exchange preference: all of them, in the order of
@@ -196,6 +203,7 @@ pub(crate) const DEFAULT_ORDER: &[kex::Name] = &[
     kex::CURVE25519_PRE_RFC_8731,
     kex::ECDH_SHA2_NISTP256,
     kex::ECDH_SHA2_NISTP384,
+    kex::ECDH_SHA2_NISTP521,
 ];
 
 #[cfg(test)]
@@ -206,7 +214,7 @@ mod tests {
 
     use super::*;
     use crate::cipher::{self, SealingKey};
-    use crate::crypto::symcrypt::hash::{Sha256, Sha384};
+    use crate::crypto::symcrypt::hash::{Sha256, Sha384, Sha512};
     use crate::crypto::{FfDh, Hash};
     use crate::kex::dh::groups::DH_GROUP14;
     use crate::kex::{
@@ -318,7 +326,7 @@ mod tests {
         }
     }
 
-    // RFC 5903 §8.1 and §8.2: private keys, public keys and shared secrets
+    // RFC 5903 §8.1 to §8.3: private keys, public keys and shared secrets
     // of the initiator (`i`) and the responder (`r`).
     const P256_I: [u8; 32] =
         hex!("C88F01F510D9AC3F70A292DAA2316DE544E9AAB8AFE84049C62A9C57862D1433");
@@ -364,6 +372,40 @@ mod tests {
         "D603135569B9E9D09CF5D4A270F59746"
     );
 
+    const P521_I: [u8; 66] = hex!(
+        "0037"
+        "ADE9319A89F4DABDB3EF411AACCCA5123C61ACAB57B5393DCE47608172A095AA"
+        "85A30FE1C2952C6771D937BA9777F5957B2639BAB072462F68C27A57382D4A52"
+    );
+    const P521_GI: [u8; 133] = hex!(
+        "04"
+        "0015"
+        "417E84DBF28C0AD3C278713349DC7DF153C897A1891BD98BAB4357C9ECBEE1E3"
+        "BF42E00B8E380AEAE57C2D107564941885942AF5A7F4601723C4195D176CED3E"
+        "017C"
+        "AE20B6641D2EEB695786D8C946146239D099E18E1D5A514C739D7CB4A10AD8A7"
+        "88015AC405D7799DC75E7B7D5B6CF2261A6A7F1507438BF01BEB6CA3926F9582"
+    );
+    const P521_R: [u8; 66] = hex!(
+        "0145"
+        "BA99A847AF43793FDD0E872E7CDFA16BE30FDC780F97BCCC3F078380201E9C67"
+        "7D600B343757A3BDBF2A3163E4C2F869CCA7458AA4A4EFFC311F5CB151685EB9"
+    );
+    const P521_GR: [u8; 133] = hex!(
+        "04"
+        "00D0"
+        "B3975AC4B799F5BEA16D5E13E9AF971D5E9B984C9F39728B5E5739735A219B97"
+        "C356436ADC6E95BB0352F6BE64A6C2912D4EF2D0433CED2B6171640012D9460F"
+        "015C"
+        "68226383956E3BD066E797B623C27CE0EAC2F551A10C2C724D9852077B87220B"
+        "6536C5C408A1D2AEBB8E86D678AE49CB57091F4732296579AB44FCD17F0FC56A"
+    );
+    const P521_GIRX: [u8; 66] = hex!(
+        "0114"
+        "4C7D79AE6956BC8EDB8E7C787C4521CB086FA64407F97894E5E6B2D79B04D142"
+        "7E73CA4BAA240A34786859810C06B3C715A3A8CC3151F2BEE417996D19F3DDEA"
+    );
+
     fn ecdh_private_key<C: NistCurve>(scalar: &[u8]) -> EcKey {
         EcKey::set_key_pair(C::CURVE, scalar, None, EcKeyUsage::EcDh).unwrap()
     }
@@ -381,6 +423,28 @@ mod tests {
     fn ecdh_rfc5903_vectors() {
         check_rfc5903::<P256>(&P256_I, &P256_GI, &P256_R, &P256_GR, &P256_GIRX);
         check_rfc5903::<P384>(&P384_I, &P384_GI, &P384_R, &P384_GR, &P384_GIRX);
+        check_rfc5903::<P521>(&P521_I, &P521_GI, &P521_R, &P521_GR, &P521_GIRX);
+    }
+
+    /// The SEC1 encoding of P-521's generator.
+    fn p521_generator() -> Vec<u8> {
+        let mut one = [0; 66];
+        one[65] = 1;
+        sec1_public_key(&ecdh_private_key::<P521>(&one)).unwrap()
+    }
+
+    /// P-521 shared secrets are 66 bytes even when their top bytes are zero:
+    /// `x(i·G)` and `x(r·G)` are the x-coordinates of the RFC 5903 public
+    /// keys, which start with `00 15` and `00 d0`.
+    #[test]
+    fn ecdh_p521_keeps_leading_zeros() {
+        let generator = p521_generator();
+        for (scalar, public_key) in [(&P521_I, &P521_GI), (&P521_R, &P521_GR)] {
+            let shared = NistP521::agree(ecdh_private_key::<P521>(scalar), &generator).unwrap();
+            assert_eq!(shared.len(), 66);
+            assert_eq!(shared[0], 0);
+            assert_eq!(*shared, public_key[1..67]);
+        }
     }
 
     fn check_rejects_invalid_points<C: NistCurve>(i: &[u8], gr: &[u8], prime: &[u8]) {
@@ -430,9 +494,17 @@ mod tests {
                 "fffffffeffffffff0000000000000000ffffffff"
             ),
         );
-        // A P-256 key on P-384 and the reverse.
+        check_rejects_invalid_points::<P521>(
+            &P521_I,
+            &P521_GR,
+            // 2^521 - 1.
+            &[[0x01].as_slice(), &[0xff; 65]].concat(),
+        );
+        // Keys of other curves.
         assert!(NistP384::agree(ecdh_private_key::<P384>(&P384_I), &P256_GR).is_err());
         assert!(NistP256::agree(ecdh_private_key::<P256>(&P256_I), &P384_GR).is_err());
+        assert!(NistP521::agree(ecdh_private_key::<P521>(&P521_I), &P384_GR).is_err());
+        assert!(NistP384::agree(ecdh_private_key::<P384>(&P384_I), &P521_GR).is_err());
     }
 
     #[test]
@@ -449,6 +521,7 @@ mod tests {
         agree::<X25519>(32);
         agree::<NistP256>(65);
         agree::<NistP384>(97);
+        agree::<NistP521>(133);
     }
 
     // An ML-KEM-768 key from the FIPS 203 key generation KAT used by
@@ -510,8 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn nistp521_and_dh_are_unsupported() {
-        assert!(<NistP521 as KeyAgreement>::generate().is_err());
+    fn dh_is_unsupported() {
         assert!(<Dh as FfDh>::generate(&DH_GROUP14, false).is_err());
     }
 
@@ -523,6 +595,7 @@ mod tests {
             kex::CURVE25519_PRE_RFC_8731,
             kex::ECDH_SHA2_NISTP256,
             kex::ECDH_SHA2_NISTP384,
+            kex::ECDH_SHA2_NISTP521,
         ];
         assert_eq!(DEFAULT_ORDER, expected);
         assert!(ALGORITHMS.iter().map(|(name, _)| **name).eq(expected));
@@ -583,8 +656,11 @@ mod tests {
     const CURVE25519_H: [u8; 32] =
         hex!("5d2ce809f8117fb6a6642235e338396b38532f5d0bf0f95d79e56deb781a697a");
 
-    /// Exchange hashes for the RFC 7748 and RFC 5903 key pairs, matching the
-    /// RustCrypto backend's `compute_exchange_hash` and Python's `hashlib`.
+    /// Exchange hashes for the RFC 7748 and RFC 5903 key pairs, matching
+    /// Python's `hashlib` (and, for X25519 and P-384, the RustCrypto
+    /// backend's `compute_exchange_hash`). The P-521 secrets `K` start with
+    /// `01`, `00 15` and `00 d0`: their mpints are 66 bytes, 65 bytes, and
+    /// 66 bytes with a zero byte prepended.
     #[test]
     fn exchange_hash_known_answers() {
         let k = x25519(&ALICE_PRIVATE, &BOB_PUBLIC).unwrap();
@@ -600,6 +676,42 @@ mod tests {
                 "e6ba6ac4d4bc02e834938947a6ad2c1d"
             )
         );
+        let generator = p521_generator();
+        for (scalar, client_ephemeral, server_ephemeral, h) in [
+            (
+                &P521_I,
+                &P521_GI[..],
+                &P521_GR[..],
+                hex!(
+                    "211c4222110a7a1c579fa1cacd1b28efd458fe414edcc2b82eea9147e2883326"
+                    "c1e3cc3bd41aa6729aeddc6160800d6029aefc62a142f90237b7ce580513d41f"
+                ),
+            ),
+            (
+                &P521_I,
+                &P521_GI[..],
+                &generator[..],
+                hex!(
+                    "3e7809af181f56766392aefc6d343e65d2f0ddeecd85c6756d3eb0aec5f0407f"
+                    "b9d2d664fe79838cfa2ffbf21abb13c8faa57461fe3e12291dc93b2beaaf2813"
+                ),
+            ),
+            (
+                &P521_R,
+                &P521_GR[..],
+                &generator[..],
+                hex!(
+                    "fda84f71938b872f48b41c9e740e7183e83de41d8cfda4e20456df539d5052ff"
+                    "e6a6aff1df82bd439a4c8f4af27cf1c6adbc1a6545ec1169ae05577320d62cf9"
+                ),
+            ),
+        ] {
+            let k = NistP521::agree(ecdh_private_key::<P521>(scalar), server_ephemeral).unwrap();
+            assert_eq!(
+                exchange_hash::<Sha512>(client_ephemeral, server_ephemeral, &k),
+                h
+            );
+        }
     }
 
     /// The first 64 bytes (two SHA-256 blocks) of the RFC 4253 §7.2 keys A
