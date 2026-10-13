@@ -1,6 +1,6 @@
 mod common;
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common::test_keys;
@@ -9,6 +9,7 @@ use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelMsg, client};
 use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep, timeout};
 
@@ -20,16 +21,12 @@ const HANDLE_DATA_COUNT: usize = 64;
 async fn test_backpressure() -> Result<(), anyhow::Error> {
     env_logger::init();
 
-    let addr = addr();
+    let socket = listener().await;
+    let addr = socket.local_addr()?;
     let data = data();
     let (tx, rx) = watch::channel(());
 
-    tokio::spawn(Server::run(addr, rx));
-
-    // Wait until the server is started
-    while TcpStream::connect(addr).is_err() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    tokio::spawn(Server::run(socket, rx));
 
     stream(addr, &data, tx).await?;
 
@@ -38,14 +35,11 @@ async fn test_backpressure() -> Result<(), anyhow::Error> {
 
 #[tokio::test]
 async fn server_handle_data_backpressures_when_client_stops_reading() -> Result<(), anyhow::Error> {
-    let addr = addr();
+    let socket = listener().await;
+    let addr = socket.local_addr()?;
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(HandleBackpressureServer::run(addr, progress_tx));
-
-    while TcpStream::connect(addr).is_err() {
-        sleep(Duration::from_millis(10)).await;
-    }
+    tokio::spawn(HandleBackpressureServer::run(socket, progress_tx));
 
     let config = Arc::new(client::Config {
         window_size: WINDOW_SIZE as u32,
@@ -139,12 +133,10 @@ fn data() -> Vec<u8> {
     data
 }
 
-/// Find a unused local address to bind our server to
-fn addr() -> SocketAddr {
-    TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
+/// Binds the server's listener on a free local port. The server keeps it, so
+/// the port can't be taken by anything else before the server listens on it.
+async fn listener() -> TcpListener {
+    TcpListener::bind(("127.0.0.1", 0)).await.unwrap()
 }
 
 #[derive(Clone)]
@@ -153,7 +145,7 @@ struct Server {
 }
 
 impl Server {
-    async fn run(addr: SocketAddr, rx: watch::Receiver<()>) {
+    async fn run(socket: TcpListener, rx: watch::Receiver<()>) {
         let config = Arc::new(server::Config {
             keys: vec![test_keys::key(0)],
             window_size: WINDOW_SIZE as u32,
@@ -162,7 +154,7 @@ impl Server {
         });
         let mut sh = Server { rx: Some(rx) };
 
-        sh.run_on_address(config, addr).await.unwrap();
+        sh.run_on_socket(config, &socket).await.unwrap();
     }
 }
 
@@ -223,14 +215,14 @@ struct HandleBackpressureServer {
 }
 
 impl HandleBackpressureServer {
-    async fn run(addr: SocketAddr, progress_tx: mpsc::UnboundedSender<usize>) {
+    async fn run(socket: TcpListener, progress_tx: mpsc::UnboundedSender<usize>) {
         let config = Arc::new(server::Config {
             keys: vec![test_keys::key(0)],
             event_buffer_size: 1,
             ..Default::default()
         });
         let mut server = Self { progress_tx };
-        server.run_on_address(config, addr).await.unwrap();
+        server.run_on_socket(config, &socket).await.unwrap();
     }
 }
 
