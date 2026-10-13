@@ -59,6 +59,7 @@ where
 {
     const KEY_LEN: usize = <C as KeySizeUser>::KeySize::USIZE;
     const IV_LEN: usize = C::BlockSize::USIZE;
+    const BLOCK_SIZE: usize = C::BlockSize::USIZE;
 
     fn new(key: &[u8], iv: &[u8]) -> Result<Self> {
         <Self as KeyIvInit>::new_from_slices(key, iv).map_err(|_| CryptoError)
@@ -76,7 +77,7 @@ where
         self.dec_iv = self.decrypt_inner(data)
     }
 
-    fn peek_decrypt(&self, first_block: &mut [u8; 16]) {
+    fn peek_decrypt(&self, first_block: &mut [u8]) {
         let _ = self.decrypt_inner(first_block);
     }
 }

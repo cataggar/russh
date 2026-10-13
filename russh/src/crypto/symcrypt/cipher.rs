@@ -234,6 +234,7 @@ impl<const KEY_SIZE: usize> SymCryptAesCtr<KEY_SIZE> {
 impl<const KEY_SIZE: usize> BlockStream for SymCryptAesCtr<KEY_SIZE> {
     const KEY_LEN: usize = KEY_SIZE;
     const IV_LEN: usize = 16;
+    const BLOCK_SIZE: usize = 16;
 
     fn new(key: &[u8], iv: &[u8]) -> Result<Self> {
         if key.len() != KEY_SIZE {
@@ -264,7 +265,7 @@ impl<const KEY_SIZE: usize> BlockStream for SymCryptAesCtr<KEY_SIZE> {
         self.apply_key_stream(data);
     }
 
-    fn peek_decrypt(&self, first_block: &mut [u8; 16]) {
+    fn peek_decrypt(&self, first_block: &mut [u8]) {
         let mut counter = self.counter;
         self.ctr_msb64(&mut counter, first_block);
     }

@@ -136,7 +136,7 @@ async fn legacy() {
         Case::default().with_host_key(ssh_rsa),
         Case::default().with_user_key(ssh_rsa),
     ];
-    // Not with an EtM MAC, see `triple_des_etm`.
+    // With EtM MACs in `triple_des_etm`.
     #[cfg(feature = "des")]
     cases.push(
         Case::default()
@@ -146,13 +146,11 @@ async fn legacy() {
     openssh::check_cases("legacy", cases).await;
 }
 
-/// Known russh bug. With an encrypt-then-MAC MAC the packet length is not
-/// encrypted, so with 3des-cbc's 8-byte blocks OpenSSH sends packets of
-/// only 4 + 8 bytes, such as `SSH_MSG_USERAUTH_SUCCESS`. russh's block
-/// cipher `OpeningKey` always reads 16 bytes first and rejects them with
-/// `Error::PacketSize(8)`, so authentication appears to fail.
+/// With an encrypt-then-MAC MAC the packet length is sent in the clear and
+/// only the rest is padded to whole blocks, so with 3des-cbc's 8-byte
+/// blocks OpenSSH sends packets of only 4 + 8 bytes, such as
+/// `SSH_MSG_USERAUTH_SUCCESS`.
 #[cfg(feature = "des")]
-#[ignore = "russh bug: 3des-cbc with *-etm@openssh.com MACs rejects 12-byte packets with PacketSize(8)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn triple_des_etm() {
     openssh::check_macs(
