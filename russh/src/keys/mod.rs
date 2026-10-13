@@ -72,6 +72,7 @@ use thiserror::Error;
 
 use crate::helpers::EncodedExt;
 
+pub mod certificate;
 pub mod key;
 pub use key::PrivateKeyWithHashAlg;
 

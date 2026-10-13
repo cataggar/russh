@@ -153,6 +153,8 @@ With `aws-lc-rs` and `ring`, RSA requires the `rsa` crate feature, which is on b
 
 OpenSSH certificates work with every backend. With `symcrypt`, both the certified key and the CA's signature must use one of its algorithms.
 
+`russh::keys::certificate` signs certificates, and checks them (CA, validity period, principals) the way OpenSSH does, with the selected backend.
+
 ### Authentication methods
 
 - `publickey`
