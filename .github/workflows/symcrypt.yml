@@ -179,14 +179,28 @@ jobs:
           # Fail rather than skip the OpenSSH interop checks if sshd can't be started.
           RUSSH_REQUIRE_SSHD: "1"
 
-      # `--all-targets` leaves out the doctests: rustdoc builds them in temporary directories, where
-      # they would load the System32 symcrypt.dll. The OpenSSH interop checks need a Unix sshd, so
-      # they are skipped.
+      # `--all-targets` leaves out the doctests, which the next step runs. The OpenSSH interop checks
+      # need a Unix sshd, so they are skipped.
       - name: Tests (without doctests)
         if: runner.os == 'Windows'
         run: cargo test -p russh --no-default-features --features symcrypt --all-targets
         env:
           RUST_BACKTRACE: 1
+
+      # rustdoc builds the doctests in temporary directories, where they would load the System32
+      # symcrypt.dll. Cargo hands the runner to rustdoc (`--test-runtool`), and the runner copies the
+      # pinned DLL next to each doctest executable before running it. The `windows_doctest_dll`
+      # doctest (russh/src/crypto/symcrypt/mod.rs) fails unless the loaded symcrypt.dll has the
+      # contents of RUSSH_EXPECTED_SYMCRYPT_DLL, and `--nocapture` shows its path. With a runner,
+      # rustdoc runs the merged doctests in one process, hence its "No rustdoc doctest environment
+      # variable" warning.
+      - name: Doctests
+        if: runner.os == 'Windows'
+        run: cargo test -p russh --no-default-features --features symcrypt --doc -- --nocapture
+        env:
+          RUST_BACKTRACE: 1
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: pwsh -NoProfile -File ${{ github.workspace }}\ci\symcrypt-doctest-runner.ps1
+          RUSSH_EXPECTED_SYMCRYPT_DLL: ${{ env.SYMCRYPT_DLL }}
 
   # A crate outside the workspace that depends on russh the way a downstream user does:
   # `default-features = false, features = ["symcrypt"]`, resolved from scratch (the lock file is not

@@ -30,7 +30,9 @@ description: >-
 #   - adjust the paths for `--release` (target/release/...), `--target` (target/<triple>/...) or
 #     CARGO_TARGET_DIR
 # Doctests are compiled into temporary directories, so they still resolve symcrypt.dll through
-# System32 or PATH: Windows jobs should skip them (e.g. `cargo test --all-targets`) or accept that.
+# System32 or PATH: run them with ci/symcrypt-doctest-runner.ps1 as the Cargo runner, which copies
+# the DLL next to each doctest executable (see the Doctests step of symcrypt.yml), or skip them
+# (e.g. `cargo test --all-targets`).
 # To copy the DLL somewhere else by hand, use $env:SYMCRYPT_DLL. Without `copy-dll-to`, the action
 # prints a notice when a System32 copy exists. Example:
 #
