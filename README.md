@@ -122,6 +122,8 @@ All backends support OpenSSH strict key exchange (Terrapin mitigation). `aws-lc-
 | `aes256-cbc`, `aes192-cbc`, `aes128-cbc` | opt-in | — |
 | `3des-cbc` (requires the `des` crate feature) | opt-in | — |
 
+`symcrypt` prefers `aes256-gcm@openssh.com` to `chacha20-poly1305@openssh.com` by default: SymCrypt's AES-GCM is 3.5–5× as fast as its ChaCha20-Poly1305 on x86-64 and ARM64 CPUs with AES instructions ([#23](https://github.com/cataggar/russh/issues/23)). `aws-lc-rs` and `ring` prefer ChaCha20-Poly1305, as OpenSSH does, partly because it is also fast on CPUs without AES instructions. The client's preference decides, so this applies to russh clients: OpenSSH clients of a russh server with `symcrypt` still choose ChaCha20-Poly1305.
+
 ### MACs
 
 | Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
@@ -129,6 +131,8 @@ All backends support OpenSSH strict key exchange (Terrapin mitigation). `aws-lc-
 | `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com` | default | default |
 | `hmac-sha2-256`, `hmac-sha2-512` | default | default |
 | `hmac-sha1-etm@openssh.com`, `hmac-sha1` | opt-in | — |
+
+MACs are only used with the AES-CTR ciphers. `symcrypt` prefers `hmac-sha2-256-etm@openssh.com` to `hmac-sha2-512-etm@openssh.com` by default, as OpenSSH does: with SymCrypt it is 1.7–2× as fast ([#23](https://github.com/cataggar/russh/issues/23)). `aws-lc-rs` and `ring` prefer `hmac-sha2-512-etm@openssh.com`.
 
 ### Compression
 

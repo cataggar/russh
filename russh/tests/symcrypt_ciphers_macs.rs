@@ -1,8 +1,9 @@
 //! The ciphers and MACs of the SymCrypt backend against OpenSSH:
 //! `cargo test -p russh --no-default-features --features symcrypt --test
-//! symcrypt_ciphers_macs`. The ciphers and MACs SymCrypt lacks are refused.
-//! The cases are skipped when OpenSSH is missing, unless
-//! `RUSSH_REQUIRE_SSHD=1`.
+//! symcrypt_ciphers_macs`. The ciphers and MACs SymCrypt lacks are refused,
+//! and the default preferences pick AES-GCM and SHA-256-EtM, also against a
+//! russh server. The OpenSSH cases are skipped when OpenSSH is missing,
+//! unless `RUSSH_REQUIRE_SSHD=1`.
 #![cfg(all(
     feature = "symcrypt",
     not(feature = "aws-lc-rs"),
@@ -11,8 +12,15 @@
 
 mod common;
 
-use common::openssh::{self, Case, Query, Refused};
-use russh::{Preferred, cipher, mac};
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use anyhow::Context;
+use common::openssh::{self, Case, Query, Refused, Sshd};
+use common::test_keys;
+use russh::keys::PublicKeyOrCertificate;
+use russh::{Disconnect, Names, Preferred, cipher, client, mac, server};
+use tokio::sync::oneshot;
 
 const CTR_CIPHERS: [cipher::Name; 3] = [
     cipher::AES_128_CTR,
@@ -107,4 +115,152 @@ async fn unsupported_macs_are_refused() {
         }),
     )
     .await;
+}
+
+/// What the servers of the default-preference tests offer, in their order:
+/// `chacha20-poly1305@openssh.com` and `hmac-sha2-512-etm@openssh.com`
+/// first, as OpenSSH and russh's other backends prefer.
+const SERVER_CIPHERS: [cipher::Name; 3] = [
+    cipher::CHACHA20_POLY1305,
+    cipher::AES_256_GCM,
+    cipher::AES_256_CTR,
+];
+const SERVER_MACS: [mac::Name; 2] = [mac::HMAC_SHA512_ETM, mac::HMAC_SHA256_ETM];
+
+/// The default preferences, but only AES-CTR, so that a MAC is used.
+fn ctr_only() -> Preferred {
+    Preferred {
+        cipher: Cow::Borrowed(&[cipher::AES_256_CTR]),
+        ..Preferred::default()
+    }
+}
+
+/// Checks the algorithms a client negotiated with a server offering
+/// [`SERVER_CIPHERS`] and [`SERVER_MACS`]: `default` with the default
+/// preferences, `ctr` with [`ctr_only`]. The client's order decides, so it
+/// gets AES-GCM and SHA-256-EtM, which SymCrypt runs faster
+/// (<https://github.com/cataggar/russh/issues/23>).
+fn check_default_preferences(default: &Names, ctr: &Names) {
+    assert_eq!(default.cipher, cipher::AES_256_GCM);
+    assert_eq!(ctr.cipher, cipher::AES_256_CTR);
+    assert_eq!(ctr.client_mac, mac::HMAC_SHA256_ETM);
+    assert_eq!(ctr.server_mac, mac::HMAC_SHA256_ETM);
+}
+
+/// [`check_default_preferences`] against OpenSSH.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn openssh_default_preferences() {
+    let Some(openssh) = openssh::available() else {
+        return;
+    };
+    let ciphers = SERVER_CIPHERS.map(|cipher| cipher.as_ref().to_owned());
+    let macs = SERVER_MACS.map(|mac| mac.as_ref().to_owned());
+    let unsupported = ciphers
+        .iter()
+        .map(|name| (Query::Cipher, name))
+        .chain(macs.iter().map(|name| (Query::Mac, name)))
+        .find(|(query, name)| !openssh.supports(*query, name));
+    if let Some((_, name)) = unsupported {
+        openssh::log_line(&format!(
+            "skipped: {} does not support {name}",
+            openssh.short_version()
+        ));
+        return;
+    }
+    let sshd = Case::default()
+        .sshd()
+        .ciphers(ciphers.join(","))
+        .macs(macs.join(","))
+        .start()
+        .await
+        .expect("starting sshd");
+    let default = negotiate_with_sshd(&sshd, Preferred::default()).await;
+    let ctr = negotiate_with_sshd(&sshd, ctr_only()).await;
+    check_default_preferences(&default, &ctr);
+}
+
+/// The algorithms a russh client offering `preferred` negotiates with
+/// `sshd`.
+async fn negotiate_with_sshd(sshd: &Sshd, preferred: Preferred) -> Names {
+    let negotiating = async {
+        let mut client = sshd.connect(preferred).await?;
+        client.authenticate(None).await?;
+        let names = client
+            .negotiated()
+            .context("Handler::kex_done was never called")?;
+        client.disconnect().await?;
+        anyhow::Ok(names)
+    };
+    negotiating
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"))
+}
+
+/// [`check_default_preferences`] against a russh server.
+#[tokio::test]
+async fn russh_default_preferences() {
+    let default = negotiate_with_russh(Preferred::default()).await;
+    let ctr = negotiate_with_russh(ctr_only()).await;
+    check_default_preferences(&default, &ctr);
+}
+
+/// The algorithms a russh client offering `preferred` negotiates with a
+/// russh server offering [`SERVER_CIPHERS`] and [`SERVER_MACS`].
+async fn negotiate_with_russh(preferred: Preferred) -> Names {
+    let (server_stream, client_stream) = tokio::io::duplex(1 << 16);
+    let config = server::Config {
+        keys: vec![test_keys::key(0)],
+        preferred: Preferred {
+            cipher: Cow::Borrowed(&SERVER_CIPHERS),
+            mac: Cow::Borrowed(&SERVER_MACS),
+            ..Preferred::default()
+        },
+        ..Default::default()
+    };
+    tokio::spawn(server::run_stream(Arc::new(config), server_stream, Server));
+    let (sender, names) = oneshot::channel();
+    let config = client::Config {
+        preferred,
+        ..Default::default()
+    };
+    let client = client::connect_stream(Arc::new(config), client_stream, Client(Some(sender)))
+        .await
+        .expect("connecting");
+    let names = names.await.expect("the key exchange failed");
+    client
+        .disconnect(Disconnect::ByApplication, "", "en")
+        .await
+        .expect("disconnecting");
+    names
+}
+
+/// A russh server handler that only does the key exchange.
+struct Server;
+
+impl server::Handler for Server {
+    type Error = russh::Error;
+}
+
+/// A russh client handler that accepts any host key and sends the
+/// algorithms of the first key exchange.
+struct Client(Option<oneshot::Sender<Names>>);
+
+impl client::Handler for Client {
+    type Error = russh::Error;
+
+    async fn check_server_key(&mut self, _: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    async fn kex_done(
+        &mut self,
+        _: Option<&[u8]>,
+        names: &Names,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(names.clone());
+        }
+        Ok(())
+    }
 }
