@@ -237,12 +237,15 @@ pub(crate) trait ChaCha20Poly1305: Sized + Send + 'static {
 pub(crate) trait BlockStream: Sized + Send + 'static {
     const KEY_LEN: usize;
     const IV_LEN: usize;
+    /// 16 for AES, 8 for 3DES; never more than 16.
+    const BLOCK_SIZE: usize;
     fn new(key: &[u8], iv: &[u8]) -> Result<Self>;
     fn encrypt(&mut self, data: &mut [u8]);
     fn decrypt(&mut self, data: &mut [u8]);
-    /// Decrypt the first 16 bytes of the next packet without advancing the
-    /// cipher state, to learn the packet length.
-    fn peek_decrypt(&self, first_block: &mut [u8; 16]);
+    /// Decrypt whole blocks at the start of the next packet without
+    /// advancing the cipher state, to learn the packet length from the
+    /// first block.
+    fn peek_decrypt(&self, first_block: &mut [u8]);
 }
 
 /// A keyed MAC (HMAC-SHA1/SHA2).

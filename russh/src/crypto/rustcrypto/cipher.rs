@@ -77,6 +77,8 @@ where
 {
     const KEY_LEN: usize = <Self as KeySizeUser>::KeySize::USIZE;
     const IV_LEN: usize = <Self as IvSizeUser>::IvSize::USIZE;
+    // The IV is the first counter block.
+    const BLOCK_SIZE: usize = Self::IV_LEN;
 
     fn new(key: &[u8], iv: &[u8]) -> Result<Self> {
         <Self as KeyIvInit>::new_from_slices(key, iv).map_err(|_| CryptoError)
@@ -90,7 +92,7 @@ where
         self.apply_keystream(data);
     }
 
-    fn peek_decrypt(&self, first_block: &mut [u8; 16]) {
+    fn peek_decrypt(&self, first_block: &mut [u8]) {
         self.clone().apply_keystream(first_block);
     }
 }

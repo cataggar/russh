@@ -158,11 +158,19 @@ impl Debug for CipherPair {
 }
 
 pub(crate) trait OpeningKey {
+    /// How many bytes [`read`] reads first, for
+    /// [`Self::decrypt_packet_length`] to learn the packet length from.
     fn packet_length_to_read_for_block_length(&self) -> usize {
         4
     }
 
     fn decrypt_packet_length(&self, seqn: u32, encrypted_packet_length: &[u8]) -> [u8; 4];
+
+    /// Checks that only this cipher needs on a decrypted packet length;
+    /// [`read`] does the others.
+    fn is_valid_packet_length(&self, _packet_length: usize) -> bool {
+        true
+    }
 
     fn tag_len(&self) -> usize;
 
@@ -282,11 +290,15 @@ pub(crate) async fn read<R: AsyncRead + Unpin>(
                 return Err(Error::PacketSize(len));
             }
 
-            // A valid packet_length can never be shorter than the block we
-            // already read to probe it; a smaller value would shrink the
+            // A valid packet_length can never be shorter than what we
+            // already read to learn it; a smaller value would shrink the
             // buffer below `l` below and panic on the `buffer.buffer[l..]`
             // slice. Reject it as a protocol error instead.
             if len + PACKET_LENGTH_LEN < cipher.packet_length_to_read_for_block_length() {
+                return Err(Error::PacketSize(len));
+            }
+
+            if !cipher.is_valid_packet_length(len) {
                 return Err(Error::PacketSize(len));
             }
 
