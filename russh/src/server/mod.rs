@@ -42,7 +42,7 @@ use log::{debug, error, info, warn};
 use msg::{is_kex_msg, validate_client_msg_strict_kex};
 use russh_util::runtime::JoinHandle;
 use russh_util::time::Instant;
-use ssh_key::{Certificate, PrivateKey};
+use ssh_key::{Algorithm, Certificate, PrivateKey};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio::pin;
@@ -74,6 +74,14 @@ pub struct Config {
     /// OpenSSH clients will send an initial "none" auth to probe for authentication methods.
     pub auth_rejection_time_initial: Option<std::time::Duration>,
     /// The server's keys. The first key pair in the client's preference order will be chosen.
+    ///
+    /// The crypto backend must be able to sign with at least one of them (see
+    /// [`supports_signing`](crate::keys::supports_signing)), or the server
+    /// fails to start: [`run_stream`] fails with [`Error::InvalidConfig`],
+    /// and [`Server::run_on_socket`] with an I/O error that wraps it.
+    /// `run_on_socket` also logs a warning for each key it can't sign with.
+    /// [`generate_secret_key`](crate::keys::generate_secret_key) makes a key
+    /// of a type the backend supports.
     pub keys: Vec<PrivateKey>,
     /// The server's host certificates.
     pub certificates: Vec<Certificate>,
@@ -902,6 +910,10 @@ pub trait Server {
 
     /// Run a server on a specified `tokio::net::TcpListener`. Useful when dropping
     /// privileges immediately after socket binding, for example.
+    ///
+    /// Fails with an [`std::io::ErrorKind::InvalidInput`] error, wrapping
+    /// [`Error::InvalidConfig`], if the crypto backend can't sign with any of
+    /// [`Config::keys`].
     fn run_on_socket(
         &mut self,
         config: Arc<Config>,
@@ -914,6 +926,11 @@ pub trait Server {
         let shutdown_tx2 = shutdown_tx.clone();
 
         let fut = async move {
+            if let Err(e) = check_host_keys(&config.keys) {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, e));
+            }
+            warn_unusable_host_keys(&config.keys);
+
             if config.maximum_packet_size > 65535 {
                 error!(
                     "Maximum packet size ({:?}) should not larger than a TCP packet (65535)",
@@ -1056,6 +1073,9 @@ impl<H: Handler> Future for RunningSession<H> {
 }
 
 /// Start a single connection in the background.
+///
+/// Fails with [`Error::InvalidConfig`], before anything is sent, if the
+/// crypto backend can't sign with any of [`Config::keys`].
 pub async fn run_stream<H, R>(
     config: Arc<Config>,
     mut stream: R,
@@ -1065,6 +1085,8 @@ where
     H: Handler + Send + 'static,
     R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    check_host_keys(&config.keys)?;
+
     // Writing SSH id.
     let mut write_buffer = SSHBuffer::new();
     write_buffer.send_ssh_id(&config.as_ref().server_id);
@@ -1099,6 +1121,47 @@ where
     let join = russh_util::runtime::spawn(session.run(stream, handler));
 
     Ok(RunningSession { handle, join })
+}
+
+/// Fails with [`Error::InvalidConfig`] if there are host keys, but the crypto
+/// backend can't sign with any of them, so no key exchange could succeed.
+fn check_host_keys(keys: &[PrivateKey]) -> Result<(), Error> {
+    if keys.is_empty()
+        || keys
+            .iter()
+            .any(|key| crate::crypto::can_sign_with_key_type(&key.algorithm()))
+    {
+        return Ok(());
+    }
+    let reasons: Vec<String> = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| unusable_host_key(index, &key.algorithm()))
+        .collect();
+    Err(Error::InvalidConfig(format!(
+        "the server can't sign with any of its host keys: {}",
+        reasons.join("; ")
+    )))
+}
+
+/// Logs a warning for each host key the crypto backend can't sign with.
+fn warn_unusable_host_keys(keys: &[PrivateKey]) {
+    for (index, key) in keys.iter().enumerate() {
+        let algorithm = key.algorithm();
+        if !crate::crypto::can_sign_with_key_type(&algorithm) {
+            warn!(
+                "the server can't sign with {}",
+                unusable_host_key(index, &algorithm)
+            );
+        }
+    }
+}
+
+fn unusable_host_key(index: usize, algorithm: &Algorithm) -> String {
+    format!(
+        "host key {index} ({algorithm}): {}",
+        crate::crypto::cannot_sign_reason(algorithm)
+    )
 }
 
 async fn read_ssh_id<R: AsyncRead + Unpin>(

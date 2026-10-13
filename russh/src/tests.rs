@@ -7,8 +7,8 @@ use super::*;
 /// Keys for the tests that need a host, user or CA key of any kind.
 ///
 /// With the RustCrypto-based backends they are random Ed25519 keys. The
-/// SymCrypt backend can neither generate keys nor use Ed25519, so it gets the
-/// committed ECDSA P-256 keys of `tests/data/test-keys` (made with
+/// SymCrypt backend can't use Ed25519, so it gets the committed ECDSA P-256
+/// keys of `tests/data/test-keys` (made with
 /// `ssh-keygen -t ecdsa -b 256 -N "" -C russh-test`). `tests/common/test_keys.rs`
 /// is the same for the integration tests.
 pub(crate) mod test_keys {
@@ -1826,5 +1826,268 @@ mod rekey_under_load {
         writer.await.unwrap();
 
         assert!(echoed == payload, "echoed data differs from what was sent");
+    }
+}
+
+/// Keys the crypto backend can't sign with are refused when they are
+/// configured or used, with a clear error, before anything is sent.
+mod unusable_keys {
+    use std::sync::{Arc, Mutex};
+
+    use keys::PrivateKeyWithHashAlg;
+    use ssh_key::certificate::{self, CertType};
+    use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData, SkEd25519};
+    use ssh_key::public::{self, Ed25519PublicKey};
+    use ssh_key::{Algorithm, Certificate, HashAlg, PrivateKey, PublicKey};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+    use crate::cert::PublicKeyOrCertificate;
+
+    /// Keys the backend can't sign with: a security key with every backend,
+    /// an Ed25519 key with `symcrypt`, and an RSA key without the `rsa`
+    /// feature.
+    fn unusable_keys() -> Vec<PrivateKey> {
+        let security_key = SkEd25519::new(
+            public::SkEd25519::new(Ed25519PublicKey([1; 32]), "ssh:"),
+            0,
+            vec![2; 32],
+        )
+        .unwrap();
+        let mut keys = vec![PrivateKey::new(KeypairData::SkEd25519(security_key), "").unwrap()];
+        if !keys::supports_signing(&Algorithm::Ed25519) {
+            let ed25519 = Ed25519Keypair {
+                public: Ed25519PublicKey([3; 32]),
+                private: Ed25519PrivateKey::from_bytes(&[4; 32]),
+            };
+            keys.push(PrivateKey::new(KeypairData::Ed25519(ed25519), "").unwrap());
+        }
+        if !keys::supports_signing(&Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512),
+        }) {
+            let rsa = include_str!("../tests/data/test-keys/rsa-2048-0");
+            keys.push(keys::decode_secret_key(rsa, None).unwrap());
+        }
+        keys
+    }
+
+    /// Accepts every user key and certificate, and records their algorithms.
+    #[derive(Clone, Default)]
+    struct Server {
+        user_keys: Arc<Mutex<Vec<Algorithm>>>,
+    }
+
+    impl Server {
+        fn accept(&self, algorithm: Algorithm) -> Result<server::Auth, crate::Error> {
+            self.user_keys.lock().unwrap().push(algorithm);
+            Ok(server::Auth::Accept)
+        }
+    }
+
+    impl server::Handler for Server {
+        type Error = crate::Error;
+
+        async fn auth_publickey_offered(
+            &mut self,
+            _: &str,
+            key: &PublicKey,
+        ) -> Result<server::Auth, Self::Error> {
+            self.accept(key.algorithm())
+        }
+
+        async fn auth_publickey(
+            &mut self,
+            _: &str,
+            key: &PublicKey,
+        ) -> Result<server::Auth, Self::Error> {
+            self.accept(key.algorithm())
+        }
+
+        async fn auth_openssh_certificate(
+            &mut self,
+            _: &str,
+            certificate: &Certificate,
+        ) -> Result<server::Auth, Self::Error> {
+            self.accept(certificate.algorithm())
+        }
+    }
+
+    impl server::Server for Server {
+        type Handler = Self;
+
+        fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+            self.clone()
+        }
+    }
+
+    /// Accepts every host key, and records its algorithm.
+    #[derive(Clone, Default)]
+    struct Client {
+        host_key: Arc<Mutex<Option<Algorithm>>>,
+    }
+
+    impl client::Handler for Client {
+        type Error = crate::Error;
+
+        async fn check_server_key(
+            &mut self,
+            key: &PublicKeyOrCertificate,
+        ) -> Result<bool, Self::Error> {
+            *self.host_key.lock().unwrap() = Some(key.public_key().algorithm());
+            Ok(true)
+        }
+    }
+
+    fn server_config(keys: Vec<PrivateKey>) -> Arc<server::Config> {
+        Arc::new(server::Config {
+            keys,
+            ..Default::default()
+        })
+    }
+
+    /// A client session with a server that has `host_keys`, over a pipe.
+    async fn connect(
+        host_keys: Vec<PrivateKey>,
+        server: Server,
+        client: Client,
+    ) -> client::Handle<Client> {
+        let (server_stream, client_stream) = tokio::io::duplex(1 << 16);
+        let config = server_config(host_keys);
+        tokio::spawn(async move {
+            server::run_stream(config, server_stream, server)
+                .await
+                .unwrap()
+                .await
+        });
+        client::connect_stream(Arc::new(client::Config::default()), client_stream, client)
+            .await
+            .unwrap()
+    }
+
+    fn assert_refused<T: std::fmt::Debug>(result: Result<T, crate::Error>, algorithm: &Algorithm) {
+        match result {
+            Err(crate::Error::SshKey(ssh_key::Error::AlgorithmUnsupported {
+                algorithm: ref refused,
+            })) if refused == algorithm => {}
+            other => panic!("{algorithm}: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn server_refuses_host_keys_it_cannot_sign_with() {
+        let _ = env_logger::try_init();
+        let unusable = unusable_keys();
+        let mut configs: Vec<Vec<PrivateKey>> =
+            unusable.iter().cloned().map(|key| vec![key]).collect();
+        configs.push(unusable);
+        for keys in configs {
+            let algorithms: Vec<Algorithm> = keys.iter().map(PrivateKey::algorithm).collect();
+            let (server_stream, mut client_stream) = tokio::io::duplex(1 << 16);
+            client_stream.write_all(b"SSH-2.0-test\r\n").await.unwrap();
+            let result = server::run_stream(server_config(keys), server_stream, Server::default())
+                .await
+                .map(drop);
+            let Err(crate::Error::InvalidConfig(message)) = result else {
+                panic!("{algorithms:?}: {result:?}");
+            };
+            assert!(
+                message.starts_with("the server can't sign with any of its host keys: "),
+                "{message}"
+            );
+            for (index, algorithm) in algorithms.iter().enumerate() {
+                assert!(
+                    message.contains(&format!("host key {index} ({algorithm}): ")),
+                    "{message}"
+                );
+            }
+            // Not even the SSH identification string was sent.
+            let mut sent = Vec::new();
+            client_stream.read_to_end(&mut sent).await.unwrap();
+            assert!(sent.is_empty(), "{:?}", String::from_utf8_lossy(&sent));
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let error = server::Server::run_on_socket(
+            &mut Server::default(),
+            server_config(unusable_keys()),
+            &listener,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{error}");
+        let error = error.get_ref().and_then(|error| error.downcast_ref());
+        assert!(
+            matches!(error, Some(crate::Error::InvalidConfig(_))),
+            "{error:?}"
+        );
+    }
+
+    /// A server signs with the host key it can sign with, and ignores the
+    /// others.
+    #[tokio::test]
+    async fn server_signs_with_its_usable_host_key() {
+        let _ = env_logger::try_init();
+        let mut host_keys = unusable_keys();
+        host_keys.push(test_keys::key(0));
+        let client = Client::default();
+        let host_key = client.host_key.clone();
+        let mut session = connect(host_keys, Server::default(), client).await;
+        let user_key = PrivateKeyWithHashAlg::new(Arc::new(test_keys::key(1)), None);
+        let result = session.authenticate_publickey("user", user_key).await;
+        assert!(result.unwrap().success());
+        assert_eq!(*host_key.lock().unwrap(), Some(test_keys::ALGORITHM));
+    }
+
+    /// The client refuses user keys it can't sign with before sending
+    /// anything, and the session goes on.
+    #[tokio::test]
+    async fn client_refuses_user_keys_it_cannot_sign_with() {
+        let _ = env_logger::try_init();
+        let server = Server::default();
+        let user_keys = server.user_keys.clone();
+        let mut session = connect(vec![test_keys::key(0)], server, Client::default()).await;
+        let ca = test_keys::key(2);
+        for key in unusable_keys() {
+            // With RSA, certificates sign with `rsa-sha2-512` too.
+            let (hash_alg, refused) = match key.algorithm() {
+                Algorithm::Rsa { .. } => {
+                    let hash = Some(HashAlg::Sha512);
+                    (hash, Algorithm::Rsa { hash })
+                }
+                algorithm => (None, algorithm),
+            };
+            let key = Arc::new(key);
+            let result = session
+                .authenticate_publickey("user", PrivateKeyWithHashAlg::new(key.clone(), hash_alg))
+                .await;
+            assert_refused(result, &refused);
+
+            let mut builder = certificate::Builder::new(
+                [5; 16],
+                key.public_key().key_data().clone(),
+                0,
+                u64::MAX,
+            )
+            .unwrap();
+            builder.cert_type(CertType::User).unwrap();
+            builder.valid_principal("user").unwrap();
+            let certificate = test_keys::certify(builder, &ca);
+            let result = session
+                .authenticate_openssh_cert("user", key, certificate)
+                .await;
+            assert_refused(result, &refused);
+        }
+        assert!(user_keys.lock().unwrap().is_empty());
+
+        let user_key = PrivateKeyWithHashAlg::new(Arc::new(test_keys::key(1)), None);
+        let result = session.authenticate_publickey("user", user_key).await;
+        assert!(result.unwrap().success());
+        assert!(
+            user_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|algorithm| *algorithm == test_keys::ALGORITHM)
+        );
     }
 }

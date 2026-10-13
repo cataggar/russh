@@ -463,11 +463,18 @@ impl<H: Handler> Handle<H> {
     /// `ssh-rsa`, `rsa-sha2-256`, and `rsa-sha2-512` "keys" in OpenSSH.
     /// You can use [Handle::best_supported_rsa_hash] to automatically
     /// figure out the best hash algorithm for RSA keys.
+    ///
+    /// Fails with [`ssh_key::Error::AlgorithmUnsupported`], before sending
+    /// anything, if the crypto backend can't sign with the key's algorithm
+    /// (see [`supports_signing`](crate::keys::supports_signing)), such as
+    /// Ed25519 or `ssh-rsa` (SHA-1) with `symcrypt`. The session stays
+    /// usable, for example to try another key.
     pub async fn authenticate_publickey<U: Into<String>>(
         &mut self,
         user: U,
         key: PrivateKeyWithHashAlg,
     ) -> Result<AuthResult, crate::Error> {
+        check_signing_algorithm(key.algorithm())?;
         let user = user.into();
         self.sender
             .send(Msg::Authenticate {
@@ -491,12 +498,23 @@ impl<H: Handler> Handle<H> {
     /// (`ssh-rsa-cert-v01@openssh.com`), which OpenSSH 8.8 and later refuse by
     /// default, is never used. To choose the hash yourself, use
     /// [`Handle::authenticate_certificate_with`].
+    ///
+    /// Like [`Handle::authenticate_publickey`], fails before sending anything
+    /// if the crypto backend can't sign with `key`.
     pub async fn authenticate_openssh_cert<U: Into<String>>(
         &mut self,
         user: U,
         key: Arc<PrivateKey>,
         cert: Certificate,
     ) -> Result<AuthResult, crate::Error> {
+        // An RSA certificate is signed with SHA-512 or SHA-256, which every
+        // backend that signs with RSA supports.
+        check_signing_algorithm(match key.algorithm() {
+            Algorithm::Rsa { .. } => Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512),
+            },
+            algorithm => algorithm,
+        })?;
         let user = user.into();
         self.sender
             .send(Msg::Authenticate {
@@ -511,6 +529,9 @@ impl<H: Handler> Handle<H> {
     /// Authenticate using a custom method that implements the
     /// [`Signer`][auth::Signer] trait. Currently, this crate only provides an
     /// implementation for an [SSH agent][crate::keys::agent::client::AgentClient].
+    ///
+    /// Unlike [`Handle::authenticate_publickey`], this doesn't check the key's
+    /// algorithm against the crypto backend: the signer does the signing.
     pub async fn authenticate_publickey_with<U: Into<String>, S: auth::Signer>(
         &mut self,
         user: U,
@@ -649,6 +670,9 @@ impl<H: Handler> Handle<H> {
     /// where the signing is delegated to an external signer (e.g., SSH agent).
     ///
     /// For RSA certificates, you can specify the hash algorithm to use.
+    ///
+    /// Like [`Handle::authenticate_publickey_with`], this doesn't check the
+    /// key's algorithm against the crypto backend.
     pub async fn authenticate_certificate_with<U: Into<String>, S: auth::Signer>(
         &mut self,
         user: U,
@@ -1130,6 +1154,20 @@ impl<H: Handler> Handle<H> {
             None => Ok(None),
         }
     }
+}
+
+/// Fails with [`ssh_key::Error::AlgorithmUnsupported`] if the crypto backend
+/// can't sign with `algorithm`, to refuse a user key before authenticating
+/// with it.
+fn check_signing_algorithm(algorithm: Algorithm) -> Result<(), Error> {
+    if crate::crypto::can_sign(&algorithm) {
+        return Ok(());
+    }
+    warn!(
+        "can't authenticate with a {algorithm} key: {}",
+        crate::crypto::cannot_sign_reason(&algorithm)
+    );
+    Err(ssh_key::Error::AlgorithmUnsupported { algorithm }.into())
 }
 
 impl<H: Handler> Future for Handle<H> {

@@ -1,4 +1,4 @@
-//! Private key loading for the SymCrypt backend.
+//! Private key loading and generation for the SymCrypt backend.
 //!
 //! [`decode_secret_key`](crate::keys::decode_secret_key),
 //! [`load_secret_key`](crate::keys::load_secret_key) and
@@ -51,15 +51,77 @@
 //! (checkints, padding, matching public key), and a SEC1 or PKCS#8 EC key's
 //! public point is derived from the scalar, then compared with the embedded
 //! one, if any.
+//!
+//! [`generate`] makes new ECDSA and RSA keys with SymCrypt for
+//! [`generate_secret_key`](crate::keys::generate_secret_key): `ssh-key`'s
+//! `PrivateKey::random` needs the RustCrypto algorithm crates.
 
-use ssh_key::private::{EcdsaKeypair, RsaKeypair, RsaPrivateKey};
+use ssh_key::private::{EcdsaKeypair, KeypairData, RsaKeypair, RsaPrivateKey};
 use ssh_key::public::RsaPublicKey;
-use ssh_key::{EcdsaCurve, Mpint};
+use ssh_key::{Algorithm, EcdsaCurve, Mpint, PrivateKey};
 use symcrypt::ecc::{CurveType, EcKey, EcKeyUsage};
+use symcrypt::errors::SymCryptError;
 use symcrypt::rsa::{RsaKey, RsaKeyPairExportBlob, RsaKeyUsage};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::keys::Error;
+
+/// The size of the RSA keys [`generate`] makes, as `ssh-key` does.
+const RSA_GENERATED_BITS: u32 = 4096;
+
+/// Generates a key pair with SymCrypt, with an empty comment: ECDSA on any
+/// curve, or a 4096-bit RSA key with `e = 65537` (the hash of `algorithm`
+/// doesn't matter).
+///
+/// Fails with `ssh_key::Error::AlgorithmUnsupported` for other algorithms,
+/// and with `ssh_key::Error::Crypto` if SymCrypt fails.
+pub(crate) fn generate(algorithm: &Algorithm) -> Result<PrivateKey, Error> {
+    let keypair = match algorithm {
+        Algorithm::Ecdsa { curve } => {
+            let curve_type = match curve {
+                EcdsaCurve::NistP256 => CurveType::NistP256,
+                EcdsaCurve::NistP384 => CurveType::NistP384,
+                EcdsaCurve::NistP521 => CurveType::NistP521,
+            };
+            let key = EcKey::generate_key_pair(curve_type, EcKeyUsage::EcDsa)
+                .map_err(generation_error)?;
+            // SymCrypt does not wipe what it exports.
+            let scalar = Zeroizing::new(key.export_private_key().map_err(generation_error)?);
+            KeypairData::Ecdsa(ecdsa_keypair(*curve, &scalar, None)?)
+        }
+        Algorithm::Rsa { .. } => {
+            let key = RsaKey::generate_key_pair(RSA_GENERATED_BITS, None, RsaKeyUsage::Sign)
+                .map_err(generation_error)?;
+            let RsaKeyPairExportBlob {
+                modulus,
+                pub_exp,
+                p,
+                q,
+                d_p,
+                d_q,
+                crt_coefficient,
+                private_exp,
+            } = key.export_key_pair_blob().map_err(generation_error)?;
+            // SymCrypt does not wipe what it exports. `rsa_keypair` checks
+            // the key and computes `iqmp` again.
+            let [p, q, d, _d_p, _d_q, _iqmp] =
+                [p, q, private_exp, d_p, d_q, crt_coefficient].map(Zeroizing::new);
+            KeypairData::Rsa(rsa_keypair(&modulus, &pub_exp, &d, &p, &q)?)
+        }
+        _ => {
+            return Err(ssh_key::Error::AlgorithmUnsupported {
+                algorithm: algorithm.clone(),
+            }
+            .into());
+        }
+    };
+    Ok(PrivateKey::new(keypair, "")?)
+}
+
+fn generation_error(error: SymCryptError) -> Error {
+    log::error!("SymCrypt failed to generate a key: {error}");
+    ssh_key::Error::Crypto.into()
+}
 
 /// Builds an ECDSA key pair from a big-endian private `scalar` (leading
 /// zeros allowed) with the public point derived by SymCrypt. If `public` (a

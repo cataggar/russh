@@ -17,10 +17,7 @@ async fn main() {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
-        keys: vec![
-            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
-                .unwrap(),
-        ],
+        keys: vec![russh::keys::generate_secret_key().unwrap()],
         preferred: Preferred {
             // kex: std::borrow::Cow::Owned(vec![russh::kex::DH_GEX_SHA256]),
             ..Preferred::default()
