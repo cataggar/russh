@@ -138,10 +138,11 @@ impl russh::server::Handler for Server {
         _port: &mut u32,
         session: &mut server::Session,
     ) -> Result<bool, Self::Error> {
-        let tcp_addr = self.0;
+        // Listen before replying: the client connects as soon as the request
+        // succeeds.
+        let listener = TcpListener::bind(self.0).await?;
         let handle = session.handle();
         tokio::spawn(async move {
-            let listener = TcpListener::bind(tcp_addr).await.unwrap();
             while let Ok((mut stream, _)) = listener.accept().await {
                 let handle = handle.clone();
                 tokio::spawn(async move {
