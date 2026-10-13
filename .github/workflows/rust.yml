@@ -165,6 +165,57 @@ jobs:
         env:
           RUST_BACKTRACE: 1
 
+  # russh's tests with each crypto backend, against the OpenSSH 10.2 of Ubuntu 26.04 rather than the
+  # 9.6 of the 24.04 jobs: the interop checks that need OpenSSH 9.9 or later (mlkem768x25519-sha256)
+  # run only here. `ring` without `rsa` checks that the tests that use RSA keys are gated on it, and
+  # `symcrypt` with every opt-in feature that the tests still pass with the features compiled in
+  # (the symcrypt backend never uses them for protocol crypto). One job per feature set, in
+  # parallel, to keep the workflow's wall time down.
+  Test-features:
+    name: Test (${{ matrix.features }}, OpenSSH 10)
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - default
+          - ring
+          - ring,rsa
+          - symcrypt
+          - symcrypt,rsa,des,dsa,flate2,serde,async-trait
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    container: ubuntu:26.04
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.cargo-home
+      RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
+
+    steps:
+      - name: Install job dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential ca-certificates curl git openssh-client openssh-server pkg-config
+          mkdir -p /run/sshd
+
+      # The harness skips, even with RUSSH_REQUIRE_SSHD, the checks the installed OpenSSH can't do.
+      - name: Check that OpenSSH supports mlkem768x25519-sha256
+        run: |
+          ssh -V
+          ssh -Q kex | grep -qx mlkem768x25519-sha256 || { echo "::error::this OpenSSH has no mlkem768x25519-sha256"; exit 1; }
+
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+
+      - name: Set up SymCrypt
+        if: contains(matrix.features, 'symcrypt')
+        uses: ./.github/actions/setup-symcrypt
+
+      - name: Test
+        run: cargo test -p russh --no-default-features --features "$FEATURES"
+        env:
+          FEATURES: ${{ matrix.features }}
+          RUST_BACKTRACE: 1
+          # Fail rather than skip the OpenSSH interop checks if sshd can't be started.
+          RUSSH_REQUIRE_SSHD: "1"
+
   Minimal-versions:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04

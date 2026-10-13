@@ -482,7 +482,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rsa")]
+    // The symcrypt backend cannot make `ssh-rsa` (SHA-1) signatures.
+    #[cfg(all(feature = "rsa", not(russh_backend = "symcrypt")))]
     #[tokio::test]
     async fn signature_algorithm_must_match_requested_algorithm() {
         #[derive(Default)]
