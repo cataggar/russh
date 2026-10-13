@@ -993,7 +993,8 @@ mod tests {
 
     /// The RSA cert variants a server advertises follow `pref.key`, so the
     /// preference list stays the policy knob for e.g. banning SHA-1.
-    #[cfg(feature = "rsa")]
+    // The symcrypt backend has no Ed25519 (for the CA) and no `ssh-rsa`.
+    #[cfg(all(feature = "rsa", not(russh_backend = "symcrypt")))]
     #[test]
     fn rsa_certificate_variants_follow_preferences() {
         let ca = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();

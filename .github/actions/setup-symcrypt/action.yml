@@ -1,17 +1,18 @@
 name: Set up SymCrypt
 description: >-
   Installs a pinned, checksum-verified build of the native SymCrypt library so that the `symcrypt`
-  crate can link against it and load it at runtime. Supports Ubuntu 22.04/24.04 (x64 and arm64)
-  and Windows (x64 and arm64) runners.
+  crate can link against it and load it at runtime. Supports Ubuntu 22.04/24.04/26.04 (x64 and
+  arm64) and Windows (x64 and arm64) runners.
 
 # Linux: installs the `symcrypt` package that packages.microsoft.com (PMC) publishes for Ubuntu,
 # which is how the symcrypt crate documents installing SymCrypt on Ubuntu (rust-symcrypt README
-# and INSTALL.md). PMC has the package for both amd64 and arm64. Instead of configuring the apt
-# repository and running `apt-get update`, the pinned .deb is downloaded straight from the PMC pool
-# and its SHA-256 is checked, which pins the exact build and skips the slow apt index refresh. The
-# result is the same as `apt-get install symcrypt`: the library lands in the standard linker and
-# loader path (/usr/lib/<multiarch>), so SYMCRYPT_LIB_PATH and LD_LIBRARY_PATH are not needed and
-# are left unset, as INSTALL.md recommends for packaged installs.
+# and INSTALL.md). PMC has the package for both amd64 and arm64, for Ubuntu 22.04 and 24.04
+# (Ubuntu 26.04 gets the 24.04 one). Instead of configuring the apt repository and running
+# `apt-get update`, the pinned .deb is downloaded straight from the PMC pool and its SHA-256 is
+# checked, which pins the exact build and skips the slow apt index refresh. The result is the same
+# as `apt-get install symcrypt`: the library lands in the standard linker and loader path
+# (/usr/lib/<multiarch>), so SYMCRYPT_LIB_PATH and LD_LIBRARY_PATH are not needed and are left
+# unset, as INSTALL.md recommends for packaged installs.
 #
 # Windows: downloads the official release archive from github.com/microsoft/SymCrypt, checks its
 # SHA-256, extracts symcrypt.lib and symcrypt.dll, sets SYMCRYPT_LIB_PATH (the directory with
@@ -99,9 +100,13 @@ runs:
         esac
 
         . /etc/os-release
+        # PMC publishes no symcrypt package for Ubuntu 26.04, so 26.04 installs the one from the
+        # 24.04 pool: that .deb declares no dependencies and has no maintainer scripts, and its
+        # library needs only libatomic.so.1 (no glibc symbol versions), like on 22.04 and 24.04.
         case "${ID:-}/${VERSION_ID:-}" in
-          ubuntu/22.04 | ubuntu/24.04) ;;
-          *) fail "unsupported distribution '${PRETTY_NAME:-unknown}'; PMC publishes symcrypt for Ubuntu 22.04 and 24.04" ;;
+          ubuntu/22.04 | ubuntu/24.04) pool="$VERSION_ID" ;;
+          ubuntu/26.04) pool=24.04 ;;
+          *) fail "unsupported distribution '${PRETTY_NAME:-unknown}'; PMC publishes symcrypt for Ubuntu 22.04 and 24.04 (also used on 26.04)" ;;
         esac
 
         sudo=sudo
@@ -111,7 +116,7 @@ runs:
           echo "SymCrypt $version is already installed"
         else
           deb="symcrypt_${version}-1_${arch}.deb"
-          url="https://packages.microsoft.com/ubuntu/${VERSION_ID}/prod/pool/main/s/symcrypt/$deb"
+          url="https://packages.microsoft.com/ubuntu/${pool}/prod/pool/main/s/symcrypt/$deb"
           echo "Downloading $url"
           curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
             --output "$RUNNER_TEMP/$deb" "$url"

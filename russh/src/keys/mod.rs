@@ -834,8 +834,9 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
             .stderr(Stdio::null())
             .spawn()?;
 
-        // Wait for the socket to be created
-        while agent_path.canonicalize().is_err() {
+        // The socket file appears when ssh-agent binds it, before it listens,
+        // so wait until a connection succeeds.
+        while tokio::net::UnixStream::connect(&agent_path).await.is_err() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
@@ -1028,8 +1029,9 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
             .stderr(Stdio::null())
             .spawn()?;
 
-        // Wait for the socket to be created
-        while agent_path.canonicalize().is_err() {
+        // The socket file appears when ssh-agent binds it, before it listens,
+        // so wait until a connection succeeds.
+        while tokio::net::UnixStream::connect(&agent_path).await.is_err() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 

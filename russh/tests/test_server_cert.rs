@@ -140,6 +140,8 @@ async fn test_server_wrong_ca_certificate_auth() {
     }
 }
 
+// The SymCrypt backend does RSA itself; the others need the `rsa` feature.
+#[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
 #[tokio::test]
 async fn test_server_rsa_sha2_512_certificate_auth() {
     let _ = env_logger::try_init();

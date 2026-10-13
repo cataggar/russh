@@ -10,19 +10,25 @@
 mod common;
 
 use common::openssh::{self, Case, KeyAlg, KeyType, Sshd};
+#[cfg(feature = "rsa")]
 use russh::keys::HashAlg;
 use russh::{cipher, kex, mac};
 
 /// Used for both host keys and user keys: every key type, both SHA-2 RSA
-/// signature algorithms, and two RSA key sizes.
+/// signature algorithms, and two RSA key sizes. aws-lc-rs and ring do RSA
+/// only with the `rsa` feature, and so do the RSA cases of every test here.
 const KEY_ALGORITHMS: &[KeyAlg] = &[
     KeyAlg::ED25519,
     KeyAlg::ECDSA_P256,
     KeyAlg::ECDSA_P384,
     KeyAlg::ECDSA_P521,
+    #[cfg(feature = "rsa")]
     KeyAlg::RSA_SHA2_256,
+    #[cfg(feature = "rsa")]
     KeyAlg::RSA_SHA2_512,
+    #[cfg(feature = "rsa")]
     KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha256)),
+    #[cfg(feature = "rsa")]
     KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha512)),
 ];
 
@@ -143,6 +149,7 @@ async fn combinations() {
             Case::default()
                 .with_kex(kex::ECDH_SHA2_NISTP256)
                 .with_cipher(cipher::AES_256_GCM),
+            #[cfg(feature = "rsa")]
             Case::default()
                 .with_kex(kex::ECDH_SHA2_NISTP384)
                 .with_cipher(cipher::AES_256_CTR)
@@ -163,7 +170,6 @@ async fn combinations() {
 /// longer enables most of them by default.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy() {
-    let ssh_rsa = KeyAlg::rsa(KeyType::Rsa2048, None);
     #[allow(unused_mut)]
     let mut cases = vec![
         Case::default().with_kex(kex::DH_G1_SHA1),
@@ -178,9 +184,13 @@ async fn legacy() {
         Case::default()
             .with_cipher(cipher::AES_128_CTR)
             .with_mac(mac::HMAC_SHA1_ETM),
-        Case::default().with_host_key(ssh_rsa),
-        Case::default().with_user_key(ssh_rsa),
     ];
+    #[cfg(feature = "rsa")]
+    {
+        let ssh_rsa = KeyAlg::rsa(KeyType::Rsa2048, None);
+        cases.push(Case::default().with_host_key(ssh_rsa));
+        cases.push(Case::default().with_user_key(ssh_rsa));
+    }
     // With EtM MACs in `triple_des_etm`.
     #[cfg(feature = "des")]
     cases.push(
@@ -226,6 +236,7 @@ async fn host_key_selection() {
     for host_key in [
         KeyAlg::ED25519,
         KeyAlg::ECDSA_P384,
+        #[cfg(feature = "rsa")]
         KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha512)),
     ] {
         let case = Case::default().with_host_key(host_key);

@@ -1,22 +1,18 @@
-//! Regression test for <https://github.com/Eugeny/russh/issues/774>
-#![cfg(unix)]
+//! Regression test for <https://github.com/Eugeny/russh/issues/774>: the russh
+//! server answers an `auth-agent-req@openssh.com` channel request the way
+//! OpenSSH's sshd does. The reference sshd comes from `common/openssh.rs`, so
+//! the test is skipped without OpenSSH (or fails under `RUSSH_REQUIRE_SSHD`).
 
 mod common;
 
-use std::io::Write;
-use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::OwnedFd;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
+use common::openssh::{self, Sshd};
 use common::test_keys;
-use russh::keys::ssh_key::{self, LineEnding};
-use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-use russh::{ChannelMsg, client, server};
-use tokio::process::{Child, Command};
+use russh::keys::ssh_key;
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
+use russh::{ChannelMsg, Preferred, client, server};
 use tokio::task::JoinHandle;
 
 struct Client;
@@ -105,110 +101,29 @@ impl Server {
     }
 }
 
-struct Sshd {
-    listener: tokio::net::TcpListener,
-    addr: SocketAddr,
-    config_path: PathBuf,
-    client_key: Arc<PrivateKey>,
-    user: String,
-    child: Mutex<Option<Child>>,
-}
-
-impl Sshd {
-    async fn spawn(dir: &Path) -> Self {
-        let host_key = test_keys::key(0);
-        let client_key = test_keys::key(1);
-
-        let host_path = dir.join("host_key");
-        std::fs::write(
-            &host_path,
-            host_key.to_openssh(LineEnding::LF).unwrap().as_bytes(),
-        )
-        .unwrap();
-        std::fs::set_permissions(&host_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let authorized = dir.join("authorized_keys");
-        std::fs::write(&authorized, client_key.public_key().to_openssh().unwrap()).unwrap();
-
-        let config_path = dir.join("sshd_config");
-        let mut config_file = std::fs::File::create(&config_path).unwrap();
-        write!(
-            config_file,
-            "\
-HostKey {host}
-AuthorizedKeysFile {ak}
-PasswordAuthentication no
-PubkeyAuthentication yes
-UsePAM no
-StrictModes no
-AllowAgentForwarding yes
-",
-            host = host_path.display(),
-            ak = authorized.display(),
-        )
-        .unwrap();
-        drop(config_file);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let user = String::from_utf8(Command::new("id").arg("-un").output().await.unwrap().stdout)
-            .unwrap()
-            .trim()
-            .to_string();
-
-        Sshd {
-            listener,
-            addr,
-            config_path,
-            client_key: Arc::new(client_key),
-            user,
-            child: Mutex::new(None),
-        }
-    }
-
-    async fn connect(&self) -> client::Handle<Client> {
-        let accept = async {
-            let (socket, _) = self.listener.accept().await.unwrap();
-            let socket = socket.into_std().unwrap();
-            socket.set_nonblocking(false).unwrap();
-            let stdout = socket.try_clone().unwrap();
-            Command::new("/usr/sbin/sshd")
-                .arg("-i")
-                .arg("-f")
-                .arg(&self.config_path)
-                .stdin(Stdio::from(OwnedFd::from(socket)))
-                .stdout(Stdio::from(OwnedFd::from(stdout)))
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap()
-        };
-        let connect = client::connect(Arc::new(client::Config::default()), self.addr, Client);
-        let (child, handle) = tokio::join!(accept, connect);
-        *self.child.lock().unwrap() = Some(child);
-
-        let mut handle = handle.unwrap();
-        handle
-            .authenticate_publickey(
-                self.user.clone(),
-                PrivateKeyWithHashAlg::new(self.client_key.clone(), None),
-            )
-            .await
-            .unwrap();
-        handle
-    }
-}
-
 #[tokio::test]
 async fn russh_matches_openssh() {
-    let dir = tempfile::tempdir().unwrap();
-    let sshd = Sshd::spawn(dir.path()).await;
+    if openssh::available().is_none() {
+        return;
+    }
+    // Dropping `sshd` while panicking prints its configuration and logs.
+    let sshd = Sshd::builder()
+        .config("AllowAgentForwarding yes")
+        .start()
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
     let (_server, russh) = Server::spawn_and_connect().await;
-    let openssh = sshd.connect().await;
+    let mut openssh = sshd
+        .connect(Preferred::default())
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    openssh
+        .authenticate(None)
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
 
     let russh_channel = russh.channel_open_session().await.unwrap();
-    let openssh_channel = openssh.channel_open_session().await.unwrap();
+    let openssh_channel = openssh.handle().channel_open_session().await.unwrap();
 
     let (russh_scoped, openssh_scoped) = tokio::join!(
         reply_is_channel_scoped(russh_channel),
