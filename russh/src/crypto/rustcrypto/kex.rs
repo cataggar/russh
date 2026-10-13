@@ -30,10 +30,7 @@ impl KeyAgreement for X25519 {
         Ok((private_key, public_key.0.to_vec()))
     }
 
-    fn agree(
-        private_key: Self::PrivateKey,
-        peer_public_key: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>> {
+    fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let peer_public_key = MontgomeryPoint(peer_public_key.try_into().map_err(|_| CryptoError)?);
         let shared = peer_public_key.mul_clamped(*private_key);
         Ok(Zeroizing::new(shared.0.to_vec()))
@@ -63,10 +60,7 @@ where
         Ok((private_key, public_key))
     }
 
-    fn agree(
-        private_key: Self::PrivateKey,
-        peer_public_key: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>> {
+    fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let peer_public_key = elliptic_curve::PublicKey::<C>::from_sec1_bytes(peer_public_key)
             .map_err(|_| CryptoError)?;
         let shared = private_key.diffie_hellman(&peer_public_key);
@@ -100,8 +94,8 @@ impl Kem for MlKem768 {
         decapsulation_key: &Self::DecapsulationKey,
         ciphertext: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>> {
-        let ciphertext =
-            ml_kem::Ciphertext::<ml_kem::MlKem768>::try_from(ciphertext).map_err(|_| CryptoError)?;
+        let ciphertext = ml_kem::Ciphertext::<ml_kem::MlKem768>::try_from(ciphertext)
+            .map_err(|_| CryptoError)?;
         Ok(Zeroizing::new(
             decapsulation_key.decapsulate(&ciphertext).to_vec(),
         ))

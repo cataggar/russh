@@ -989,10 +989,12 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         let stream = tokio::net::UnixStream::connect(&agent_path).await.unwrap();
         let mut client = agent::client::AgentClient::connect(stream);
         let lifetime = || agent::Constraint::KeyLifetime { seconds: 60 };
-        assert!(client
-            .add_identity(&key, &[lifetime(), lifetime()])
-            .await
-            .is_err());
+        assert!(
+            client
+                .add_identity(&key, &[lifetime(), lifetime()])
+                .await
+                .is_err()
+        );
         assert!(client.request_identities().await.unwrap().is_empty());
         client.add_identity(&key, &[lifetime()]).await.unwrap();
         assert_eq!(client.request_identities().await.unwrap().len(), 1);
@@ -1047,7 +1049,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     #[cfg(unix)]
     fn create_test_cert(ca_key: &PrivateKey, user_key: &PrivateKey) -> ssh_key::Certificate {
         use ssh_key::certificate;
-                use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1075,7 +1077,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     #[cfg(unix)]
     async fn test_request_identities_full_with_keys_and_certs() {
         use crate::keys::agent::{AgentIdentity, client::AgentClient};
-                use std::io::Write;
+        use std::io::Write;
         use std::process::Stdio;
 
         env_logger::try_init().unwrap_or(());
@@ -1201,7 +1203,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     #[cfg(unix)]
     async fn test_sign_request_cert() {
         use crate::keys::agent::client::AgentClient;
-                use std::io::Write;
+        use std::io::Write;
         use std::process::Stdio;
 
         env_logger::try_init().unwrap_or(());
@@ -1430,7 +1432,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     #[cfg(all(unix, feature = "rsa"))]
     fn create_test_rsa_cert(ca_key: &PrivateKey, user_key: &PrivateKey) -> ssh_key::Certificate {
         use ssh_key::certificate;
-                use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1458,7 +1460,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     #[cfg(all(unix, feature = "rsa"))]
     async fn test_sign_request_cert_rsa() {
         use crate::keys::agent::client::AgentClient;
-                use std::io::Write;
+        use std::io::Write;
         use std::process::Stdio;
 
         env_logger::try_init().unwrap_or(());
@@ -1552,7 +1554,7 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     #[cfg(all(unix, feature = "rsa"))]
     async fn test_sign_request_cert_rsa_sha512() {
         use crate::keys::agent::client::AgentClient;
-                use std::io::Write;
+        use std::io::Write;
         use std::process::Stdio;
 
         env_logger::try_init().unwrap_or(());

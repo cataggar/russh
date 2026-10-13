@@ -13,7 +13,7 @@ pub fn decode_pkcs5(
     password: Option<&str>,
     enc: Encryption,
 ) -> Result<PrivateKey, Error> {
-    use aes::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
+    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
 
     if let Some(pass) = password {
         let sec = match enc {

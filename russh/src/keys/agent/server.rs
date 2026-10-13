@@ -561,7 +561,10 @@ mod tests {
 
         for (key, hash_alg) in [
             (include_str!("../../../tests/data/keys/ecdsa-p256"), None),
-            (include_str!("../../../tests/data/keys/ecdsa-p256-short"), None),
+            (
+                include_str!("../../../tests/data/keys/ecdsa-p256-short"),
+                None,
+            ),
             (include_str!("../../../tests/data/keys/ecdsa-p384"), None),
             (include_str!("../../../tests/data/keys/ecdsa-p521"), None),
             (
@@ -577,7 +580,9 @@ mod tests {
             client.add_identity(&key, &[]).await?;
             let data = b"signed by the agent".to_vec();
             let identity = AgentIdentity::from(key.public_key().clone());
-            let signed = client.sign_request(&identity, hash_alg, data.clone()).await?;
+            let signed = client
+                .sign_request(&identity, hash_alg, data.clone())
+                .await?;
             let mut signature = signed.strip_prefix(&data[..]).ok_or("no data")?;
             u32::decode(&mut signature)?;
             let signature = ssh_key::Signature::decode(&mut signature)?;

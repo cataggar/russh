@@ -103,6 +103,17 @@ jobs:
       - name: rustfmt
         run: cargo fmt --check
 
+      # russh's lib.rs pulls in the rest of the crate with `include!("lib_inner.rs")`, which rustfmt
+      # doesn't follow, so `cargo fmt` never reaches lib_inner.rs or the modules it declares. Check
+      # them directly; this runs even if the step above failed, so that one run reports both.
+      - name: rustfmt (russh/src/lib_inner.rs and its modules)
+        if: ${{ !cancelled() }}
+        run: |
+          rustfmt --edition 2024 --check russh/src/lib_inner.rs || {
+            echo "::error::cargo fmt doesn't reach the modules declared in russh/src/lib_inner.rs; format them with \`rustfmt --edition 2024 russh/src/lib_inner.rs\`"
+            exit 1
+          }
+
   Clippy:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04

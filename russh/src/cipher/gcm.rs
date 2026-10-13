@@ -215,7 +215,12 @@ mod tests {
             ciphertext_and_tag: &mut [u8],
         ) -> crypto::Result<()> {
             let (ciphertext, tag) = ciphertext_and_tag
-                .split_at_mut_checked(ciphertext_and_tag.len().checked_sub(AEAD_TAG_LEN).ok_or(CryptoError)?)
+                .split_at_mut_checked(
+                    ciphertext_and_tag
+                        .len()
+                        .checked_sub(AEAD_TAG_LEN)
+                        .ok_or(CryptoError)?,
+                )
                 .ok_or(CryptoError)?;
             if tag[..AEAD_NONCE_LEN] != nonce[..] || tag[AEAD_NONCE_LEN..] != *aad {
                 return Err(CryptoError);
@@ -242,7 +247,10 @@ mod tests {
             assert_ne!(&packet[4..], b"payload!");
             let mut ciphertext_and_tag = packet.to_vec();
             ciphertext_and_tag.extend_from_slice(&tag);
-            assert_eq!(opening.open(0, &mut ciphertext_and_tag).unwrap(), b"payload!");
+            assert_eq!(
+                opening.open(0, &mut ciphertext_and_tag).unwrap(),
+                b"payload!"
+            );
         }
         // The counter carries into the next byte.
         let mut tag = [0; AEAD_TAG_LEN];

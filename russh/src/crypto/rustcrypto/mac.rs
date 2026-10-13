@@ -42,8 +42,7 @@ hmac!(HmacSha512, sha2::Sha512, 64);
 
 /// HMAC-SHA1 with a key of any length (see [`crate::crypto::hmac_sha1`]).
 pub(crate) fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<[u8; 20]> {
-    let mut hmac =
-        <Hmac<sha1::Sha1> as KeyInit>::new_from_slice(key).map_err(|_| CryptoError)?;
+    let mut hmac = <Hmac<sha1::Sha1> as KeyInit>::new_from_slice(key).map_err(|_| CryptoError)?;
     hmac.update(data);
     Ok(hmac.finalize().into_bytes().into())
 }

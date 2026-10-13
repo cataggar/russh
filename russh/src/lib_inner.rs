@@ -19,9 +19,9 @@ mod auth;
 mod cert;
 /// Cipher names
 pub mod cipher;
-mod crypto;
 /// Compression algorithm names
 pub mod compression;
+mod crypto;
 /// Key exchange algorithm names
 pub mod kex;
 /// MAC algorithm names

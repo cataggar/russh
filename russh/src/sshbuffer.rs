@@ -20,10 +20,10 @@ use std::num::Wrapping;
 use bytes::{Bytes, BytesMut};
 use log::debug;
 use ssh_encoding::Writer;
-use super::cipher::SealingKey;
-use compression::Compress;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+use super::cipher::SealingKey;
+use super::compression::Compress;
 use super::*;
 
 /// The SSH client/server identification string.
@@ -550,7 +550,8 @@ impl PacketWriter {
         // Reserving a small fixed margin avoids repeated output-buffer growth
         // without coupling callers to individual cipher padding formulas.
         let per_packet_margin = Self::PACKET_PREFIX_LEN + self.cipher.tag_len() + 32;
-        let additional = payload_bytes.saturating_add(packet_count.saturating_mul(per_packet_margin));
+        let additional =
+            payload_bytes.saturating_add(packet_count.saturating_mul(per_packet_margin));
         self.write_buffer.buffer.reserve(additional);
     }
 

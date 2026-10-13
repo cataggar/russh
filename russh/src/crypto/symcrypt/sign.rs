@@ -333,10 +333,11 @@ fn verify_ecdsa(
     let fixed = curve
         .fixed_signature(blob)
         .ok_or_else(signature::Error::new)?;
-    let key = EcKey::set_public_key(curve.symcrypt(), point, EcKeyUsage::EcDsa).map_err(|error| {
-        debug!("SymCrypt rejected an ECDSA public key: {error}");
-        signature::Error::new()
-    })?;
+    let key =
+        EcKey::set_public_key(curve.symcrypt(), point, EcKeyUsage::EcDsa).map_err(|error| {
+            debug!("SymCrypt rejected an ECDSA public key: {error}");
+            signature::Error::new()
+        })?;
     key.ecdsa_verify(&fixed, &curve.digest(message))
         .map_err(|_| signature::Error::new())
 }
@@ -447,8 +448,10 @@ fn import_rsa(keypair: &RsaKeypair) -> ssh_key::Result<SigningKey> {
         )
     })?;
     let private = keypair.private();
-    let (Some(p), Some(q)) = (private.p().as_positive_bytes(), private.q().as_positive_bytes())
-    else {
+    let (Some(p), Some(q)) = (
+        private.p().as_positive_bytes(),
+        private.q().as_positive_bytes(),
+    ) else {
         return Err(ssh_key::Error::Crypto);
     };
     // SymCrypt derives the private exponent and the CRT values from p and q.
@@ -784,8 +787,12 @@ mod tests {
                 // `(r, n - s)` is valid too, so this checks the order
                 // constant `fixed_signature` compares with.
                 let negated = ecdsa_blob(r, &sub(order, s));
-                verify(&key, message, &Signature::new(vector.algorithm(), negated).unwrap())
-                    .unwrap();
+                verify(
+                    &key,
+                    message,
+                    &Signature::new(vector.algorithm(), negated).unwrap(),
+                )
+                .unwrap();
                 let out_of_range = ecdsa_blob(r, order);
                 let out_of_range = Signature::new(vector.algorithm(), out_of_range).unwrap();
                 assert!(verify(&key, message, &out_of_range).is_err());
@@ -945,16 +952,24 @@ mod tests {
             Some([fixed_one.clone(), fixed_one].concat())
         );
         let n_minus_one = sub(n, &[[0; 31].as_slice(), &[1]].concat());
-        assert!(curve
-            .fixed_signature(&[mpint(&n_minus_one), mpint(&n_minus_one)].concat())
-            .is_some());
+        assert!(
+            curve
+                .fixed_signature(&[mpint(&n_minus_one), mpint(&n_minus_one)].concat())
+                .is_some()
+        );
         let mut n_plus_one = n.to_vec();
         n_plus_one[31] += 1;
         for (case, blob) in [
             ("empty", vec![]),
             ("no s", one.clone()),
-            ("truncated s", [one.clone(), raw_mpint(&[1, 1])[..5].to_vec()].concat()),
-            ("trailing data", [one.clone(), one.clone(), vec![0]].concat()),
+            (
+                "truncated s",
+                [one.clone(), raw_mpint(&[1, 1])[..5].to_vec()].concat(),
+            ),
+            (
+                "trailing data",
+                [one.clone(), one.clone(), vec![0]].concat(),
+            ),
             ("r = 0", [raw_mpint(&[]), one.clone()].concat()),
             ("s = 0", [one.clone(), raw_mpint(&[])].concat()),
             ("r = n", [mpint(n), one.clone()].concat()),
@@ -1021,14 +1036,23 @@ mod tests {
             (HashAlg::Sha512, RSA_2048_SHA512),
         ] {
             let algorithm = Algorithm::Rsa { hash: Some(hash) };
-            verify(public, b"sample", &Signature::new(algorithm, expected).unwrap()).unwrap();
+            verify(
+                public,
+                b"sample",
+                &Signature::new(algorithm, expected).unwrap(),
+            )
+            .unwrap();
             // PKCS#1 v1.5 signatures are deterministic.
             let signature = sign(&key, Some(hash), b"sample").unwrap();
             assert_eq!(signature.as_bytes(), expected);
         }
         // A valid `ssh-rsa` (SHA-1) signature is refused...
-        let error = verify(public, b"sample", &Signature::new(SSH_RSA, RSA_2048_SHA1).unwrap())
-            .unwrap_err();
+        let error = verify(
+            public,
+            b"sample",
+            &Signature::new(SSH_RSA, RSA_2048_SHA1).unwrap(),
+        )
+        .unwrap_err();
         assert_eq!(
             ssh_key::Error::from(error),
             ssh_key::Error::AlgorithmUnsupported { algorithm: SSH_RSA }
@@ -1080,7 +1104,12 @@ mod tests {
         let full = signature.as_bytes();
         assert_eq!((full.len(), full[0]), (256, 0));
         // Without it, the signature is padded back, as OpenSSH does.
-        verify(public, message, &Signature::new(RSA_SHA256, &full[1..]).unwrap()).unwrap();
+        verify(
+            public,
+            message,
+            &Signature::new(RSA_SHA256, &full[1..]).unwrap(),
+        )
+        .unwrap();
         for blob in [
             [&[0], full].concat(),
             [full, &[0]].concat(),

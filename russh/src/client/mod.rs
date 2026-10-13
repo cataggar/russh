@@ -2340,10 +2340,16 @@ mod tests {
     #[test]
     fn limit_triggered_rekey_waits_for_authentication() {
         let (mut session, _sender, _replies) = keyboard_interactive_session();
-        allow_rekey(&mut session, crate::Limits::new(0, 0, Duration::from_secs(3600)));
+        allow_rekey(
+            &mut session,
+            crate::Limits::new(0, 0, Duration::from_secs(3600)),
+        );
 
         session.flush().unwrap();
-        assert!(!session.kex.active(), "write limit hit before authentication");
+        assert!(
+            !session.kex.active(),
+            "write limit hit before authentication"
+        );
         assert_eq!(session.rekey_time_remaining(), None);
 
         session.common.encrypted.as_mut().unwrap().state = EncryptedState::Authenticated;

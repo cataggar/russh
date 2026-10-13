@@ -166,8 +166,7 @@ pub(crate) trait KeyAgreement {
     /// Compute the raw shared secret (the X25519 output, or the x-coordinate
     /// for the NIST curves). Fails if `peer_public_key` is malformed or not
     /// a valid point.
-    fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8])
-    -> Result<Zeroizing<Vec<u8>>>;
+    fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
 }
 
 /// Key encapsulation (ML-KEM-768, FIPS 203), with keys and ciphertexts in
@@ -501,7 +500,11 @@ pub(crate) fn cannot_sign_reason(algorithm: &Algorithm) -> String {
 }
 
 /// Verify `signature` over `message` with `key`.
-pub(crate) fn verify(key: &KeyData, message: &[u8], signature: &Signature) -> signature::Result<()> {
+pub(crate) fn verify(
+    key: &KeyData,
+    message: &[u8],
+    signature: &Signature,
+) -> signature::Result<()> {
     <provider::sign::Signatures as Verifier>::verify(key, message, signature)
 }
 
@@ -576,7 +579,7 @@ pub(crate) fn mpint_body(unsigned_be: &[u8]) -> Vec<u8> {
 pub(crate) mod testing {
     use std::collections::HashSet;
 
-    use super::{provider, is_supported_signature_algorithm};
+    use super::{is_supported_signature_algorithm, provider};
     use crate::{cipher, kex, mac};
 
     fn check<N: AsRef<str>>(category: &str, all: &[&N], algorithms: &[&N], default: &[N]) {
@@ -601,7 +604,11 @@ pub(crate) mod testing {
             );
         }
         let unique: HashSet<&str> = default.iter().map(|n| n.as_ref()).collect();
-        assert_eq!(unique.len(), default.len(), "duplicate in {category} DEFAULT_ORDER");
+        assert_eq!(
+            unique.len(),
+            default.len(),
+            "duplicate in {category} DEFAULT_ORDER"
+        );
     }
 
     /// The selected provider's lists are consistent: no duplicates, only
@@ -614,8 +621,10 @@ pub(crate) mod testing {
             &kex,
             provider::kex::DEFAULT_ORDER,
         );
-        let ciphers: Vec<&cipher::Name> =
-            provider::cipher::ALGORITHMS.iter().map(|(n, _)| *n).collect();
+        let ciphers: Vec<&cipher::Name> = provider::cipher::ALGORITHMS
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
         check(
             "cipher",
             cipher::ALL_CIPHERS,

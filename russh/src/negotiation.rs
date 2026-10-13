@@ -23,13 +23,13 @@ use crate::cipher::CIPHERS;
 use crate::crypto::{self, provider};
 use crate::helpers::{AlgorithmExt, NameList};
 use crate::kex::{
-    KexCause, EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT, EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+    EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT, EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER, KexCause,
 };
 use crate::parsing::ensure_end;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::server::Config;
 use crate::sshbuffer::PacketWriter;
-use crate::{cipher, compression, kex, mac, msg, AlgorithmKind, Error};
+use crate::{AlgorithmKind, Error, cipher, compression, kex, mac, msg};
 
 #[cfg(target_arch = "wasm32")]
 /// WASM-only stub
@@ -726,8 +726,8 @@ mod tests {
             ],
             true,
         );
-        let names = Server::read_kex(&buf, &Preferred::DEFAULT, None,
-            None, &KexCause::Initial).unwrap();
+        let names =
+            Server::read_kex(&buf, &Preferred::DEFAULT, None, None, &KexCause::Initial).unwrap();
         assert_eq!(names.kex, kex::MLKEM768X25519_SHA256);
         assert!(names.ignore_guessed, "wrong guess must be ignored");
     }
@@ -736,8 +736,8 @@ mod tests {
     #[test]
     fn correct_guess_is_not_ignored() {
         let buf = build_kexinit(&["mlkem768x25519-sha256", "curve25519-sha256"], true);
-        let names = Server::read_kex(&buf, &Preferred::DEFAULT, None,
-            None, &KexCause::Initial).unwrap();
+        let names =
+            Server::read_kex(&buf, &Preferred::DEFAULT, None, None, &KexCause::Initial).unwrap();
         assert!(!names.ignore_guessed, "correct guess must be honored");
     }
 
@@ -803,8 +803,8 @@ mod tests {
     #[test]
     fn certificate_ignored_when_not_advertised() {
         let buf = build_kexinit_keys(KEX_FIRST, &[CERT, PLAIN], false);
-        let names = Client::read_kex(&buf, &Preferred::DEFAULT, None,
-            None, &KexCause::Initial).unwrap();
+        let names =
+            Client::read_kex(&buf, &Preferred::DEFAULT, None, None, &KexCause::Initial).unwrap();
         assert!(!names.host_key_is_certificate);
         assert_eq!(names.key, test_keys::ALGORITHM);
     }
@@ -998,8 +998,7 @@ mod tests {
     #[test]
     fn rsa_certificate_variants_follow_preferences() {
         let ca = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
-        let rsa_key =
-            PrivateKey::random(&mut rand::rng(), Algorithm::Rsa { hash: None }).unwrap();
+        let rsa_key = PrivateKey::random(&mut rand::rng(), Algorithm::Rsa { hash: None }).unwrap();
         let cert = host_cert(&rsa_key, &ca);
         let keys = vec![rsa_key];
 
@@ -1120,9 +1119,12 @@ mod tests {
             ..Preferred::DEFAULT
         };
         let supported = pref.supported();
-        assert!(supported.kex.iter().all(|k| {
-            KEX_EXTENSION_NAMES.contains(k) || kex::KEXES.contains_key(k)
-        }));
+        assert!(
+            supported
+                .kex
+                .iter()
+                .all(|k| { KEX_EXTENSION_NAMES.contains(k) || kex::KEXES.contains_key(k) })
+        );
         assert!(supported.kex.contains(&kex::NONE));
         assert!(supported.cipher.iter().all(|c| CIPHERS.contains_key(c)));
         assert!(supported.mac.iter().all(|m| mac::MACS.contains_key(m)));

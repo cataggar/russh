@@ -1,8 +1,8 @@
 use std::borrow::Cow;
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::env;
 
 use data_encoding::BASE64_MIME;
 use log::debug;
