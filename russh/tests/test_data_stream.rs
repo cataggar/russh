@@ -1,6 +1,6 @@
 mod common;
 
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common::test_keys;
@@ -8,6 +8,7 @@ use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelMsg, client};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 pub const WINDOW_SIZE: u32 = 8 * 2048;
 
@@ -98,15 +99,11 @@ async fn run_test(test: impl ChannelDataCopy) -> Result<(), anyhow::Error> {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(env_logger::init);
 
-    let addr = addr();
+    let socket = listener().await;
+    let addr = socket.local_addr()?;
     let data = data();
 
-    tokio::spawn(Server::run(addr));
-
-    // Wait until the server is started
-    while TcpStream::connect(addr).is_err() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    tokio::spawn(Server::run(socket));
 
     stream(addr, &data, test).await?;
 
@@ -151,19 +148,17 @@ fn data() -> Vec<u8> {
     data
 }
 
-/// Find a unused local address to bind our server to
-fn addr() -> SocketAddr {
-    TcpListener::bind(("127.0.0.1", 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
+/// Binds the server's listener on a free local port. The server keeps it, so
+/// the port can't be taken by anything else before the server listens on it.
+async fn listener() -> TcpListener {
+    TcpListener::bind(("127.0.0.1", 0)).await.unwrap()
 }
 
 #[derive(Clone)]
 struct Server;
 
 impl Server {
-    async fn run(addr: SocketAddr) {
+    async fn run(socket: TcpListener) {
         let config = Arc::new(server::Config {
             keys: vec![test_keys::key(0)],
             window_size: WINDOW_SIZE,
@@ -171,7 +166,7 @@ impl Server {
         });
         let mut sh = Server {};
 
-        sh.run_on_address(config, addr).await.unwrap();
+        sh.run_on_socket(config, &socket).await.unwrap();
     }
 }
 

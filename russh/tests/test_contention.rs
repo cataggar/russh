@@ -23,13 +23,11 @@ static THREADS: usize = 16;
 async fn test_contention() -> Result<(), anyhow::Error> {
     env_logger::init();
 
-    let ssh_addr = addr().await;
-    let tcp_addr = addr().await;
-    tokio::spawn(Server::run(ssh_addr, tcp_addr));
-
-    while TcpStream::connect(ssh_addr).await.is_err() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    // The server keeps this listener, so its port can't be taken by anything
+    // else before the server listens on it.
+    let socket = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let ssh_addr = socket.local_addr()?;
+    tokio::spawn(Server::run(socket));
 
     let config = Arc::new(client::Config::default());
     let key = Arc::new(test_keys::key(1));
@@ -51,10 +49,14 @@ async fn test_contention() -> Result<(), anyhow::Error> {
     {
         panic!("Authentication failed")
     };
-    session
-        .tcpip_forward("tcpip_forward", 12345)
+    // Port 0: the server binds a free port and replies with its number, so
+    // there is no window in which the port could be taken by something else.
+    let tcp_port = session
+        .tcpip_forward("127.0.0.1", 0)
         .await
         .expect("tcpip_forward failed");
+    assert_ne!(tcp_port, 0, "the server didn't report the port it bound");
+    let tcp_addr = SocketAddr::from(([127, 0, 0, 1], u16::try_from(tcp_port)?));
 
     timeout(Duration::from_secs(30), async move {
         let mut jh_vec = vec![];
@@ -86,19 +88,11 @@ async fn test_contention() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn addr() -> SocketAddr {
-    TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-}
-
 #[derive(Clone)]
-struct Server(SocketAddr);
+struct Server;
 
 impl Server {
-    async fn run(ssh_addr: SocketAddr, tcp_addr: SocketAddr) {
+    async fn run(socket: TcpListener) {
         let config = Arc::new(server::Config {
             keys: vec![test_keys::key(0)],
             preferred: russh::Preferred {
@@ -107,9 +101,9 @@ impl Server {
             },
             ..Default::default()
         });
-        let mut sh = Server(tcp_addr);
+        let mut sh = Server;
 
-        sh.run_on_address(config, ssh_addr).await.unwrap();
+        sh.run_on_socket(config, &socket).await.unwrap();
     }
 }
 
@@ -134,20 +128,28 @@ impl russh::server::Handler for Server {
 
     async fn tcpip_forward(
         &mut self,
-        _address: &str,
-        _port: &mut u32,
+        address: &str,
+        port: &mut u32,
         session: &mut server::Session,
     ) -> Result<bool, Self::Error> {
         // Listen before replying: the client connects as soon as the request
-        // succeeds.
-        let listener = TcpListener::bind(self.0).await?;
+        // succeeds. For port 0, the reply carries the port that was bound.
+        let listener = TcpListener::bind((address, u16::try_from(*port)?)).await?;
+        *port = listener.local_addr()?.port().into();
+        let (address, port) = (address.to_owned(), *port);
         let handle = session.handle();
         tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
+            while let Ok((mut stream, originator)) = listener.accept().await {
                 let handle = handle.clone();
+                let address = address.clone();
                 tokio::spawn(async move {
                     let channel = handle
-                        .channel_open_forwarded_tcpip("tcpip_forward", 12345, "localhost", 23456)
+                        .channel_open_forwarded_tcpip(
+                            address,
+                            port,
+                            originator.ip().to_string(),
+                            originator.port().into(),
+                        )
                         .await
                         .unwrap();
                     copy_bidirectional(&mut stream, &mut channel.into_stream())
