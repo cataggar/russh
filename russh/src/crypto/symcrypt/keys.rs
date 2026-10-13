@@ -364,7 +364,10 @@ mod tests {
             ("ecdsa-p256-encrypted", "OpenSSH (aes256-ctr)"),
             ("ed25519-encrypted", "OpenSSH (chacha20-poly1305@openssh.com)"),
             ("ecdsa-p256-short-encrypted", "OpenSSH (aes256-ctr)"),
-            ("ecdsa-p384-short-encrypted", "OpenSSH (chacha20-poly1305@openssh.com)"),
+            (
+                "ecdsa-p384-short-encrypted",
+                "OpenSSH (chacha20-poly1305@openssh.com)",
+            ),
             ("ecdsa-p256-encrypted.pem", "PEM"),
             ("rsa-2048-encrypted.pem", "PEM"),
             ("ecdsa-p384-aes256.pem", "PEM"),
