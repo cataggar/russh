@@ -106,61 +106,13 @@ async fn client_with_each_host_and_user_key() {
     openssh::check_cases("host and user keys", cases).await;
 }
 
-/// The client authenticates to sshd with ECDSA user certificates. RSA user
-/// certificates are left out: the client names them
-/// `ssh-rsa-cert-v01@openssh.com` whatever the signature, and OpenSSH no
-/// longer accepts that by default.
+/// The client authenticates to sshd with a user certificate of each
+/// algorithm. sshd accepts only the certificate algorithm of the case, so
+/// the client must name an RSA certificate after the hash that signs it,
+/// e.g. `rsa-sha2-256-cert-v01@openssh.com`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_signs_with_certificates() {
-    let Some(openssh) = openssh::available() else {
-        return;
-    };
-    let _ = env_logger::try_init();
-    let mut failures = Vec::new();
-    for key_type in [KeyType::EcdsaP256, KeyType::EcdsaP384] {
-        if let Err(error) = certificate_login(openssh, key_type).await {
-            failures.push(format!(
-                "===== FAILED: {key_type} certificate =====\n{error:#}"
-            ));
-        }
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-}
-
-async fn certificate_login(openssh: &'static OpenSsh, key_type: KeyType) -> anyhow::Result<()> {
-    let keys = KeyDir::new(openssh)?;
-    let (ca, user) = tokio::try_join!(
-        keys.generate("ca", KeyType::EcdsaP256),
-        keys.generate("user", key_type),
-    )?;
-    let algorithm = format!("{}-cert-v01@openssh.com", key_type.openssh_name());
-    let sshd = Sshd::builder()
-        .config(format!(
-            "TrustedUserCAKeys {}",
-            public_path(&ca.path).display()
-        ))
-        .pubkey_accepted_algorithms(&algorithm)
-        .start()
-        .await?;
-    let (_, certificate) = keys
-        .certify("user_cert", &ca, &user, sshd.user(), &[])
-        .await?;
-    let mut client = sshd.connect(Preferred::default()).await?;
-    let authenticating = client.handle_mut().authenticate_openssh_cert(
-        sshd.user(),
-        Arc::new(user.private.clone()),
-        certificate,
-    );
-    match timeout(TIMEOUT, authenticating).await {
-        Ok(Ok(result)) if result.success() => {}
-        result => bail!(
-            "authentication with {algorithm} failed: {result:?} (the connection ended: {:?})\n{}",
-            client.disconnect_reason(),
-            sshd.diagnostics()
-        ),
-    }
-    client.check_echo().await?;
-    client.disconnect().await
+    openssh::check_user_certificates(Case::default().with_round_trip(0), &ALGORITHMS).await;
 }
 
 /// With Ed25519, ECDSA P-521 and `ssh-rsa` (SHA-1) user keys,
