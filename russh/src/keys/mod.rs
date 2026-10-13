@@ -1379,6 +1379,56 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         agent.wait().await.unwrap();
     }
 
+    /// `remove_all_identities` removes every key from OpenSSH's agent.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn openssh_agent_removes_all_identities() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::keys::agent::client::AgentClient;
+
+        let (mut agent, agent_path, _dir) = spawn_agent().await?;
+        let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+        let mut client = AgentClient::connect(stream);
+        let keys = [
+            crate::tests::test_keys::key(0),
+            crate::tests::test_keys::key(1),
+        ];
+        for key in &keys {
+            client.add_identity(key, &[]).await?;
+        }
+        assert_eq!(client.request_identities().await?.len(), keys.len());
+
+        client.remove_all_identities().await?;
+        assert!(client.request_identities().await?.is_empty());
+
+        agent.kill().await?;
+        agent.wait().await?;
+        Ok(())
+    }
+
+    /// OpenSSH's agent answers extension requests, here with
+    /// `SSH_AGENT_FAILURE` for an extension it doesn't know, rather than
+    /// closing the connection.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn openssh_agent_answers_extension_requests() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::keys::agent::client::AgentClient;
+
+        let (mut agent, agent_path, _dir) = spawn_agent().await?;
+        let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+        let mut client = AgentClient::connect(stream);
+
+        client.extension(b"unknown@example.com", b"data").await?;
+        let supported = client
+            .query_extension(b"unknown@example.com", crate::CryptoVec::new())
+            .await?;
+        assert!(!supported);
+        assert!(client.request_identities().await?.is_empty());
+
+        agent.kill().await?;
+        agent.wait().await?;
+        Ok(())
+    }
+
     /// Helper to create a test RSA certificate
     #[cfg(all(unix, feature = "rsa"))]
     fn create_test_rsa_cert(ca_key: &PrivateKey, user_key: &PrivateKey) -> ssh_key::Certificate {

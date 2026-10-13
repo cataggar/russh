@@ -216,7 +216,6 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         id.encode(&mut self.buf)?;
         pin.encode(&mut self.buf)?;
         if !constraints.is_empty() {
-            (constraints.len() as u32).encode(&mut self.buf)?;
             for cons in constraints {
                 match *cons {
                     Constraint::KeyLifetime { seconds } => {
@@ -555,7 +554,8 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         self.buf.clear();
         self.buf.resize(4, 0);
         msg::REMOVE_ALL_IDENTITIES.encode(&mut self.buf)?;
-        1u32.encode(&mut self.buf)?;
+        let len = self.buf.len() - 4;
+        BigEndian::write_u32(&mut self.buf[..], len as u32);
         self.read_success().await?;
         Ok(())
     }
@@ -568,7 +568,7 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         typ.encode(&mut self.buf)?;
         ext.encode(&mut self.buf)?;
         let len = self.buf.len() - 4;
-        (len as u32).encode(&mut self.buf)?;
+        BigEndian::write_u32(&mut self.buf[..], len as u32);
         self.read_response().await?;
         Ok(())
     }
@@ -580,7 +580,7 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         msg::EXTENSION.encode(&mut self.buf)?;
         typ.encode(&mut self.buf)?;
         let len = self.buf.len() - 4;
-        (len as u32).encode(&mut self.buf)?;
+        BigEndian::write_u32(&mut self.buf[..], len as u32);
         self.read_response().await?;
 
         match self.buf.split_first() {
@@ -596,10 +596,12 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
 #[cfg(test)]
 mod tests {
     use byteorder::{BigEndian, ByteOrder};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-    use super::{AgentClient, MAX_AGENT_FRAME_LEN};
-    use crate::keys::Error;
+    use super::{AgentClient, MAX_AGENT_FRAME_LEN, msg};
+    use crate::CryptoVec;
+    use crate::keys::agent::Constraint;
+    use crate::keys::{Error, generate_secret_key};
 
     #[test]
     fn oversized_agent_response_is_rejected_before_allocation() -> std::io::Result<()> {
@@ -628,6 +630,120 @@ mod tests {
             Ok::<(), std::io::Error>(())
         })?;
 
+        Ok(())
+    }
+
+    /// A client of an agent that answers its first request with `reply`, and
+    /// the agent's end of the stream.
+    async fn agent_answering(
+        reply: &[u8],
+    ) -> std::io::Result<(AgentClient<DuplexStream>, DuplexStream)> {
+        let (client, mut agent) = tokio::io::duplex(1 << 16);
+        agent.write_all(reply).await?;
+        Ok((AgentClient::connect(client), agent))
+    }
+
+    /// Everything that `client` wrote to `agent`.
+    async fn written(
+        client: AgentClient<DuplexStream>,
+        mut agent: DuplexStream,
+    ) -> std::io::Result<Vec<u8>> {
+        drop(client);
+        let mut written = Vec::new();
+        agent.read_to_end(&mut written).await?;
+        Ok(written)
+    }
+
+    /// A request is one frame: a `uint32` length, then a message of that
+    /// many bytes, with the contents that draft-ietf-sshm-ssh-agent and
+    /// OpenSSH's PROTOCOL.agent give it.
+    #[tokio::test]
+    async fn requests_are_framed_as_the_agent_protocol_specifies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let success = [0, 0, 0, 1, msg::SUCCESS];
+        let failure = [0, 0, 0, 1, msg::FAILURE];
+
+        // SSH_AGENTC_REMOVE_ALL_IDENTITIES has no contents.
+        let (mut client, agent) = agent_answering(&success).await?;
+        client.remove_all_identities().await?;
+        assert_eq!(
+            written(client, agent).await?,
+            [0, 0, 0, 1, msg::REMOVE_ALL_IDENTITIES]
+        );
+
+        // SSH_AGENTC_EXTENSION: the extension type, then its contents,
+        // which the client sends as a string.
+        let (mut client, agent) = agent_answering(&success).await?;
+        client.extension(b"ext@example.com", b"data").await?;
+        assert_eq!(
+            written(client, agent).await?,
+            [
+                &[0, 0, 0, 28, msg::EXTENSION, 0, 0, 0, 15][..],
+                b"ext@example.com",
+                &[0, 0, 0, 4],
+                b"data",
+            ]
+            .concat()
+        );
+
+        let (mut client, agent) = agent_answering(&failure).await?;
+        let supported = client
+            .query_extension(b"ext@example.com", CryptoVec::new())
+            .await?;
+        assert!(!supported);
+        assert_eq!(
+            written(client, agent).await?,
+            [
+                &[0, 0, 0, 20, msg::EXTENSION, 0, 0, 0, 15][..],
+                b"ext@example.com",
+            ]
+            .concat()
+        );
+
+        // The constraints follow the PIN, without a count.
+        let (mut client, agent) = agent_answering(&success).await?;
+        let constraints = [Constraint::KeyLifetime { seconds: 60 }, Constraint::Confirm];
+        client
+            .add_smartcard_key("pkcs11.so", b"1234", &constraints)
+            .await?;
+        assert_eq!(
+            written(client, agent).await?,
+            [
+                &[0, 0, 0, 28, msg::ADD_SMARTCARD_KEY_CONSTRAINED, 0, 0, 0, 9][..],
+                b"pkcs11.so",
+                &[0, 0, 0, 4],
+                b"1234",
+                &[msg::CONSTRAIN_LIFETIME, 0, 0, 0, 60, msg::CONSTRAIN_CONFIRM],
+            ]
+            .concat()
+        );
+        Ok(())
+    }
+
+    /// `remove_all_identities` removes every key from russh's agent.
+    #[tokio::test]
+    async fn removes_all_identities_from_russhs_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let (client, agent) = tokio::io::duplex(1 << 16);
+        let listener = futures::stream::iter([Ok(agent)]);
+        tokio::spawn(crate::keys::agent::server::serve(listener, ()));
+        let mut client = AgentClient::connect(client);
+
+        // Keys that the backend signs with: Ed25519 (ECDSA with SymCrypt),
+        // and RSA.
+        #[allow(unused_mut)]
+        let mut keys = vec![generate_secret_key()?, generate_secret_key()?];
+        #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
+        keys.push(crate::keys::decode_secret_key(
+            include_str!("../../../tests/data/keys/rsa-2048"),
+            None,
+        )?);
+        for key in &keys {
+            client.add_identity(key, &[]).await?;
+        }
+        assert_eq!(client.request_identities().await?.len(), keys.len());
+
+        client.remove_all_identities().await?;
+        assert!(client.request_identities().await?.is_empty());
         Ok(())
     }
 }

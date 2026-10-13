@@ -1598,8 +1598,6 @@ mod tests {
     /// The keys that the agent removes or replaces are freed at once.
     #[tokio::test]
     async fn keys_removed_from_the_agent_are_freed() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         use crate::keys::agent::AgentIdentity;
         use crate::keys::agent::client::AgentClient;
 
@@ -1626,14 +1624,7 @@ mod tests {
         assert!(imported[1].upgrade().is_none());
         assert!(imported[2].upgrade().is_some());
 
-        // `SSH_AGENTC_REMOVE_ALL_IDENTITIES`, which the agent answers with
-        // `SSH_AGENT_SUCCESS`. (`AgentClient::remove_all_identities` frames
-        // it with a zero length.)
-        let mut stream = client.into_inner();
-        stream.write_all(&[0, 0, 0, 1, 19]).await.unwrap();
-        let mut response = [0; 5];
-        stream.read_exact(&mut response).await.unwrap();
-        assert_eq!(response, [0, 0, 0, 1, 6]);
+        client.remove_all_identities().await.unwrap();
         assert!(imported[2].upgrade().is_none());
     }
 }
