@@ -179,9 +179,7 @@ async fn main() {
     let config = russh::server::Config {
         auth_rejection_time: Duration::from_secs(3),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
-        keys: vec![
-            russh::keys::PrivateKey::random(&mut rand::rng(), ssh_key::Algorithm::Ed25519).unwrap(),
-        ],
+        keys: vec![russh::keys::generate_secret_key().unwrap()],
         ..Default::default()
     };
 

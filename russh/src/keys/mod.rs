@@ -76,6 +76,11 @@ pub mod certificate;
 pub mod key;
 pub use key::PrivateKeyWithHashAlg;
 
+mod backend;
+pub use backend::{
+    generate_secret_key, generate_secret_key_for, supports_signing, supports_verifying,
+};
+
 mod format;
 pub use format::*;
 // Reexports

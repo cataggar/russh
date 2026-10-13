@@ -5,8 +5,8 @@
 //! * The russh **client** against `sshd`, through `common::openssh`. It
 //!   verifies host key signatures, signs publickey authentication with plain
 //!   keys (loaded from OpenSSH, PKCS#8 and PEM files) and with user
-//!   certificates, and fails clearly with the algorithms the backend lacks
-//!   (Ed25519 and `ssh-rsa`).
+//!   certificates, and refuses the algorithms the backend lacks (Ed25519 and
+//!   `ssh-rsa`) before authenticating with them.
 //! * The OpenSSH `ssh` client against an in-process russh **server**. The
 //!   server signs with host keys and host certificates, verifies user key
 //!   signatures, and verifies the CA signature of user certificates. Its
@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail, ensure};
 use common::openssh::{self, Case, KeyAlg, KeyFormat, KeyType, OpenSsh, Query, Refused, Sshd};
+use russh::client::AuthResult;
 use russh::keys::ssh_key::public::KeyData;
 use russh::keys::{Certificate, HashAlg, PrivateKey, PublicKey};
 use russh::{ChannelId, Preferred, server};
@@ -123,7 +124,8 @@ async fn client_signs_with_certificates() {
 }
 
 /// With Ed25519 and `ssh-rsa` (SHA-1) user keys, authentication fails with
-/// an error naming the algorithm.
+/// an error naming the algorithm, before the client sends anything, and the
+/// session goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_refuses_unsupported_keys() {
     let Some(openssh) = openssh::available() else {
@@ -169,7 +171,7 @@ async fn client_refuses_unsupported_host_keys() {
 }
 
 /// Authenticates with `user_key` to sshd, which accepts its algorithm, so
-/// that the client gets to sign.
+/// that only the client can refuse it.
 async fn refused_user_key(user_key: KeyAlg) -> anyhow::Result<()> {
     let sshd = Sshd::builder()
         .user_key(user_key.key)
@@ -179,27 +181,30 @@ async fn refused_user_key(user_key: KeyAlg) -> anyhow::Result<()> {
     let mut client = sshd.connect(Preferred::default()).await?;
     let error = match client.authenticate(user_key.rsa_hash).await {
         Ok(()) => bail!("authentication succeeded\n{}", sshd.diagnostics()),
-        Err(error) => error,
-    };
-    // The handler records the session error, maybe after `authenticate`
-    // returns.
-    let started = Instant::now();
-    let reason = loop {
-        match client.disconnect_reason() {
-            Some(reason) => break reason,
-            None if started.elapsed() < Duration::from_secs(5) => {
-                tokio::time::sleep(Duration::from_millis(20)).await
-            }
-            None => bail!(
-                "authentication failed ({error:#}), but the session did not end with an error\n{}",
-                sshd.diagnostics()
-            ),
-        }
+        Err(error) => format!("{error:#}"),
     };
     let expected = format!("unsupported algorithm: {}", user_key.name());
     ensure!(
-        reason.contains(&expected),
-        "the session ended with {reason:?}, which does not contain {expected:?}\n{}",
+        error.contains(&expected),
+        "{error}\ndoes not contain {expected:?}\n{}",
+        sshd.diagnostics()
+    );
+    // The client refused the key before sending anything, so the session
+    // can go on with other methods.
+    let user = sshd.user().to_owned();
+    match timeout(TIMEOUT, client.handle_mut().authenticate_none(user)).await {
+        Ok(Ok(AuthResult::Failure {
+            remaining_methods, ..
+        })) if !remaining_methods.is_empty() => {}
+        other => bail!(
+            "after the refused key, `none` authentication gave {other:?}\n{}",
+            sshd.diagnostics()
+        ),
+    }
+    ensure!(
+        client.disconnect_reason().is_none() && !client.handle().is_closed(),
+        "the session ended: {:?}\n{}",
+        client.disconnect_reason(),
         sshd.diagnostics()
     );
     Ok(())

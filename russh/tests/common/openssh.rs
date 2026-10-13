@@ -11,8 +11,7 @@
 //! OpenSSH using that algorithm.
 //!
 //! All keys come from `ssh-keygen`, never from russh, so the harness works
-//! under every russh crypto backend, including one without key generation or
-//! without Ed25519.
+//! the same under every russh crypto backend, including one without Ed25519.
 //!
 //! # Usage
 //!

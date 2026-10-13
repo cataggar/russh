@@ -54,7 +54,13 @@
 //!   order, without the `ext-info-*`/`kex-strict-*` pseudo-algorithms that
 //!   negotiation appends.
 //! - `sign`: a `Signatures` type implementing [`Signer`] and [`Verifier`],
-//!   and `DEFAULT_ORDER: &[ssh_key::Algorithm]`.
+//!   and `DEFAULT_ORDER: &[ssh_key::Algorithm]`. `Verifier::is_supported`
+//!   decides what negotiation offers; `Signer::can_sign` and
+//!   `Verifier::can_verify` (the same by default) say exactly what the
+//!   backend signs and verifies. They answer `keys::supports_signing` and
+//!   `keys::supports_verifying`, and the client and server check keys with
+//!   them before using them. The first `DEFAULT_ORDER` entry is the key
+//!   type `keys::generate_secret_key` generates.
 //! - `cipher`: `ALGORITHMS: &[(&cipher::Name, &(dyn Cipher + Send + Sync))]`
 //!   and `DEFAULT_ORDER: &[cipher::Name]`. Entries instantiate the generic
 //!   SSH glue with the provider's primitives, e.g.
@@ -262,11 +268,23 @@ pub(crate) trait Verifier {
     /// Whether this backend can verify (and sign with) `algorithm`. Others
     /// are not offered during negotiation.
     fn is_supported(algorithm: &Algorithm) -> bool;
+    /// Whether this backend can verify `algorithm` signatures: exactly, for
+    /// `keys::supports_verifying`, where [`Verifier::is_supported`] may be
+    /// broader to keep negotiation as it is. Defaults to `is_supported`.
+    fn can_verify(algorithm: &Algorithm) -> bool {
+        Self::is_supported(algorithm)
+    }
     fn verify(key: &KeyData, message: &[u8], signature: &Signature) -> signature::Result<()>;
 }
 
 /// Signing with a private key (server host keys, client auth, agent).
-pub(crate) trait Signer {
+pub(crate) trait Signer: Verifier {
+    /// Whether this backend can sign with `algorithm` (for RSA, with that
+    /// hash): exactly, like [`Verifier::can_verify`]. Defaults to
+    /// [`Verifier::is_supported`].
+    fn can_sign(algorithm: &Algorithm) -> bool {
+        Self::is_supported(algorithm)
+    }
     /// `hash_alg` selects the RSA hash (`None` is SHA-1, i.e. `ssh-rsa`);
     /// it is ignored for other keys.
     fn sign(
@@ -371,6 +389,65 @@ impl rand_core::TryCryptoRng for ProviderRng {}
 /// Whether the backend can verify and sign with `algorithm`.
 pub(crate) fn is_supported_signature_algorithm(algorithm: &Algorithm) -> bool {
     <provider::sign::Signatures as Verifier>::is_supported(algorithm)
+}
+
+/// The name of the selected backend, for messages.
+#[cfg(russh_backend = "aws_lc")]
+pub(crate) const BACKEND: &str = "aws-lc-rs";
+#[cfg(russh_backend = "ring")]
+pub(crate) const BACKEND: &str = "ring";
+#[cfg(russh_backend = "symcrypt")]
+pub(crate) const BACKEND: &str = "symcrypt";
+
+/// Whether the backend can sign with `algorithm` (for RSA, with that hash).
+/// Unlike [`is_supported_signature_algorithm`], this is exact for every
+/// backend: with `aws-lc-rs` and `ring`, RSA needs the `rsa` feature, DSA
+/// the `dsa` feature, and security keys (`sk-*`) only verify.
+pub(crate) fn can_sign(algorithm: &Algorithm) -> bool {
+    <provider::sign::Signatures as Signer>::can_sign(algorithm)
+}
+
+/// Whether the backend can verify `algorithm` signatures; exact, like
+/// [`can_sign`].
+pub(crate) fn can_verify(algorithm: &Algorithm) -> bool {
+    <provider::sign::Signatures as Verifier>::can_verify(algorithm)
+}
+
+/// Whether the backend can sign with a key of type `key_algorithm` (as
+/// [`PrivateKey::algorithm`] gives it) with at least one signature
+/// algorithm: for RSA keys, `rsa-sha2-512`, `rsa-sha2-256` or `ssh-rsa`.
+pub(crate) fn can_sign_with_key_type(key_algorithm: &Algorithm) -> bool {
+    match key_algorithm {
+        Algorithm::Rsa { .. } => [Some(HashAlg::Sha512), Some(HashAlg::Sha256), None]
+            .into_iter()
+            .any(|hash| can_sign(&Algorithm::Rsa { hash })),
+        algorithm => can_sign(algorithm),
+    }
+}
+
+/// Why the backend can't sign with `algorithm`, for messages.
+pub(crate) fn cannot_sign_reason(algorithm: &Algorithm) -> String {
+    // `aws-lc-rs` and `ring` sign with RSA and DSA keys only with the
+    // matching cargo feature.
+    let missing_feature = match algorithm {
+        _ if cfg!(russh_backend = "symcrypt") => None,
+        Algorithm::Rsa { .. } if !cfg!(feature = "rsa") => Some("rsa"),
+        Algorithm::Dsa if !cfg!(feature = "dsa") => Some("dsa"),
+        _ => None,
+    };
+    if let Some(feature) = missing_feature {
+        return format!("russh was built without the `{feature}` feature");
+    }
+    let signs_with: Vec<&str> = provider::sign::DEFAULT_ORDER
+        .iter()
+        .chain([&Algorithm::Dsa])
+        .filter(|algorithm| can_sign(algorithm))
+        .map(Algorithm::as_str)
+        .collect();
+    format!(
+        "the {BACKEND} backend signs only with {}",
+        signs_with.join(", ")
+    )
 }
 
 /// Verify `signature` over `message` with `key`.

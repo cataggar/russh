@@ -15,12 +15,27 @@ impl Verifier for Signatures {
         true
     }
 
+    fn can_verify(algorithm: &Algorithm) -> bool {
+        match algorithm {
+            // `ssh-key` verifies security-key signatures, but can't make
+            // them: the private key is on the token.
+            Algorithm::SkEd25519 | Algorithm::SkEcdsaSha2NistP256 => true,
+            algorithm => Self::can_sign(algorithm),
+        }
+    }
+
     fn verify(key: &KeyData, message: &[u8], signature: &Signature) -> signature::Result<()> {
         signature::Verifier::verify(key, message, signature)
     }
 }
 
 impl Signer for Signatures {
+    fn can_sign(algorithm: &Algorithm) -> bool {
+        matches!(algorithm, Algorithm::Ed25519 | Algorithm::Ecdsa { .. })
+            || (cfg!(feature = "rsa") && matches!(algorithm, Algorithm::Rsa { .. }))
+            || (cfg!(feature = "dsa") && matches!(algorithm, Algorithm::Dsa))
+    }
+
     fn sign(
         key: &PrivateKey,
         hash_alg: Option<HashAlg>,
