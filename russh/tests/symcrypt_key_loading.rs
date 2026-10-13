@@ -54,8 +54,9 @@ async fn rsa_3072() {
 }
 
 /// About 1 in 512 `ssh-keygen` ECDSA P-256 keys has a private scalar
-/// below 2^248, which OpenSSH writes in fewer than 32 bytes and ssh-key
-/// alone rejects. 2048 keys include one with a probability of 98%.
+/// below 2^247, which OpenSSH writes in fewer than 32 bytes and ssh-key
+/// alone rejects; russh pads it. 2048 keys include one with a probability
+/// of 98%.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ecdsa_p256_short_scalars() {
     openssh::check_key_loading(KeyType::EcdsaP256, 2048).await;

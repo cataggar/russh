@@ -131,11 +131,6 @@
 //! * Lines added with [`SshdBuilder::config`] go *before* the generated
 //!   settings, because sshd keeps the first value it reads for most
 //!   keywords. `Match` blocks are not supported.
-//! * russh cannot load 1 in 512 ECDSA P-256 private keys from `ssh-keygen`
-//!   (a bug in the ssh-key crate with scalars below 2^247). The
-//!   harness generates a new P-256 user key when that happens, and logs a
-//!   line. The ignored `ecdsa_p256_key_loading` test in `openssh_interop.rs`
-//!   reproduces the bug.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -591,32 +586,6 @@ fn public_key_path(private_key: &Path) -> PathBuf {
     path.into()
 }
 
-/// Known bug: the ssh-key crate, which parses keys for `russh::keys`,
-/// rejects an ECDSA P-256 private key whose scalar is below 2^247. OpenSSH
-/// writes such a scalar as an mpint of at most 31 bytes, and
-/// `EcdsaPrivateKey::decode` wants at least 32. That is 1 in 512 keys from
-/// `ssh-keygen -t ecdsa -b 256`. So random cases don't fail, the harness
-/// generates a new user key in that case. `check_key_loading` reproduces
-/// the bug.
-fn replace_unloadable_user_key(ssh_keygen: &Path, path: &Path) -> anyhow::Result<()> {
-    // Each new key fails with probability 1/512, so a few new keys are plenty.
-    for _ in 0..4 {
-        let Err(error) = russh::keys::load_secret_key(path, None) else {
-            return Ok(());
-        };
-        log_line(&format!(
-            "generating a new user key because russh cannot load {} ({error}), probably \
-             because of the known ssh-key bug with short ECDSA P-256 scalars",
-            path.display()
-        ));
-        fs::remove_file(path)?;
-        fs::remove_file(public_key_path(path))?;
-        generate_keys(ssh_keygen, &[(KeyType::EcdsaP256, path)])?;
-    }
-    // If the last key can't be loaded either, authentication reports why.
-    Ok(())
-}
-
 /// Generates `count` keys of `key_type` with `ssh-keygen` and checks that
 /// `russh::keys::load_secret_key` loads every one. It takes many keys to hit
 /// rare encodings, such as ECDSA scalars with leading zero bytes. Panics
@@ -808,9 +777,6 @@ impl SshdBuilder {
             .collect();
         keys.push((self.user_key, &user_key_path));
         generate_keys(&openssh.ssh_keygen, &keys)?;
-        if self.user_key == KeyType::EcdsaP256 {
-            replace_unloadable_user_key(&openssh.ssh_keygen, &user_key_path)?;
-        }
 
         let host_keys = host_key_types
             .iter()
