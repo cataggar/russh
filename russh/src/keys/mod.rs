@@ -360,13 +360,14 @@ QR+u0AypRPmzHnOPAAAAEXJvb3RAMTQwOTExNTQ5NDBkAQ==
     }
 
     // Key from RFC 8410 Section 10.3. This is a key using PrivateKeyInfo structure.
-    // The symcrypt backend cannot compute the missing Ed25519 public key.
-    #[cfg(not(russh_backend = "symcrypt"))]
+    // The symcrypt backend computes the missing Ed25519 public key only with
+    // `ed25519-aws-lc`.
+    #[cfg(any(not(russh_backend = "symcrypt"), russh_ed25519_aws_lc))]
     const RFC8410_ED25519_PRIVATE_ONLY_KEY: &str = "-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC
 -----END PRIVATE KEY-----";
 
-    #[cfg(not(russh_backend = "symcrypt"))]
+    #[cfg(any(not(russh_backend = "symcrypt"), russh_ed25519_aws_lc))]
     #[test]
     fn test_decode_rfc8410_ed25519_private_only_key() {
         env_logger::try_init().unwrap_or(());
@@ -866,10 +867,14 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
             ssh_key::public::KeyData::Ed25519 { .. } => {
                 let sig = &b[b.len() - 64..];
                 let sig = ssh_key::Signature::new(key.algorithm(), sig)?;
-                // The SymCrypt backend has no Ed25519 to verify it with.
+                // ssh-key verifies Ed25519 only with its `ed25519` feature,
+                // which the SymCrypt backend doesn't enable; with
+                // `ed25519-aws-lc`, the backend verifies it.
                 if cfg!(not(russh_backend = "symcrypt")) {
                     use signature::Verifier;
                     assert!(Verifier::verify(public, a, &sig).is_ok());
+                } else if cfg!(russh_ed25519_aws_lc) {
+                    assert!(crate::crypto::verify(public.key_data(), a, &sig).is_ok());
                 }
             }
             ssh_key::public::KeyData::Ecdsa { .. } => {}

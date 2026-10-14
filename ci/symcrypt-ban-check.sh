@@ -3,7 +3,7 @@
 # rand/getrandom: everything cryptographic, randomness included, must come from
 # SymCrypt.
 #
-# Usage: ci/symcrypt-ban-check.sh [cargo tree options]
+# Usage: ci/symcrypt-ban-check.sh [--allow-aws-lc-ed25519] [cargo tree options]
 #
 # The options select what to check and default to
 #   -p russh --no-default-features --features symcrypt
@@ -11,11 +11,27 @@
 # that depends on russh with only the symcrypt feature, or `--target <triple>`
 # to check another target than the host. The script adds `-e normal,build`:
 # dev-dependencies are not part of what gets shipped.
+#
+# `--allow-aws-lc-ed25519` checks a build with russh's `ed25519-aws-lc`
+# feature, which takes Ed25519 from aws-lc-rs because SymCrypt has no EdDSA:
+# `aws-lc-rs` is then allowed as a dependency of russh only, `aws-lc-sys` as a
+# dependency of `aws-lc-rs` only, and, for its build script on Windows hosts,
+# `getrandom` as a dependency of `jobserver` only. Its default options add that
+# feature.
 set -euo pipefail
 
 cargo="${CARGO:-cargo}"
+allow_aws_lc_ed25519=0
+if [ "${1:-}" = --allow-aws-lc-ed25519 ]; then
+    allow_aws_lc_ed25519=1
+    shift
+fi
 if [ "$#" -eq 0 ]; then
-    set -- -p russh --no-default-features --features symcrypt
+    if [ "$allow_aws_lc_ed25519" -eq 1 ]; then
+        set -- -p russh --no-default-features --features symcrypt,ed25519-aws-lc
+    else
+        set -- -p russh --no-default-features --features symcrypt
+    fi
 fi
 
 # Crypto implementations and RNGs. Trait and format crates (cipher, digest,
@@ -42,9 +58,16 @@ banned=(
 
 # A banned crate is allowed if all its direct dependents are listed here.
 #   sha2: ssh-key computes key fingerprints with it, whatever its features.
+#   aws-lc-rs, aws-lc-sys: Ed25519, with --allow-aws-lc-ed25519 only.
+#   getrandom: with --allow-aws-lc-ed25519 only, from `jobserver`, which `cc`
+#     uses to build aws-lc-sys. jobserver depends on it on Windows hosts only,
+#     to name its semaphore; it runs in the build script, not in russh.
 allowed_dependents() {
     case "$1" in
     sha2) echo "ssh-key ssh-encoding" ;;
+    aws-lc-rs) [ "$allow_aws_lc_ed25519" -eq 0 ] || echo "russh" ;;
+    aws-lc-sys) [ "$allow_aws_lc_ed25519" -eq 0 ] || echo "aws-lc-rs" ;;
+    getrandom) [ "$allow_aws_lc_ed25519" -eq 0 ] || echo "jobserver" ;;
     *) ;;
     esac
 }

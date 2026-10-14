@@ -14,7 +14,7 @@
 //! |---|---|
 //! | `hash`: SHA-1, SHA-2 | `hash.rs` |
 //! | `kex`: X25519, ECDH P-256/P-384/P-521, ML-KEM-768 hybrid (no finite-field DH) | `kex.rs` |
-//! | `sign`: ECDSA P-256/P-384/P-521, RSA SHA-2 host key, certificate and user signatures (no Ed25519, SHA-1 RSA) | `sign.rs` |
+//! | `sign`: ECDSA P-256/P-384/P-521, RSA SHA-2 host key, certificate and user signatures (no SHA-1 RSA; no Ed25519 without `ed25519-aws-lc`) | `sign.rs` |
 //! | `cipher`: AES-GCM, ChaCha20-Poly1305, AES-CTR | `cipher.rs` |
 //! | `mac`: HMAC-SHA2; HMAC-SHA1 only for hashed `known_hosts` host names | `mac.rs` |
 //! | `rng`: all of russh's randomness | `rng.rs` |
@@ -25,6 +25,12 @@
 //! with the private `_rustcrypto` feature, which `symcrypt` does not enable.
 //! `ci/symcrypt-ban-check.sh` checks that no other crypto implementation is
 //! in the dependency graph (`sha2` is, for ssh-key's key fingerprints only).
+//!
+//! The one exception is opt-in: SymCrypt has no EdDSA, so the
+//! `ed25519-aws-lc` feature takes Ed25519 signatures and keys from
+//! `aws-lc-rs`, in `ed25519.rs` and nowhere else (the `russh_ed25519_aws_lc`
+//! cfg). The ban check allows `aws-lc-rs` only with
+//! `--allow-aws-lc-ed25519`.
 //!
 //! A primitive SymCrypt lacks is `crate::crypto::Unsupported` (`Dh` in
 //! `kex`: `symcrypt-sys` has no bindings for SymCrypt's finite-field DH),
@@ -58,6 +64,8 @@
 //!    CI (`.github/workflows/symcrypt.yml`) runs them.
 
 pub(crate) mod cipher;
+#[cfg(russh_ed25519_aws_lc)]
+pub(crate) mod ed25519;
 pub(crate) mod hash;
 pub(crate) mod kex;
 pub(crate) mod keys;
@@ -179,7 +187,18 @@ mod tests {
                     kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
                 ]
             );
-            assert_eq!(pref.key[..], [P256, P384, P521, RSA_SHA512, RSA_SHA256]);
+            assert_eq!(
+                pref.key[..],
+                [
+                    P256,
+                    P384,
+                    P521,
+                    RSA_SHA512,
+                    RSA_SHA256,
+                    #[cfg(russh_ed25519_aws_lc)]
+                    Algorithm::Ed25519,
+                ]
+            );
             assert!(pref.host_key_certificates.is_empty());
             assert_eq!(
                 pref.cipher[..],
@@ -255,14 +274,17 @@ mod tests {
                 kex::NONE,
             ]
         );
-        assert_eq!(
-            supported.key[..],
-            [P256, P384, P521, RSA_SHA512, RSA_SHA256]
-        );
-        assert_eq!(
-            supported.host_key_certificates[..],
-            [P256, P384, P521, RSA_SHA512, RSA_SHA256]
-        );
+        let signers = [
+            #[cfg(russh_ed25519_aws_lc)]
+            Algorithm::Ed25519,
+            P256,
+            P384,
+            P521,
+            RSA_SHA512,
+            RSA_SHA256,
+        ];
+        assert_eq!(supported.key[..], signers);
+        assert_eq!(supported.host_key_certificates[..], signers);
         assert_eq!(
             supported.cipher[..],
             [

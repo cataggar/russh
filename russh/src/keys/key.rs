@@ -130,8 +130,9 @@ pub const ALL_KEY_TYPES: &[Algorithm] = &[
     Algorithm::SkEd25519,
 ];
 
-/// The key types the SymCrypt backend signs and verifies with (no Ed25519,
-/// DSA, SHA-1 RSA or security keys); RSA does not need the `rsa` feature.
+/// The key types the SymCrypt backend signs and verifies with (no DSA, SHA-1
+/// RSA or security keys, and Ed25519 only with the `ed25519-aws-lc`
+/// feature); RSA does not need the `rsa` feature.
 #[cfg(russh_backend = "symcrypt")]
 pub const ALL_KEY_TYPES: &[Algorithm] = &[
     Algorithm::Ecdsa {
@@ -143,6 +144,8 @@ pub const ALL_KEY_TYPES: &[Algorithm] = &[
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP521,
     },
+    #[cfg(russh_ed25519_aws_lc)]
+    Algorithm::Ed25519,
     Algorithm::Rsa {
         hash: Some(ssh_key::HashAlg::Sha256),
     },

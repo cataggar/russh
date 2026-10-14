@@ -467,8 +467,9 @@ impl<H: Handler> Handle<H> {
     /// Fails with [`ssh_key::Error::AlgorithmUnsupported`], before sending
     /// anything, if the crypto backend can't sign with the key's algorithm
     /// (see [`supports_signing`](crate::keys::supports_signing)), such as
-    /// Ed25519 or `ssh-rsa` (SHA-1) with `symcrypt`. The session stays
-    /// usable, for example to try another key.
+    /// `ssh-rsa` (SHA-1) with `symcrypt`, or Ed25519 with `symcrypt` without
+    /// the `ed25519-aws-lc` feature. The session stays usable, for example
+    /// to try another key.
     pub async fn authenticate_publickey<U: Into<String>>(
         &mut self,
         user: U,

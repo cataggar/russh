@@ -7,10 +7,11 @@ use super::*;
 /// Keys for the tests that need a host, user or CA key of any kind.
 ///
 /// With the RustCrypto-based backends they are random Ed25519 keys. The
-/// SymCrypt backend can't use Ed25519, so it gets the committed ECDSA P-256
-/// keys of `tests/data/test-keys` (made with
-/// `ssh-keygen -t ecdsa -b 256 -N "" -C russh-test`). `tests/common/test_keys.rs`
-/// is the same for the integration tests.
+/// SymCrypt backend can't use Ed25519 without its `ed25519-aws-lc` feature,
+/// so it gets the committed ECDSA P-256 keys of `tests/data/test-keys` (made
+/// with `ssh-keygen -t ecdsa -b 256 -N "" -C russh-test`), with or without
+/// that feature. `tests/common/test_keys.rs` is the same for the integration
+/// tests.
 pub(crate) mod test_keys {
     use ssh_key::certificate::Builder;
     use ssh_key::{Algorithm, Certificate, PrivateKey};
@@ -1868,8 +1869,8 @@ mod unusable_keys {
     use crate::cert::PublicKeyOrCertificate;
 
     /// Keys the backend can't sign with: a security key with every backend,
-    /// an Ed25519 key with `symcrypt`, and an RSA key without the `rsa`
-    /// feature.
+    /// an Ed25519 key with `symcrypt` without `ed25519-aws-lc`, and an RSA
+    /// key without the `rsa` feature.
     fn unusable_keys() -> Vec<PrivateKey> {
         let security_key = SkEd25519::new(
             public::SkEd25519::new(Ed25519PublicKey([1; 32]), "ssh:"),

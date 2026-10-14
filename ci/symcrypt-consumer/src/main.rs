@@ -1,5 +1,6 @@
 //! A downstream crate that depends on russh with only the `symcrypt` feature
-//! (`default-features = false, features = ["symcrypt"]`). It is its own workspace, so no other
+//! (`default-features = false, features = ["symcrypt"]`), and, with its own `ed25519-aws-lc`
+//! feature, russh's `ed25519-aws-lc` too. It is its own workspace, so no other
 //! package can add russh features through feature unification. `.github/workflows/symcrypt.yml`
 //! builds it, checks its dependency graph with `ci/symcrypt-ban-check.sh` and runs it.
 //!

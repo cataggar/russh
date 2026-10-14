@@ -1,19 +1,21 @@
 //! Signatures for the SymCrypt backend: ECDSA with `symcrypt::ecc` and RSA
-//! PKCS#1 v1.5 with `symcrypt::rsa`, over digests from `symcrypt::hash`.
+//! PKCS#1 v1.5 with `symcrypt::rsa`, over digests from `symcrypt::hash`;
+//! with the `ed25519-aws-lc` feature, also Ed25519 from aws-lc-rs.
 //!
-//! | Algorithm | Digest | SymCrypt |
+//! | Algorithm | Digest | Implementation |
 //! |---|---|---|
 //! | `ecdsa-sha2-nistp256` | SHA-256 | `EcKey::ecdsa_sign`/`ecdsa_verify` on `NistP256` |
 //! | `ecdsa-sha2-nistp384` | SHA-384 | `EcKey::ecdsa_sign`/`ecdsa_verify` on `NistP384` |
 //! | `ecdsa-sha2-nistp521` | SHA-512 | `EcKey::ecdsa_sign`/`ecdsa_verify` on `NistP521` |
 //! | `rsa-sha2-256` | SHA-256 | `RsaKey::pkcs1_sign`/`pkcs1_verify` |
 //! | `rsa-sha2-512` | SHA-512 | `RsaKey::pkcs1_sign`/`pkcs1_verify` |
+//! | `ssh-ed25519` (feature `ed25519-aws-lc`) | SHA-512, within EdDSA | aws-lc-rs `Ed25519KeyPair::sign`/`ED25519.verify_sig` |
 //!
 //! These make and check every signature in russh: server host keys,
 //! public-key user authentication (client and server side) and the CA
 //! signature of OpenSSH certificates (`*-cert-v01@openssh.com`, through
 //! `crate::crypto::verify_certificate`). `Signatures::is_supported` limits
-//! negotiation to these five algorithms and their certificate forms.
+//! negotiation to these algorithms and their certificate forms.
 //!
 //! Keys are imported into SymCrypt from their raw components only (RSA `n`,
 //! `e`, `p` and `q`; the ECDSA point and private scalar): `ssh-key`'s
@@ -30,10 +32,14 @@
 //! imports the key for every signature.
 //!
 //! Not implemented, so neither offered nor accepted: `ssh-ed25519` (SymCrypt
-//! has no EdDSA), `ssh-rsa` (SHA-1), `ssh-dss` and the security-key (`sk-*`)
-//! algorithms. Signing with such a key fails with
+//! has no EdDSA) unless the `ed25519-aws-lc` feature takes it from aws-lc-rs
+//! (see `super::ed25519`), `ssh-rsa` (SHA-1), `ssh-dss` and the security-key
+//! (`sk-*`) algorithms. Signing with such a key fails with
 //! `ssh_key::Error::AlgorithmUnsupported`, after logging an error that names
 //! this backend.
+//!
+//! With `ed25519-aws-lc`, `ssh-ed25519` is the last of [`DEFAULT_ORDER`], so
+//! a peer that implements any of the algorithms above negotiates it instead.
 
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -71,7 +77,7 @@ impl Verifier for Signatures {
             } | Algorithm::Rsa {
                 hash: Some(HashAlg::Sha256 | HashAlg::Sha512)
             }
-        )
+        ) || (cfg!(russh_ed25519_aws_lc) && *algorithm == Algorithm::Ed25519)
     }
 
     fn verify(key: &KeyData, message: &[u8], signature: &Signature) -> signature::Result<()> {
@@ -86,6 +92,10 @@ impl Verifier for Signatures {
             }
             (KeyData::Rsa(key), Algorithm::Rsa { hash: Some(hash) }) => {
                 verify_rsa(key, hash, message, signature.as_bytes())
+            }
+            #[cfg(russh_ed25519_aws_lc)]
+            (KeyData::Ed25519(key), Algorithm::Ed25519) => {
+                super::ed25519::verify(key, message, signature.as_bytes())
             }
             _ => Err(signature::Error::new()),
         }
@@ -145,16 +155,21 @@ fn signature_algorithm(key: &PrivateKey, hash_alg: Option<HashAlg>) -> ssh_key::
             }
             _ => Err(unsupported(Algorithm::Rsa { hash: hash_alg })),
         },
+        #[cfg(russh_ed25519_aws_lc)]
+        KeypairData::Ed25519(_) => Ok(Algorithm::Ed25519),
         KeypairData::Encrypted(_) => Err(ssh_key::Error::Encrypted),
         _ => Err(unsupported(key.algorithm())),
     }
 }
 
-/// A private key imported into SymCrypt, which checked that its private and
-/// public parts match. Dropping it frees and wipes it.
+/// A private key imported into SymCrypt (or, for Ed25519, into aws-lc-rs),
+/// which checked that its private and public parts match. Dropping it frees
+/// and wipes it.
 enum SigningKey {
     Ecdsa(Curve, EcKey),
     Rsa(RsaKey),
+    #[cfg(russh_ed25519_aws_lc)]
+    Ed25519(super::ed25519::SigningKey),
 }
 
 impl SigningKey {
@@ -164,6 +179,10 @@ impl SigningKey {
         match key.key_data() {
             KeypairData::Ecdsa(keypair) => import_ecdsa(Curve::new(keypair.curve()), keypair),
             KeypairData::Rsa(keypair) => import_rsa(keypair),
+            #[cfg(russh_ed25519_aws_lc)]
+            KeypairData::Ed25519(keypair) => {
+                super::ed25519::SigningKey::import(keypair).map(SigningKey::Ed25519)
+            }
             KeypairData::Encrypted(_) => Err(ssh_key::Error::Encrypted),
             _ => Err(unsupported(key.algorithm())),
         }
@@ -181,13 +200,16 @@ impl SigningKey {
             (SigningKey::Rsa(key), Algorithm::Rsa { hash: Some(hash) }) => {
                 sign_rsa(key, *hash, message)?
             }
+            #[cfg(russh_ed25519_aws_lc)]
+            (SigningKey::Ed25519(key), Algorithm::Ed25519) => key.sign(message),
             _ => return Err(ssh_key::Error::Crypto),
         };
         Signature::new(algorithm, blob)
     }
 }
 
-/// Default host-key and public-key algorithm preference.
+/// Default host-key and public-key algorithm preference. With
+/// `ed25519-aws-lc`, Ed25519 (from aws-lc-rs) comes last.
 pub(crate) const DEFAULT_ORDER: &[Algorithm] = &[
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP256,
@@ -204,6 +226,8 @@ pub(crate) const DEFAULT_ORDER: &[Algorithm] = &[
     Algorithm::Rsa {
         hash: Some(HashAlg::Sha256),
     },
+    #[cfg(russh_ed25519_aws_lc)]
+    Algorithm::Ed25519,
 ];
 
 /// Logs that this backend cannot sign with `algorithm`, and returns the
@@ -756,12 +780,24 @@ mod tests {
 
     #[test]
     fn implements_exactly_ecdsa_and_rsa_sha2() {
-        assert_eq!(DEFAULT_ORDER, [P256, P384, P521, RSA_SHA512, RSA_SHA256]);
+        assert_eq!(
+            DEFAULT_ORDER,
+            [
+                P256,
+                P384,
+                P521,
+                RSA_SHA512,
+                RSA_SHA256,
+                #[cfg(russh_ed25519_aws_lc)]
+                Algorithm::Ed25519,
+            ]
+        );
         assert_eq!(crate::Preferred::DEFAULT.key.as_ref(), DEFAULT_ORDER);
         for algorithm in DEFAULT_ORDER {
             assert!(is_supported_signature_algorithm(algorithm), "{algorithm}");
         }
         for algorithm in [
+            #[cfg(not(russh_ed25519_aws_lc))]
             Algorithm::Ed25519,
             SSH_RSA,
             Algorithm::Dsa,
@@ -1200,9 +1236,12 @@ mod tests {
         );
     }
 
+    // With `ed25519-aws-lc`, `ssh-rsa` is the only unsupported key here.
+    #[allow(clippy::single_element_loop)]
     #[test]
     fn unsupported_keys_cannot_sign() {
         for (key, hash_alg, algorithm) in [
+            #[cfg(not(russh_ed25519_aws_lc))]
             (key(fixture!("ed25519.key")), None, Algorithm::Ed25519),
             (rsa_2048(), None, SSH_RSA),
         ] {
@@ -1213,8 +1252,59 @@ mod tests {
         }
     }
 
+    /// With `ed25519-aws-lc`, Ed25519 keys sign and verify, both directly
+    /// and as held keys, which are imported once.
+    #[cfg(russh_ed25519_aws_lc)]
+    #[test]
+    fn ed25519_sign_verify_round_trip() {
+        let key = key(fixture!("ed25519.key"));
+        let public_key = key.public_key().key_data().clone();
+        let signature = sign(&key, None, MESSAGE).unwrap();
+        assert_eq!(signature.algorithm(), Algorithm::Ed25519);
+        assert_eq!(signature.as_bytes().len(), 64);
+        verify(&public_key, MESSAGE, &signature).unwrap();
+        assert!(verify(&public_key, b"tampered", &signature).is_err());
+        // Ed25519 is deterministic (RFC 8032), so `sign_held` must agree.
+        let holder = Arc::new(key);
+        let imports = count_imports(|| {
+            for _ in 0..3 {
+                let held = sign_held(&holder, 0, None, MESSAGE).unwrap();
+                assert_eq!(held, signature);
+            }
+        });
+        assert_eq!(imports, 1);
+        // An ECDSA key does not verify an Ed25519 signature.
+        assert!(verify(ecdsa_p256().public_key().key_data(), MESSAGE, &signature).is_err());
+    }
+
+    /// With `ed25519-aws-lc`, a key whose public half is not the one of its
+    /// seed does not sign.
+    #[cfg(russh_ed25519_aws_lc)]
+    #[test]
+    fn inconsistent_ed25519_keys_cannot_sign() {
+        use ssh_key::private::Ed25519Keypair;
+        use ssh_key::public::Ed25519PublicKey;
+
+        let KeypairData::Ed25519(keypair) = key(fixture!("ed25519.key")).key_data().clone() else {
+            panic!("not an Ed25519 key");
+        };
+        let mut public = keypair.public.0;
+        public[0] ^= 1;
+        let mixed = Ed25519Keypair {
+            public: Ed25519PublicKey(public),
+            private: keypair.private,
+        };
+        let mixed = PrivateKey::new(KeypairData::Ed25519(mixed), "").unwrap();
+        assert_eq!(
+            sign(&mixed, None, MESSAGE).unwrap_err(),
+            ssh_key::Error::Crypto
+        );
+    }
+
     /// User certificates for `ecdsa_p256.key`, signed by CA keys of each
     /// type with `ssh-keygen -s`.
+    // With `ed25519-aws-lc`, `ssh-rsa` is the only unsupported CA here.
+    #[allow(clippy::single_element_loop)]
     #[test]
     fn certificate_ca_signatures() {
         let subject = ecdsa_p256();
@@ -1224,6 +1314,8 @@ mod tests {
             (fixture!("cert_ca_ecdsa_p521.pub"), P521),
             (fixture!("cert_ca_rsa_sha2_256.pub"), RSA_SHA256),
             (fixture!("cert_ca_rsa_sha2_512.pub"), RSA_SHA512),
+            #[cfg(russh_ed25519_aws_lc)]
+            (fixture!("cert_ca_ed25519.pub"), Algorithm::Ed25519),
         ] {
             let certificate = Certificate::from_openssh(openssh.trim()).unwrap();
             assert_eq!(certificate.public_key(), subject.public_key().key_data());
@@ -1244,6 +1336,7 @@ mod tests {
             }
         }
         for (openssh, ca_algorithm) in [
+            #[cfg(not(russh_ed25519_aws_lc))]
             (fixture!("cert_ca_ed25519.pub"), Algorithm::Ed25519),
             (fixture!("cert_ca_ssh_rsa.pub"), SSH_RSA),
         ] {

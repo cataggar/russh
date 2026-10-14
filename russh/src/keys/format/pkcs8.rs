@@ -153,12 +153,12 @@ fn sec1_into_keypair(
 }
 
 /// An RFC 8410 Ed25519 key. Unlike the other backends, the symcrypt backend
-/// needs the public key (PKCS#8 v2): computing it from the seed needs
-/// Ed25519 arithmetic, which SymCrypt does not expose.
+/// needs the public key (PKCS#8 v2) unless the `ed25519-aws-lc` feature
+/// computes it: that needs Ed25519 arithmetic, which SymCrypt does not
+/// expose.
 #[cfg(russh_backend = "symcrypt")]
 fn ed25519_into_keypair(pki: &PrivateKeyInfoRef<'_>) -> Result<Ed25519Keypair, Error> {
     use pkcs8::KeyError;
-    use zeroize::Zeroizing;
 
     if pki.algorithm.parameters.is_some() {
         return Err(pkcs8::Error::ParametersMalformed.into());
@@ -169,20 +169,43 @@ fn ed25519_into_keypair(pki: &PrivateKeyInfoRef<'_>) -> Result<Ed25519Keypair, E
         _ => Err(KeyError::Invalid),
     }
     .map_err(pkcs8::Error::from)?;
-    let Some(public) = pki.public_key.and_then(|x| x.as_bytes()) else {
+    let public: Option<&[u8; 32]> = pki
+        .public_key
+        .and_then(|x| x.as_bytes())
+        .map(TryInto::try_into)
+        .transpose()
+        .map_err(|_| pkcs8::Error::from(KeyError::Invalid))?;
+    ed25519_keypair(seed, public)
+}
+
+/// The key pair of `seed`, whose public key aws-lc-rs computes; it must be
+/// `public`, if the key has one.
+#[cfg(all(russh_backend = "symcrypt", russh_ed25519_aws_lc))]
+fn ed25519_keypair(seed: &[u8; 32], public: Option<&[u8; 32]>) -> Result<Ed25519Keypair, Error> {
+    let keypair = crate::crypto::symcrypt::ed25519::keypair(seed)?;
+    match public {
+        Some(public) if *public != keypair.public.0 => Err(Error::KeyIsCorrupt),
+        _ => Ok(keypair),
+    }
+}
+
+/// The key pair of `seed` and `public`, which the key must have; it is
+/// checked only while ssh-key's `ed25519` feature is enabled.
+#[cfg(all(russh_backend = "symcrypt", not(russh_ed25519_aws_lc)))]
+fn ed25519_keypair(seed: &[u8; 32], public: Option<&[u8; 32]>) -> Result<Ed25519Keypair, Error> {
+    use zeroize::Zeroizing;
+
+    let Some(public) = public else {
         return Err(super::unsupported(
             "Ed25519 PKCS#8 private key without its public key: the symcrypt crypto \
-             backend cannot compute it (convert the key with `ssh-keygen -p`, or to PKCS#8 v2)",
+             backend cannot compute it (convert the key with `ssh-keygen -p`, or to PKCS#8 v2, \
+             or enable russh's `ed25519-aws-lc` feature)",
         ));
     };
-    let public: &[u8; 32] = public
-        .try_into()
-        .map_err(|_| pkcs8::Error::from(KeyError::Invalid))?;
     let mut bytes = Zeroizing::new([0; Ed25519Keypair::BYTE_SIZE]);
     let (private_bytes, public_bytes) = bytes.split_at_mut(seed.len());
     private_bytes.copy_from_slice(seed);
     public_bytes.copy_from_slice(public);
-    // Checks the public key while ssh-key's `ed25519` feature is enabled.
     Ed25519Keypair::from_bytes(&bytes).map_err(|_| Error::KeyIsCorrupt)
 }
 

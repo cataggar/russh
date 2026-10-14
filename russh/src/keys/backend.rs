@@ -16,7 +16,7 @@ use super::Error;
 /// | Backend | Signs with |
 /// |---|---|
 /// | `aws-lc-rs`, `ring` | `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`; with the `rsa` feature, `rsa-sha2-512`, `rsa-sha2-256` and `ssh-rsa`; with the `dsa` feature, `ssh-dss` |
-/// | `symcrypt` | `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `rsa-sha2-512`, `rsa-sha2-256` |
+/// | `symcrypt` | `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `rsa-sha2-512`, `rsa-sha2-256`; with the `ed25519-aws-lc` feature, `ssh-ed25519` (from aws-lc-rs) |
 ///
 /// No backend signs with security keys (`sk-*`): their private key stays on
 /// the token.
@@ -66,7 +66,8 @@ pub fn supports_verifying(algorithm: &Algorithm) -> bool {
 ///
 /// Use it where any key type will do, such as a test server's host key.
 /// `ssh_key::PrivateKey::random` works only with `aws-lc-rs` and `ring`, and
-/// `symcrypt` can't sign with Ed25519 keys. The key has an empty comment.
+/// `symcrypt` can't sign with Ed25519 keys unless the `ed25519-aws-lc`
+/// feature is enabled. The key has an empty comment.
 ///
 /// # Example
 ///
@@ -95,13 +96,15 @@ pub fn generate_secret_key() -> Result<PrivateKey, Error> {
 /// For RSA, the hash of `algorithm` doesn't matter: the key is 4096 bits,
 /// and can sign with every RSA algorithm the backend supports. With
 /// `aws-lc-rs` and `ring`, keys come from `ssh_key::PrivateKey::random`;
-/// with `symcrypt`, SymCrypt generates them. The key has an empty comment.
+/// with `symcrypt`, SymCrypt generates them (for Ed25519, with the
+/// `ed25519-aws-lc` feature, SymCrypt makes the seed and aws-lc-rs computes
+/// the public key). The key has an empty comment.
 ///
 /// # Errors
 ///
 /// [`Error::SshKey`] with [`ssh_key::Error::AlgorithmUnsupported`] if the
 /// backend can't sign with keys of this type, for example Ed25519 with
-/// `symcrypt`.
+/// `symcrypt` without `ed25519-aws-lc`.
 ///
 /// # Example
 ///
@@ -235,7 +238,8 @@ mod tests {
             algorithms.push(Algorithm::Rsa {
                 hash: Some(HashAlg::Sha512),
             });
-        } else {
+        }
+        if cfg!(any(not(russh_backend = "symcrypt"), russh_ed25519_aws_lc)) {
             algorithms.push(Algorithm::Ed25519);
         }
         for algorithm in algorithms {
