@@ -30,6 +30,12 @@ serde = ["ssh-key/serde"]
 # It does not enable `_rustcrypto`: `ci/symcrypt-ban-check.sh` checks that
 # this backend alone pulls in no other crypto implementation.
 symcrypt = ["dep:symcrypt", "dep:symcrypt-sys", "dep:pkcs1", "pkcs1/alloc"]
+# With the `symcrypt` backend: `ssh-ed25519` signatures and Ed25519 keys from
+# `aws-lc-rs`, since SymCrypt has no EdDSA; everything else stays in SymCrypt.
+# `ci/symcrypt-ban-check.sh --allow-aws-lc-ed25519` checks that it adds only
+# `aws-lc-rs`. The other backends already implement Ed25519, so it changes
+# nothing with them.
+ed25519-aws-lc = ["dep:aws-lc-rs"]
 # Private, enabled by the `aws-lc-rs` and `ring` backends: the pure-Rust
 # crypto they use for every category but their AEADs (src/crypto/rustcrypto),
 # `rand`, and the RustCrypto-based features of `pkcs8` and `ssh-key` (key

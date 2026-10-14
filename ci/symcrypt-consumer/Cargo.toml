@@ -13,3 +13,7 @@ description = "CI check: a downstream crate that depends on russh with only the 
 [dependencies]
 russh = { path = "../../russh", default-features = false, features = ["symcrypt"] }
 tokio = { version = "1.17.0", features = ["macros", "rt"] }
+
+[features]
+# Ed25519 from aws-lc-rs, as a downstream user who needs Ed25519 keys enables it.
+ed25519-aws-lc = ["russh/ed25519-aws-lc"]

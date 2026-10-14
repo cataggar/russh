@@ -2,9 +2,10 @@
 //! integration-test counterpart of `test_keys` in `src/tests.rs`.
 //!
 //! With the RustCrypto-based backends they are random Ed25519 (and RSA)
-//! keys. The SymCrypt backend can't use Ed25519, so it gets the committed
-//! ECDSA P-256 and RSA keys of `tests/data/test-keys` (made with
-//! `ssh-keygen -N "" -C russh-test`).
+//! keys. The SymCrypt backend can't use Ed25519 without its `ed25519-aws-lc`
+//! feature, so it gets the committed ECDSA P-256 and RSA keys of
+//! `tests/data/test-keys` (made with `ssh-keygen -N "" -C russh-test`), with
+//! or without that feature.
 
 use russh::keys::certificate::Builder;
 use russh::keys::ssh_key::{Algorithm, Certificate, PrivateKey};

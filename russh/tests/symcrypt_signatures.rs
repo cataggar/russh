@@ -1,12 +1,14 @@
 //! OpenSSH interop of the SymCrypt backend's signatures: ECDSA P-256, P-384
-//! and P-521, and RSA with `rsa-sha2-256` and `rsa-sha2-512`, for host keys,
-//! user keys and certificates. Both directions are covered:
+//! and P-521, and RSA with `rsa-sha2-256` and `rsa-sha2-512` (and, with the
+//! `ed25519-aws-lc` feature, Ed25519 from aws-lc-rs), for host keys, user
+//! keys and certificates. Both directions are covered:
 //!
 //! * The russh **client** against `sshd`, through `common::openssh`. It
 //!   verifies host key signatures, signs publickey authentication with plain
 //!   keys (loaded from OpenSSH, PKCS#8 and PEM files) and with user
-//!   certificates, and refuses the algorithms the backend lacks (Ed25519 and
-//!   `ssh-rsa`) before authenticating with them.
+//!   certificates, and refuses the algorithms the backend lacks (Ed25519
+//!   without `ed25519-aws-lc`, and `ssh-rsa`) before authenticating with
+//!   them.
 //! * The OpenSSH `ssh` client against an in-process russh **server**. The
 //!   server signs with host keys and host certificates, verifies user key
 //!   signatures, and verifies the CA signature of user certificates. Its
@@ -46,7 +48,7 @@ use tokio::time::timeout;
 
 /// The signature algorithms the backend implements, with 2048- and 3072-bit
 /// RSA keys.
-const ALGORITHMS: [KeyAlg; 7] = [
+const ALGORITHMS: &[KeyAlg] = &[
     KeyAlg::ECDSA_P256,
     KeyAlg::ECDSA_P384,
     KeyAlg::ECDSA_P521,
@@ -54,10 +56,26 @@ const ALGORITHMS: [KeyAlg; 7] = [
     KeyAlg::rsa(KeyType::Rsa2048, Some(HashAlg::Sha512)),
     KeyAlg::RSA_SHA2_256,
     KeyAlg::RSA_SHA2_512,
+    #[cfg(russh_ed25519_aws_lc)]
+    KeyAlg::ED25519,
 ];
 
 /// Key types OpenSSH has and the backend lacks.
-const UNSUPPORTED: [KeyType; 1] = [KeyType::Ed25519];
+const UNSUPPORTED: &[KeyType] = &[
+    #[cfg(not(russh_ed25519_aws_lc))]
+    KeyType::Ed25519,
+];
+
+/// The key types of [`ALGORITHMS`] that the server tests generate.
+const KEY_TYPES: &[KeyType] = &[
+    KeyType::EcdsaP256,
+    KeyType::EcdsaP384,
+    KeyType::EcdsaP521,
+    KeyType::Rsa2048,
+    KeyType::Rsa3072,
+    #[cfg(russh_ed25519_aws_lc)]
+    KeyType::Ed25519,
+];
 
 /// Time limit for each `ssh` run and each russh client step.
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -72,13 +90,13 @@ const USER: &str = "russh";
 /// The client verifies sshd's host key signature with each algorithm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_verifies_host_keys() {
-    openssh::check_host_keys(Case::default().with_round_trip(0), &ALGORITHMS).await;
+    openssh::check_host_keys(Case::default().with_round_trip(0), ALGORITHMS).await;
 }
 
 /// The client signs publickey authentication to sshd with each algorithm.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_signs_user_keys() {
-    openssh::check_user_keys(Case::default().with_round_trip(0), &ALGORITHMS).await;
+    openssh::check_user_keys(Case::default().with_round_trip(0), ALGORITHMS).await;
 }
 
 /// Each ECDSA or RSA host key with each ECDSA or RSA user key. The 20 cases
@@ -120,19 +138,19 @@ async fn client_with_each_host_and_user_key() {
 /// e.g. `rsa-sha2-256-cert-v01@openssh.com`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_signs_with_certificates() {
-    openssh::check_user_certificates(Case::default().with_round_trip(0), &ALGORITHMS).await;
+    openssh::check_user_certificates(Case::default().with_round_trip(0), ALGORITHMS).await;
 }
 
-/// With Ed25519 and `ssh-rsa` (SHA-1) user keys, authentication fails with
-/// an error naming the algorithm, before the client sends anything, and the
-/// session goes on.
+/// With Ed25519 (without `ed25519-aws-lc`) and `ssh-rsa` (SHA-1) user keys,
+/// authentication fails with an error naming the algorithm, before the
+/// client sends anything, and the session goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_refuses_unsupported_keys() {
     let Some(openssh) = openssh::available() else {
         return;
     };
     let _ = env_logger::try_init();
-    let mut user_keys: Vec<KeyAlg> = supported_by(openssh, &UNSUPPORTED)
+    let mut user_keys: Vec<KeyAlg> = supported_by(openssh, UNSUPPORTED)
         .into_iter()
         .map(KeyAlg::new)
         .collect();
@@ -157,15 +175,20 @@ async fn client_refuses_unsupported_keys() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// sshd with only a host key algorithm the backend lacks (Ed25519, or
-/// `ssh-rsa` with SHA-1) has none in common with the client.
+/// sshd with only a host key algorithm the backend lacks (Ed25519 without
+/// `ed25519-aws-lc`, or `ssh-rsa` with SHA-1) has none in common with the
+/// client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_refuses_unsupported_host_keys() {
+    let host_keys = [
+        #[cfg(not(russh_ed25519_aws_lc))]
+        KeyAlg::ED25519,
+        KeyAlg::rsa(KeyType::Rsa3072, None),
+    ];
     openssh::check_refused(
         "unsupported host keys",
         Refused::Key,
-        [KeyAlg::ED25519, KeyAlg::rsa(KeyType::Rsa3072, None)]
-            .map(|host_key| Case::default().with_host_key(host_key)),
+        host_keys.map(|host_key| Case::default().with_host_key(host_key)),
     )
     .await;
 }
@@ -220,15 +243,8 @@ async fn server_signs_host_keys() {
     let Some(setup) = Setup::new() else {
         return;
     };
-    let host_types = [
-        KeyType::EcdsaP256,
-        KeyType::EcdsaP384,
-        KeyType::EcdsaP521,
-        KeyType::Rsa2048,
-        KeyType::Rsa3072,
-    ];
     let (hosts, user) = tokio::try_join!(
-        setup.keys.generate_all("host", &host_types),
+        setup.keys.generate_all("host", KEY_TYPES),
         setup.keys.generate("user", KeyType::EcdsaP256),
     )
     .expect("generating keys");
@@ -307,14 +323,8 @@ async fn server_verifies_user_keys() {
     let Some(setup) = Setup::new() else {
         return;
     };
-    let unsupported = supported_by(setup.openssh, &UNSUPPORTED);
-    let mut user_types = vec![
-        KeyType::EcdsaP256,
-        KeyType::EcdsaP384,
-        KeyType::EcdsaP521,
-        KeyType::Rsa2048,
-        KeyType::Rsa3072,
-    ];
+    let unsupported = supported_by(setup.openssh, UNSUPPORTED);
+    let mut user_types = KEY_TYPES.to_vec();
     user_types.extend(&unsupported);
     let (host, users) = tokio::try_join!(
         setup.keys.generate("host", KeyType::EcdsaP256),
@@ -350,7 +360,7 @@ async fn server_verifies_certificate_cas() {
     let Some(setup) = Setup::new() else {
         return;
     };
-    let unsupported = supported_by(setup.openssh, &UNSUPPORTED);
+    let unsupported = supported_by(setup.openssh, UNSUPPORTED);
     // The CA and its signature algorithm, the `ssh-keygen -s` options that
     // select it, and whether the server accepts it.
     let mut cases: Vec<(KeyAlg, &[&str], Expect)> = vec![
@@ -372,6 +382,8 @@ async fn server_verifies_certificate_cas() {
             &["-t", "ssh-rsa"][..],
             Expect::Denied,
         ),
+        #[cfg(russh_ed25519_aws_lc)]
+        (KeyAlg::ED25519, &[][..], Expect::Success),
     ];
     cases.extend(
         unsupported
@@ -383,6 +395,8 @@ async fn server_verifies_certificate_cas() {
         KeyType::EcdsaP384,
         KeyType::EcdsaP521,
         KeyType::Rsa3072,
+        #[cfg(russh_ed25519_aws_lc)]
+        KeyType::Ed25519,
     ];
     ca_types.extend(&unsupported);
     let (host, user, cas) = tokio::try_join!(

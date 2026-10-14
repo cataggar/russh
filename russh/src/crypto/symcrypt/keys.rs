@@ -22,7 +22,8 @@
 //! 1. Loaded, but whether it can sign depends on the backend's signatures.
 //! 2. PKCS#8 v2 (RFC 8410 `OneAsymmetricKey`). A v1 key has only the seed,
 //!    and computing the public key needs Ed25519 arithmetic, which SymCrypt
-//!    does not expose.
+//!    does not expose; with the `ed25519-aws-lc` feature, aws-lc-rs computes
+//!    it, so v1 keys load too.
 //!
 //! Not supported, with an error that names the symcrypt backend:
 //! - Encrypted keys, with or without a password: OpenSSH keys with a cipher
@@ -45,7 +46,8 @@
 //! - RSA keys from PKCS#1 and PKCS#8 are checked by SymCrypt (`n = p·q`, `e`
 //!   invertible), and `iqmp` is computed. Their `d` is kept as stored.
 //! - The public key of an Ed25519 PKCS#8 v2 key is checked against the seed
-//!   only while ssh-key's `ed25519` feature is enabled.
+//!   with `ed25519-aws-lc` (by aws-lc-rs), or else only while ssh-key's
+//!   `ed25519` feature is enabled.
 //!
 //! As with the other backends, OpenSSH keys are checked by ssh-key only
 //! (checkints, padding, matching public key), and a SEC1 or PKCS#8 EC key's
@@ -53,8 +55,10 @@
 //! one, if any.
 //!
 //! [`generate`] makes new ECDSA and RSA keys with SymCrypt for
-//! [`generate_secret_key`](crate::keys::generate_secret_key): `ssh-key`'s
-//! `PrivateKey::random` needs the RustCrypto algorithm crates.
+//! [`generate_secret_key`](crate::keys::generate_secret_key), and, with
+//! `ed25519-aws-lc`, Ed25519 keys whose seed SymCrypt makes and whose public
+//! key aws-lc-rs computes: `ssh-key`'s `PrivateKey::random` needs the
+//! RustCrypto algorithm crates.
 
 use ssh_key::private::{EcdsaKeypair, KeypairData, RsaKeypair, RsaPrivateKey};
 use ssh_key::public::RsaPublicKey;
@@ -71,7 +75,8 @@ const RSA_GENERATED_BITS: u32 = 4096;
 
 /// Generates a key pair with SymCrypt, with an empty comment: ECDSA on any
 /// curve, or a 4096-bit RSA key with `e = 65537` (the hash of `algorithm`
-/// doesn't matter).
+/// doesn't matter); with `ed25519-aws-lc`, also Ed25519 (see
+/// `super::ed25519::generate`).
 ///
 /// Fails with `ssh_key::Error::AlgorithmUnsupported` for other algorithms,
 /// and with `ssh_key::Error::Crypto` if SymCrypt fails.
@@ -108,6 +113,8 @@ pub(crate) fn generate(algorithm: &Algorithm) -> Result<PrivateKey, Error> {
                 [p, q, private_exp, d_p, d_q, crt_coefficient].map(Zeroizing::new);
             KeypairData::Rsa(rsa_keypair(&modulus, &pub_exp, &d, &p, &q)?)
         }
+        #[cfg(russh_ed25519_aws_lc)]
+        Algorithm::Ed25519 => KeypairData::Ed25519(super::ed25519::generate()?),
         _ => {
             return Err(ssh_key::Error::AlgorithmUnsupported {
                 algorithm: algorithm.clone(),
@@ -570,11 +577,15 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_keys() {
-        let message = error(decode_secret_key(&fixture("ed25519-v1.pk8.pem"), None)).to_string();
-        assert!(
-            message.contains("Ed25519") && message.contains("symcrypt"),
-            "{message}"
-        );
+        #[cfg(not(russh_ed25519_aws_lc))]
+        {
+            let message =
+                error(decode_secret_key(&fixture("ed25519-v1.pk8.pem"), None)).to_string();
+            assert!(
+                message.contains("Ed25519") && message.contains("symcrypt"),
+                "{message}"
+            );
+        }
         let ppk = "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\n";
         let message = error(decode_secret_key(ppk, None)).to_string();
         assert!(
@@ -590,6 +601,36 @@ mod tests {
 
     fn sec1_der(key: &sec1::EcPrivateKey<'_>) -> Vec<u8> {
         key.to_der().unwrap()
+    }
+
+    /// With `ed25519-aws-lc`, aws-lc-rs computes the public key of an Ed25519
+    /// PKCS#8 v1 key, and checks the one of a v2 key.
+    #[cfg(russh_ed25519_aws_lc)]
+    #[test]
+    fn ed25519_pkcs8_public_keys_are_computed_and_checked() {
+        let key = load("ed25519-v1.pk8.pem");
+        assert!(key.key_data() == load("ed25519").key_data());
+        assert_eq!(key.public_key().key_data(), public("ed25519").key_data());
+
+        let mut v2 = pem_der(&fixture("ed25519-v2.pk8.pem"));
+        // The public key is the last 32 bytes of the encoding.
+        let last = v2.len() - 1;
+        v2[last] ^= 1;
+        let error = error(decode_pkcs8(&v2, None));
+        assert!(matches!(error, Error::KeyIsCorrupt), "{error}");
+    }
+
+    /// With `ed25519-aws-lc`, generated Ed25519 keys are new, and sign.
+    #[cfg(russh_ed25519_aws_lc)]
+    #[test]
+    fn generates_ed25519_keys() {
+        let algorithm = ssh_key::Algorithm::Ed25519;
+        let first = super::generate(&algorithm).unwrap();
+        let second = super::generate(&algorithm).unwrap();
+        assert_eq!(first.algorithm(), algorithm);
+        assert!(first.key_data() != second.key_data());
+        let signature = crate::crypto::sign(&first, None, b"message").unwrap();
+        crate::crypto::verify(first.public_key().key_data(), b"message", &signature).unwrap();
     }
 
     #[test]

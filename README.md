@@ -62,6 +62,14 @@ This backend is for deployments that must do their cryptography in SymCrypt and 
 
 Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to this backend, only RustCrypto crates.
 
+**Ed25519 from aws-lc-rs (`ed25519-aws-lc`).** SymCrypt has no EdDSA ([microsoft/SymCrypt#43](https://github.com/microsoft/SymCrypt/issues/43); its maintainers don't plan to add it), so with `symcrypt` alone russh can't use Ed25519 keys. If you must use them, for example to reach hosts whose only key is Ed25519, add the opt-in `ed25519-aws-lc` feature:
+
+```toml
+russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "ed25519-aws-lc", "flate2"] }
+```
+
+With it, [aws-lc-rs](https://github.com/aws/aws-lc-rs) signs with Ed25519 keys, verifies `ssh-ed25519` signatures (host keys, user keys and certificate CAs), and computes Ed25519 public keys, to generate keys and to load PKCS#8 v1 keys. SymCrypt still does everything else, including the randomness of new Ed25519 keys. `ssh-ed25519` is the last host key and user key algorithm in `Preferred::default()`, so a peer that supports any other algorithm of this backend uses that one. It adds `aws-lc-rs` and `aws-lc-sys` to the dependency graph, and no RustCrypto crates: CI checks this with `ci/symcrypt-ban-check.sh --allow-aws-lc-ed25519`. [#62](https://github.com/cataggar/russh/issues/62) tracks moving Ed25519 to SymCrypt if it ever implements EdDSA.
+
 **Requirements.** The `symcrypt` crate links the native SymCrypt library dynamically, so the library must be present both when you build and when you run your program. It needs SymCrypt 103.8.0 or newer, and supports Windows, Ubuntu and Azure Linux 3, on x86-64 and ARM64. Russh's CI tests this backend on Ubuntu 24.04 (x86-64 and ARM64) and Windows (x86-64). The `symcrypt` crate's [install guide](https://github.com/microsoft/rust-symcrypt/blob/7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb/rust-symcrypt/INSTALL.md) has the details.
 
 - **Linux:** install the `symcrypt` package from [packages.microsoft.com](https://learn.microsoft.com/en-us/linux/packages); it is normally preinstalled on Azure Linux 3. The package puts the library in the standard paths, so no environment variables are needed. Otherwise, extract a Linux archive from the [SymCrypt releases](https://github.com/microsoft/SymCrypt/releases), set `SYMCRYPT_LIB_PATH` to its `lib` directory when building, and let the loader find `libsymcrypt.so` at run time (`LD_LIBRARY_PATH`, `ldconfig` or an rpath).
@@ -69,7 +77,7 @@ Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to th
 
 **Algorithms.** [Supported algorithms](#supported-algorithms) has the full lists. Unlike the other backends, `symcrypt` doesn't offer:
 
-- `ssh-ed25519`: SymCrypt has no EdDSA.
+- `ssh-ed25519`: SymCrypt has no EdDSA. The `ed25519-aws-lc` feature adds it, from aws-lc-rs (see above).
 - Finite-field Diffie-Hellman (`diffie-hellman-group*` and `diffie-hellman-group-exchange-*`): the `symcrypt` crate has no API for it.
 - Legacy algorithms, which this backend doesn't implement: SHA-1 signatures and MACs (`ssh-rsa`, `hmac-sha1`, `hmac-sha1-etm@openssh.com`), the CBC modes, `3des-cbc` and `ssh-dss`.
 - Security key signatures (`sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`): not implemented in this backend.
@@ -79,11 +87,11 @@ Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to th
 - encrypted keys, with or without a password: decrypting them needs password-based key derivation (such as bcrypt-pbkdf, PBKDF2 or scrypt), which the `symcrypt` crate doesn't provide;
 - PuTTY (PPK) keys;
 - multi-prime RSA keys;
-- Ed25519 PKCS#8 v1 keys, which hold only the seed.
+- Ed25519 PKCS#8 v1 keys, which hold only the seed, unless the `ed25519-aws-lc` feature is enabled.
 
-Other Ed25519 keys load, but this backend can't sign with them, so russh refuses them before using them. `client::Handle::authenticate_publickey` and `authenticate_openssh_cert` fail with `ssh_key::Error::AlgorithmUnsupported` before sending anything, and the session stays usable. A server that can't sign with any of its host keys fails to start with `Error::InvalidConfig`, which `server::Server::run_on_socket` wraps in an `std::io::Error`. `keys::supports_signing` and `keys::supports_verifying` tell what the backend in your build can do. A password given with an unencrypted key is ignored, and `keys::pkcs8::encode_pkcs8_encrypted` always fails.
+Other Ed25519 keys load, but without `ed25519-aws-lc` this backend can't sign with them, so russh refuses them before using them. `client::Handle::authenticate_publickey` and `authenticate_openssh_cert` fail with `ssh_key::Error::AlgorithmUnsupported` before sending anything, and the session stays usable. A server that can't sign with any of its host keys fails to start with `Error::InvalidConfig`, which `server::Server::run_on_socket` wraps in an `std::io::Error`. `keys::supports_signing` and `keys::supports_verifying` tell what the backend in your build can do. A password given with an unencrypted key is ignored, and `keys::pkcs8::encode_pkcs8_encrypted` always fails.
 
-To create a key, use `keys::generate_secret_key`, which makes an ECDSA P-256 key with this backend (and an Ed25519 key with the others), or `keys::generate_secret_key_for` for another type; with this backend, SymCrypt generates them. With `symcrypt` as the only backend, russh doesn't enable ssh-key's RustCrypto features: `PrivateKey::random` (from `ssh-key`) fails with `ssh_key::Error::AlgorithmUnknown`, and `PrivateKey::encrypt` and `decrypt` don't exist, unless another crate in your build enables those features.
+To create a key, use `keys::generate_secret_key`, which makes an ECDSA P-256 key with this backend (and an Ed25519 key with the others), or `keys::generate_secret_key_for` for another type; with this backend, SymCrypt generates them (and, for Ed25519 with `ed25519-aws-lc`, aws-lc-rs computes the public key). With `symcrypt` as the only backend, russh doesn't enable ssh-key's RustCrypto features: `PrivateKey::random` (from `ssh-key`) fails with `ssh_key::Error::AlgorithmUnknown`, and `PrivateKey::encrypt` and `decrypt` don't exist, unless another crate in your build enables those features.
 
 **Releases.** The backend depends on `symcrypt` 0.6, for ML-KEM, and on `symcrypt-sys` 0.5. Neither version is on crates.io yet, so russh pins both to a commit of [microsoft/rust-symcrypt](https://github.com/microsoft/rust-symcrypt). crates.io doesn't accept git dependencies, even optional ones, so russh can't be published there with the `symcrypt` feature until these versions are. Until then, use russh as a git dependency, as shown above.
 
@@ -145,7 +153,7 @@ MACs are only used with the AES-CTR ciphers. `symcrypt` prefers `hmac-sha2-256-e
 
 | Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
 |---|---|---|
-| `ssh-ed25519` | default | — |
+| `ssh-ed25519` | default | default (last) with `ed25519-aws-lc`, from aws-lc-rs; otherwise — |
 | `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521` | default | default |
 | `rsa-sha2-256`, `rsa-sha2-512` | default | default |
 | `ssh-rsa` (SHA-1) | default | — |

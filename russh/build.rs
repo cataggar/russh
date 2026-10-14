@@ -9,6 +9,9 @@ fn main() {
     println!(
         "cargo::rustc-check-cfg=cfg(russh_backend, values(\"aws_lc\", \"ring\", \"symcrypt\"))"
     );
+    // Set when the symcrypt backend takes Ed25519 from aws-lc-rs (feature
+    // `ed25519-aws-lc`).
+    println!("cargo::rustc-check-cfg=cfg(russh_ed25519_aws_lc)");
 
     let enabled = |feature: &str| std::env::var_os(format!("CARGO_FEATURE_{feature}")).is_some();
     let backend = if enabled("AWS_LC_RS") {
@@ -23,5 +26,8 @@ fn main() {
     };
     if let Some(backend) = backend {
         println!("cargo::rustc-cfg=russh_backend=\"{backend}\"");
+    }
+    if backend == Some("symcrypt") && enabled("ED25519_AWS_LC") {
+        println!("cargo::rustc-cfg=russh_ed25519_aws_lc");
     }
 }
