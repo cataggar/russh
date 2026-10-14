@@ -200,6 +200,9 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
 
     /// Add a smart card to the agent, with a (possibly empty) set of
     /// constraints to apply when signing.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses, for example
+    /// because it can't load the keys of the token.
     pub async fn add_smartcard_key(
         &mut self,
         id: &str,
@@ -236,11 +239,14 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         }
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
-        self.read_response().await?;
+        self.read_success().await?;
         Ok(())
     }
 
     /// Lock the agent, making it refuse to sign until unlocked.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses, for example
+    /// because it is locked already.
     pub async fn lock(&mut self, passphrase: &[u8]) -> Result<(), Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
@@ -248,11 +254,14 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         passphrase.encode(&mut self.buf)?;
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
-        self.read_response().await?;
+        self.read_success().await?;
         Ok(())
     }
 
     /// Unlock the agent, allowing it to sign again.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses, for example
+    /// because the passphrase is wrong or the agent isn't locked.
     pub async fn unlock(&mut self, passphrase: &[u8]) -> Result<(), Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
@@ -261,11 +270,13 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         let len = self.buf.len() - 4;
         #[allow(clippy::indexing_slicing)] // static length
         BigEndian::write_u32(&mut self.buf[..], len as u32);
-        self.read_response().await?;
+        self.read_success().await?;
         Ok(())
     }
 
     /// Ask the agent for a list of identities, including certificates.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses.
     pub async fn request_identities(&mut self) -> Result<Vec<AgentIdentity>, Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
@@ -305,6 +316,10 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
                 };
                 identities.push(identity);
             }
+        } else if self.buf.first() == Some(&msg::FAILURE) {
+            return Err(Error::AgentFailure);
+        } else {
+            return Err(Error::AgentProtocolError);
         }
 
         Ok(identities)
@@ -477,6 +492,8 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
     }
 
     /// Ask the agent to sign the supplied piece of data.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses to sign.
     pub fn sign_request_base64(
         mut self,
         public: &ssh_key::PublicKey,
@@ -495,17 +512,20 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
                 return (self, Err(e));
             }
 
-            #[allow(clippy::indexing_slicing)] // length is checked
-            if !self.buf.is_empty() && self.buf[0] == msg::SIGN_RESPONSE {
-                let base64 = data_encoding::BASE64_NOPAD.encode(&self.buf[1..]);
-                (self, Ok(base64))
-            } else {
-                (self, Ok(String::new()))
-            }
+            let result = match self.buf.split_first() {
+                Some((&msg::SIGN_RESPONSE, signature)) => {
+                    Ok(data_encoding::BASE64_NOPAD.encode(signature))
+                }
+                Some((&msg::FAILURE, _)) => Err(Error::AgentFailure),
+                _ => Err(Error::AgentProtocolError),
+            };
+            (self, result)
         }
     }
 
     /// Ask the agent to sign the supplied piece of data, and return a `Signature`.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses to sign.
     pub async fn sign_request_signature(
         &mut self,
         public: &ssh_key::PublicKey,
@@ -523,11 +543,15 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
                 let sig = Signature::decode(&mut resp)?;
                 Ok(sig)
             }
+            Some((&msg::FAILURE, _)) => Err(Error::AgentFailure),
             _ => Err(Error::AgentProtocolError),
         }
     }
 
     /// Ask the agent to remove a key from its memory.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses, for example
+    /// because it doesn't hold the key.
     pub async fn remove_identity(&mut self, public: &ssh_key::PublicKey) -> Result<(), Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
@@ -535,11 +559,14 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         public.key_data().encoded()?.encode(&mut self.buf)?;
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
-        self.read_response().await?;
+        self.read_success().await?;
         Ok(())
     }
 
     /// Ask the agent to remove a smartcard from its memory.
+    ///
+    /// Fails with [`Error::AgentFailure`] if the agent refuses, for example
+    /// because it holds no keys of that token.
     pub async fn remove_smartcard_key(&mut self, id: &str, pin: &[u8]) -> Result<(), Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
@@ -548,7 +575,7 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         pin.encode(&mut self.buf)?;
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
-        self.read_response().await?;
+        self.read_success().await?;
         Ok(())
     }
 
@@ -563,17 +590,35 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         Ok(())
     }
 
-    /// Send a custom message to the agent.
+    /// Send an `SSH_AGENTC_EXTENSION` request to the agent.
+    ///
+    /// `typ` is the extension name. `ext` is the extension contents, already
+    /// encoded in the format that extension defines; it is sent as is, not
+    /// wrapped in a string. For example, OpenSSH's
+    /// `session-bind@openssh.com` takes the host key, session identifier
+    /// and signature as SSH strings followed by a boolean `is_forwarding`
+    /// byte.
+    ///
+    /// Returns `Ok(())` if the agent answers `SSH_AGENT_SUCCESS` or
+    /// `SSH_AGENT_EXTENSION_RESPONSE`. The contents of either reply are
+    /// discarded. Fails with [`Error::AgentFailure`] if the agent answers
+    /// `SSH_AGENT_FAILURE`, which usually means it doesn't support the
+    /// extension, or `SSH_AGENT_EXTENSION_FAILURE`. Any other reply fails
+    /// with [`Error::AgentProtocolError`].
     pub async fn extension(&mut self, typ: &[u8], ext: &[u8]) -> Result<(), Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
         msg::EXTENSION.encode(&mut self.buf)?;
         typ.encode(&mut self.buf)?;
-        ext.encode(&mut self.buf)?;
+        self.buf.extend_from_slice(ext);
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
         self.read_response().await?;
-        Ok(())
+        match self.buf.first() {
+            Some(&msg::SUCCESS) | Some(&msg::EXTENSION_RESPONSE) => Ok(()),
+            Some(&msg::FAILURE) | Some(&msg::EXTENSION_FAILURE) => Err(Error::AgentFailure),
+            _ => Err(Error::AgentProtocolError),
+        }
     }
 
     /// Ask the agent what extensions about supported extensions.
@@ -674,16 +719,15 @@ mod tests {
             [0, 0, 0, 1, msg::REMOVE_ALL_IDENTITIES]
         );
 
-        // SSH_AGENTC_EXTENSION: the extension type, then its contents,
-        // which the client sends as a string.
+        // SSH_AGENTC_EXTENSION: the extension type, then its contents as
+        // they are.
         let (mut client, agent) = agent_answering(&success).await?;
         client.extension(b"ext@example.com", b"data").await?;
         assert_eq!(
             written(client, agent).await?,
             [
-                &[0, 0, 0, 28, msg::EXTENSION, 0, 0, 0, 15][..],
+                &[0, 0, 0, 24, msg::EXTENSION, 0, 0, 0, 15][..],
                 b"ext@example.com",
-                &[0, 0, 0, 4],
                 b"data",
             ]
             .concat()
@@ -723,13 +767,160 @@ mod tests {
         Ok(())
     }
 
-    /// `remove_all_identities` removes every key from russh's agent.
+    /// A frame holding `message`.
+    fn frame(message: &[u8]) -> Vec<u8> {
+        [&(message.len() as u32).to_be_bytes()[..], message].concat()
+    }
+
+    /// `Ok`, or the error that a request failed with.
+    fn outcome<T>(result: &Result<T, Error>) -> String {
+        match result {
+            Ok(_) => "Ok".into(),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
+    /// The requests that the agent answers with `SSH_AGENT_SUCCESS` fail
+    /// with `AgentFailure` if it answers `SSH_AGENT_FAILURE` instead.
     #[tokio::test]
-    async fn removes_all_identities_from_russhs_agent() -> Result<(), Box<dyn std::error::Error>> {
+    async fn requests_fail_when_the_agent_refuses() -> Result<(), Box<dyn std::error::Error>> {
+        let key = generate_secret_key()?;
+        for (reply, expected) in [(msg::SUCCESS, "Ok"), (msg::FAILURE, "AgentFailure")] {
+            let (mut client, _agent) = agent_answering(&frame(&[reply]).repeat(6)).await?;
+            let outcomes = [
+                ("lock", outcome(&client.lock(b"passphrase").await)),
+                ("unlock", outcome(&client.unlock(b"passphrase").await)),
+                (
+                    "remove_identity",
+                    outcome(&client.remove_identity(key.public_key()).await),
+                ),
+                (
+                    "add_smartcard_key",
+                    outcome(&client.add_smartcard_key("pkcs11.so", b"1234", &[]).await),
+                ),
+                (
+                    "remove_smartcard_key",
+                    outcome(&client.remove_smartcard_key("pkcs11.so", b"1234").await),
+                ),
+                (
+                    "extension",
+                    outcome(&client.extension(b"ext@example.com", b"").await),
+                ),
+            ];
+            for (method, outcome) in outcomes {
+                assert_eq!(outcome, expected, "{method}, answered {reply}");
+            }
+        }
+        Ok(())
+    }
+
+    /// `extension` succeeds if the agent answers `SSH_AGENT_SUCCESS`, with or
+    /// without contents, or `SSH_AGENT_EXTENSION_RESPONSE`. It fails with
+    /// `AgentFailure` on `SSH_AGENT_FAILURE` and
+    /// `SSH_AGENT_EXTENSION_FAILURE`, and with `AgentProtocolError` on
+    /// anything else.
+    #[tokio::test]
+    async fn extension_fails_unless_the_agent_answers_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let extension_response = [
+            &[msg::EXTENSION_RESPONSE, 0, 0, 0, 15][..],
+            b"ext@example.com",
+            b"reply",
+        ]
+        .concat();
+        let replies: [(&[u8], &str); 7] = [
+            (&[msg::SUCCESS], "Ok"),
+            (
+                &[msg::SUCCESS, 0, 0, 0, 5, b'r', b'e', b'p', b'l', b'y'],
+                "Ok",
+            ),
+            (&extension_response, "Ok"),
+            (&[msg::FAILURE], "AgentFailure"),
+            (&[msg::EXTENSION_FAILURE], "AgentFailure"),
+            (&[msg::IDENTITIES_ANSWER, 0, 0, 0, 0], "AgentProtocolError"),
+            (&[], "AgentProtocolError"),
+        ];
+        for (reply, expected) in replies {
+            let (mut client, _agent) = agent_answering(&frame(reply)).await?;
+            let result = client.extension(b"ext@example.com", b"data").await;
+            assert_eq!(outcome(&result), expected, "answered {reply:?}");
+        }
+        Ok(())
+    }
+
+    /// The requests that the agent answers with something other than
+    /// `SSH_AGENT_SUCCESS` fail with `AgentFailure` if it answers
+    /// `SSH_AGENT_FAILURE`, and with `AgentProtocolError` if it answers
+    /// something they don't expect.
+    #[tokio::test]
+    async fn queries_fail_when_the_agent_refuses() -> Result<(), Box<dyn std::error::Error>> {
+        let key = generate_secret_key()?;
+        let public = key.public_key();
+        for (reply, expected) in [
+            (msg::FAILURE, "AgentFailure"),
+            (msg::SUCCESS, "AgentProtocolError"),
+        ] {
+            let (mut client, _agent) = agent_answering(&frame(&[reply]).repeat(3)).await?;
+            let identities = client.request_identities().await;
+            let signature = client.sign_request_signature(public, None, b"data").await;
+            let (_client, base64) = client.sign_request_base64(public, None, b"data").await;
+            let outcomes = [
+                ("request_identities", outcome(&identities)),
+                ("sign_request_signature", outcome(&signature)),
+                ("sign_request_base64", outcome(&base64)),
+            ];
+            for (method, outcome) in outcomes {
+                assert_eq!(outcome, expected, "{method}, answered {reply}");
+            }
+        }
+        Ok(())
+    }
+
+    /// A client of russh's agent, served on a task.
+    fn russhs_agent() -> AgentClient<DuplexStream> {
         let (client, agent) = tokio::io::duplex(1 << 16);
         let listener = futures::stream::iter([Ok(agent)]);
         tokio::spawn(crate::keys::agent::server::serve(listener, ()));
-        let mut client = AgentClient::connect(client);
+        AgentClient::connect(client)
+    }
+
+    /// russh's agent refuses to lock when it is locked, to unlock when it
+    /// isn't locked or the passphrase is wrong, to sign while locked, and to
+    /// remove a key it doesn't hold.
+    #[tokio::test]
+    async fn russhs_agent_refusals_are_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let mut client = russhs_agent();
+        let key = generate_secret_key()?;
+        let public = key.public_key();
+        client.add_identity(&key, &[]).await?;
+
+        assert_eq!(outcome(&client.unlock(b"passphrase").await), "AgentFailure");
+        client.lock(b"passphrase").await?;
+        assert_eq!(outcome(&client.lock(b"passphrase").await), "AgentFailure");
+        let signature = client.sign_request_signature(public, None, b"data").await;
+        assert_eq!(outcome(&signature), "AgentFailure");
+        let (mut client, base64) = client.sign_request_base64(public, None, b"data").await;
+        assert_eq!(outcome(&base64), "AgentFailure");
+        assert_eq!(outcome(&client.unlock(b"wrong").await), "AgentFailure");
+        client.unlock(b"passphrase").await?;
+
+        let signature = client.sign_request_signature(public, None, b"data").await?;
+        crate::crypto::verify(public.key_data(), b"data", &signature)?;
+        let (mut client, base64) = client.sign_request_base64(public, None, b"data").await;
+        assert!(!base64?.is_empty());
+
+        let other = generate_secret_key()?;
+        let removed = client.remove_identity(other.public_key()).await;
+        assert_eq!(outcome(&removed), "AgentFailure");
+        client.remove_identity(public).await?;
+        assert!(client.request_identities().await?.is_empty());
+        Ok(())
+    }
+
+    /// `remove_all_identities` removes every key from russh's agent.
+    #[tokio::test]
+    async fn removes_all_identities_from_russhs_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let mut client = russhs_agent();
 
         // Keys that the backend signs with: Ed25519 (ECDSA with SymCrypt),
         // and RSA.

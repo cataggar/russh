@@ -16,6 +16,12 @@ pub enum Constraint {
     /// Signatures need to be confirmed by the agent (for instance using a dialog).
     Confirm,
     /// Custom constraints
+    ///
+    /// russh sends `name` and `details` each as an SSH string, with a
+    /// `uint32` length prefix. The draft's format for the details is
+    /// `byte[]`, defined by each extension, so this matches extensions
+    /// whose details are a single string, such as OpenSSH's
+    /// `sk-provider@openssh.com` and `restrict-destination-v00@openssh.com`.
     Extensions { name: Vec<u8>, details: Vec<u8> },
 }
 
