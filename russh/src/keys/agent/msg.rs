@@ -2,7 +2,8 @@ pub const FAILURE: u8 = 5;
 pub const SUCCESS: u8 = 6;
 pub const IDENTITIES_ANSWER: u8 = 12;
 pub const SIGN_RESPONSE: u8 = 14;
-// pub const EXTENSION_FAILURE: u8 = 28;
+pub const EXTENSION_FAILURE: u8 = 28;
+pub const EXTENSION_RESPONSE: u8 = 29;
 
 pub const REQUEST_IDENTITIES: u8 = 11;
 pub const SIGN_REQUEST: u8 = 13;

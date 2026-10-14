@@ -1416,11 +1416,144 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
         let stream = tokio::net::UnixStream::connect(&agent_path).await?;
         let mut client = AgentClient::connect(stream);
 
-        client.extension(b"unknown@example.com", b"data").await?;
+        let unknown = client.extension(b"unknown@example.com", b"data").await;
+        assert!(matches!(unknown, Err(Error::AgentFailure)), "{unknown:?}");
         let supported = client
             .query_extension(b"unknown@example.com", crate::CryptoVec::new())
             .await?;
         assert!(!supported);
+        assert!(client.request_identities().await?.is_empty());
+
+        agent.kill().await?;
+        agent.wait().await?;
+        Ok(())
+    }
+
+    /// `extension` sends its contents as they are, so OpenSSH's agent can
+    /// parse a `session-bind@openssh.com` request: it accepts one signed by
+    /// the host key, and refuses one whose signature is over another session
+    /// identifier.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn openssh_agent_binds_sessions() -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::Arc;
+
+        use ssh_encoding::Encode;
+
+        use crate::helpers::sign_with_hash_alg;
+        use crate::keys::agent::client::AgentClient;
+
+        // Every backend signs with P-256 keys.
+        let host_key = Arc::new(generate_secret_key_for(&Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        })?);
+        let session_id = [1; 32];
+        // The host key, the session identifier and the host key's signature
+        // over `signed`, each as a string, then `is_forwarding`.
+        let session_bind = |signed: &[u8]| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            let mut contents = Vec::new();
+            let public = host_key.public_key().key_data().encoded()?;
+            public.encode(&mut contents)?;
+            session_id[..].encode(&mut contents)?;
+            let key = PrivateKeyWithHashAlg::new(host_key.clone(), None);
+            sign_with_hash_alg(&key, signed)?.encode(&mut contents)?;
+            false.encode(&mut contents)?;
+            Ok(contents)
+        };
+
+        let (mut agent, agent_path, _dir) = spawn_agent().await?;
+        let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+        let mut client = AgentClient::connect(stream);
+
+        let forged = client
+            .extension(b"session-bind@openssh.com", &session_bind(&[2; 32])?)
+            .await;
+        assert!(matches!(forged, Err(Error::AgentFailure)), "{forged:?}");
+        client
+            .extension(b"session-bind@openssh.com", &session_bind(&session_id)?)
+            .await?;
+
+        agent.kill().await?;
+        agent.wait().await?;
+        Ok(())
+    }
+
+    /// OpenSSH's agent refuses to unlock when it isn't locked or the
+    /// passphrase is wrong, to lock when it is locked, and to sign while
+    /// locked.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn openssh_agent_refuses_bad_lock_requests() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::keys::agent::client::AgentClient;
+
+        let (mut agent, agent_path, _dir) = spawn_agent().await?;
+        let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+        let mut client = AgentClient::connect(stream);
+        let key = crate::tests::test_keys::key(0);
+        let public = key.public_key();
+        client.add_identity(&key, &[]).await?;
+
+        let unlocked = client.unlock(b"passphrase").await;
+        assert!(matches!(unlocked, Err(Error::AgentFailure)), "{unlocked:?}");
+        client.lock(b"passphrase").await?;
+        let locked = client.lock(b"passphrase").await;
+        assert!(matches!(locked, Err(Error::AgentFailure)), "{locked:?}");
+        let signature = client.sign_request_signature(public, None, b"data").await;
+        assert!(
+            matches!(signature, Err(Error::AgentFailure)),
+            "{signature:?}"
+        );
+        // The agent delays the answer, by 0.1 s for its first failed unlock.
+        let wrong = client.unlock(b"wrong").await;
+        assert!(matches!(wrong, Err(Error::AgentFailure)), "{wrong:?}");
+        client.unlock(b"passphrase").await?;
+        client.sign_request_signature(public, None, b"data").await?;
+
+        agent.kill().await?;
+        agent.wait().await?;
+        Ok(())
+    }
+
+    /// OpenSSH's agent refuses to remove a key it doesn't hold.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn openssh_agent_refuses_to_remove_unknown_keys() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::keys::agent::client::AgentClient;
+
+        let (mut agent, agent_path, _dir) = spawn_agent().await?;
+        let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+        let mut client = AgentClient::connect(stream);
+        let key = crate::tests::test_keys::key(0);
+
+        let removed = client.remove_identity(key.public_key()).await;
+        assert!(matches!(removed, Err(Error::AgentFailure)), "{removed:?}");
+        client.add_identity(&key, &[]).await?;
+        client.remove_identity(key.public_key()).await?;
+        assert!(client.request_identities().await?.is_empty());
+
+        agent.kill().await?;
+        agent.wait().await?;
+        Ok(())
+    }
+
+    /// OpenSSH's agent refuses to add or remove the keys of a PKCS#11
+    /// provider that doesn't exist.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn openssh_agent_refuses_unknown_smartcards() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::keys::agent::client::AgentClient;
+
+        let (mut agent, agent_path, dir) = spawn_agent().await?;
+        let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+        let mut client = AgentClient::connect(stream);
+        let provider = dir.path().join("missing-pkcs11.so");
+        let provider = provider.to_str().ok_or("the temporary path isn't UTF-8")?;
+
+        let added = client.add_smartcard_key(provider, b"", &[]).await;
+        assert!(matches!(added, Err(Error::AgentFailure)), "{added:?}");
+        let removed = client.remove_smartcard_key(provider, b"").await;
+        assert!(matches!(removed, Err(Error::AgentFailure)), "{removed:?}");
         assert!(client.request_identities().await?.is_empty());
 
         agent.kill().await?;
