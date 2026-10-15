@@ -103,6 +103,12 @@ jobs:
           if command -v cygpath > /dev/null; then dir="$(cygpath --unix "$dir")"; fi
           ls -l "$dir"/*symcrypt*
 
+      - name: Install Clippy
+        run: rustup component add clippy
+
+      - name: Clippy
+        run: cargo clippy --manifest-path ci/symcrypt-smoke/Cargo.toml --all-targets -- -D warnings
+
       - name: Run the SymCrypt smoke test
         run: cargo run --manifest-path ci/symcrypt-smoke/Cargo.toml
         env:
@@ -311,6 +317,12 @@ jobs:
       - name: Check the dependency graph
         shell: bash
         run: ci/symcrypt-ban-check.sh ${{ matrix.ban-check }} --manifest-path ci/symcrypt-consumer/Cargo.toml -p symcrypt-consumer ${{ matrix.cargo-features }}
+
+      - name: Install Clippy
+        run: rustup component add clippy
+
+      - name: Clippy
+        run: cargo clippy --manifest-path ci/symcrypt-consumer/Cargo.toml --all-targets ${{ matrix.cargo-features }} -- -D warnings
 
       - name: Build
         run: cargo build --manifest-path ci/symcrypt-consumer/Cargo.toml ${{ matrix.cargo-features }}

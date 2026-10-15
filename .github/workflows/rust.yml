@@ -57,6 +57,15 @@ jobs:
       - name: Test pageant
         run: cargo test -p pageant
 
+      # symcrypt.yml tests russh on Windows with the symcrypt backend; cover the default
+      # (aws-lc-rs) and ring backends here. The OpenSSH interop tests skip themselves when sshd
+      # isn't available.
+      - name: Test russh (default features)
+        run: cargo test --verbose -p russh
+
+      - name: Test russh (ring)
+        run: cargo test --verbose -p russh --no-default-features --features ring,rsa,flate2
+
       - name: Set up SymCrypt
         uses: ./.github/actions/setup-symcrypt
 
@@ -113,6 +122,12 @@ jobs:
             echo "::error::cargo fmt doesn't reach the modules declared in russh/src/lib_inner.rs; format them with \`rustfmt --edition 2024 russh/src/lib_inner.rs\`"
             exit 1
           }
+
+      - name: Check formatting (ci crates)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo fmt --manifest-path ci/symcrypt-smoke/Cargo.toml --check
+          cargo fmt --manifest-path ci/symcrypt-consumer/Cargo.toml --check
 
   Clippy:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
