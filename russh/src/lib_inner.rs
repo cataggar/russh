@@ -73,6 +73,48 @@ pub mod server;
 /// Client side of this library.
 pub mod client;
 
+/// The cryptographic backend a build of `russh` uses.
+///
+/// Selected at compile time from the enabled Cargo features (`aws-lc-rs`,
+/// `ring`, or `symcrypt`); see [`CRYPTO_BACKEND`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CryptoBackend {
+    /// `aws-lc-rs` (enabled by default).
+    AwsLcRs,
+    /// `ring`.
+    Ring,
+    /// SymCrypt (`symcrypt`).
+    SymCrypt,
+}
+
+impl CryptoBackend {
+    /// The Cargo feature name of this backend (`"aws-lc-rs"`, `"ring"`, or `"symcrypt"`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AwsLcRs => "aws-lc-rs",
+            Self::Ring => "ring",
+            Self::SymCrypt => "symcrypt",
+        }
+    }
+}
+
+impl std::fmt::Display for CryptoBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The cryptographic backend this build of `russh` uses.
+#[cfg(russh_backend = "aws_lc")]
+pub const CRYPTO_BACKEND: CryptoBackend = CryptoBackend::AwsLcRs;
+/// The cryptographic backend this build of `russh` uses.
+#[cfg(russh_backend = "ring")]
+pub const CRYPTO_BACKEND: CryptoBackend = CryptoBackend::Ring;
+/// The cryptographic backend this build of `russh` uses.
+#[cfg(russh_backend = "symcrypt")]
+pub const CRYPTO_BACKEND: CryptoBackend = CryptoBackend::SymCrypt;
+
 #[derive(Debug)]
 pub enum AlgorithmKind {
     Kex,

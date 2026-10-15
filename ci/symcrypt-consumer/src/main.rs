@@ -22,6 +22,11 @@ use russh::keys::{
 };
 use russh::{client, ChannelMsg, Disconnect, Names, Preferred};
 
+const _: () = assert!(
+    matches!(russh::CRYPTO_BACKEND, russh::CryptoBackend::SymCrypt),
+    "russh must use the symcrypt backend; `cargo tree -e features -i russh` shows what enables another one",
+);
+
 const USAGE: &str =
     "usage: symcrypt-consumer [<host> <port> <user> <private key> <host public key> <command>...]";
 
@@ -40,6 +45,7 @@ async fn main() -> ExitCode {
 }
 
 fn print_algorithms() -> Result<ExitCode, Box<dyn Error>> {
+    println!("backend:  {}", russh::CRYPTO_BACKEND);
     let preferred = Preferred::default();
     let lists: [(&str, Vec<&str>); 6] = [
         ("kex", preferred.kex.iter().map(AsRef::as_ref).collect()),

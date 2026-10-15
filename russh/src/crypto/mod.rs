@@ -441,12 +441,7 @@ pub(crate) fn is_supported_signature_algorithm(algorithm: &Algorithm) -> bool {
 }
 
 /// The name of the selected backend, for messages.
-#[cfg(russh_backend = "aws_lc")]
-pub(crate) const BACKEND: &str = "aws-lc-rs";
-#[cfg(russh_backend = "ring")]
-pub(crate) const BACKEND: &str = "ring";
-#[cfg(russh_backend = "symcrypt")]
-pub(crate) const BACKEND: &str = "symcrypt";
+pub(crate) const BACKEND: &str = crate::CRYPTO_BACKEND.as_str();
 
 /// Whether the backend can sign with `algorithm` (for RSA, with that hash).
 /// Unlike [`is_supported_signature_algorithm`], this is exact for every

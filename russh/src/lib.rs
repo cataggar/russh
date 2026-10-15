@@ -55,6 +55,24 @@
 //! russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "flate2"] }
 //! ```
 //!
+//! [`CRYPTO_BACKEND`] (a [`CryptoBackend`]) reports which backend this build of
+//! russh uses. Because Cargo unifies features across the dependency graph, any
+//! dependency that enables russh's default features (or `aws-lc-rs` or `ring`)
+//! switches russh to that backend. An application can require a specific
+//! backend at build time either with a compile-time assertion:
+//!
+//! ```
+//! # #[cfg(all(feature = "symcrypt", not(feature = "aws-lc-rs"), not(feature = "ring")))]
+//! const _: () = assert!(
+//!     matches!(russh::CRYPTO_BACKEND, russh::CryptoBackend::SymCrypt),
+//!     "russh must use the symcrypt backend; `cargo tree -e features -i russh` shows what enables another one",
+//! );
+//! ```
+//!
+//! or by setting `RUSSH_REQUIRE_BACKEND=symcrypt` (or `aws-lc-rs` or `ring`) in
+//! `.cargo/config.toml` (`[env]`) or in CI, which makes russh's build script
+//! fail the build if another backend is selected.
+//!
 //! The [README](https://github.com/cataggar/russh/blob/main/README.md#crypto-backends)
 //! lists the algorithms of each backend, and how to install SymCrypt on Linux
 //! and Windows.

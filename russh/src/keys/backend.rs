@@ -256,6 +256,25 @@ mod tests {
     }
 
     #[test]
+    fn crypto_backend_matches_cfg() {
+        let (expected, expected_str) = if cfg!(russh_backend = "aws_lc") {
+            (crate::CryptoBackend::AwsLcRs, "aws-lc-rs")
+        } else if cfg!(russh_backend = "ring") {
+            (crate::CryptoBackend::Ring, "ring")
+        } else if cfg!(russh_backend = "symcrypt") {
+            (crate::CryptoBackend::SymCrypt, "symcrypt")
+        } else {
+            panic!("unknown russh_backend cfg");
+        };
+        assert_eq!(crate::CRYPTO_BACKEND, expected);
+        assert_eq!(crate::CRYPTO_BACKEND.as_str(), expected_str);
+        assert_eq!(crate::CRYPTO_BACKEND.to_string(), expected_str);
+        assert_eq!(crate::CryptoBackend::AwsLcRs.as_str(), "aws-lc-rs");
+        assert_eq!(crate::CryptoBackend::Ring.as_str(), "ring");
+        assert_eq!(crate::CryptoBackend::SymCrypt.as_str(), "symcrypt");
+    }
+
+    #[test]
     fn does_not_generate_keys_it_cannot_sign_with() {
         for algorithm in candidates() {
             let signs = match algorithm {
