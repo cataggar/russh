@@ -1225,7 +1225,11 @@ where
     // Writing SSH id.
     let mut write_buffer = SSHBuffer::new();
 
-    debug!("ssh id = {:?}", config.as_ref().client_id);
+    debug!(
+        "ssh id = {:?}, crypto backend = {:?}",
+        config.as_ref().client_id,
+        crate::CRYPTO_BACKEND
+    );
 
     write_buffer.send_ssh_id(&config.as_ref().client_id);
     map_err!(stream.write_all(&write_buffer.buffer).await)?;

@@ -52,6 +52,23 @@ russh = { git = "https://github.com/cataggar/russh", default-features = false, f
 
 If several backend features are enabled, russh uses the first of `aws-lc-rs`, `ring` and `symcrypt`. `aws-lc-rs` is a default feature, so `ring` and `symcrypt` need `default-features = false`. Builds with `--all-features` use aws-lc-rs, but they also compile the `symcrypt` crate, so they need the native SymCrypt library too.
 
+`russh::CRYPTO_BACKEND` (a `russh::CryptoBackend`) exposes which backend russh was built with. Because Cargo unifies features across the dependency graph, if any other dependency in your build (including a dev-dependency during `cargo test`) enables russh's default features, or `aws-lc-rs` or `ring`, russh uses that backend instead of `symcrypt` or `ring`. To require a specific backend at build time, either assert `russh::CRYPTO_BACKEND` in your crate:
+
+```rust
+const _: () = assert!(
+    matches!(russh::CRYPTO_BACKEND, russh::CryptoBackend::SymCrypt),
+    "russh must use the symcrypt backend; `cargo tree -e features -i russh` shows what enables another one",
+);
+```
+
+or set `RUSSH_REQUIRE_BACKEND=symcrypt` (or `aws-lc-rs` or `ring`) in `.cargo/config.toml` under `[env]` or in CI, which makes russh's `build.rs` fail the build with `cargo::error` if another backend is selected:
+
+```toml
+# .cargo/config.toml
+[env]
+RUSSH_REQUIRE_BACKEND = "symcrypt"
+```
+
 ### The `symcrypt` backend
 
 This backend is for deployments that must do their cryptography in SymCrypt and must not link `ring` or `aws-lc-rs`. With `symcrypt` as the only backend:
