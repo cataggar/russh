@@ -1,21 +1,56 @@
 //! MACs for the SymCrypt backend: `hmac-sha2-256` and `hmac-sha2-512`, and
-//! their `-etm@openssh.com` forms, with `symcrypt::hmac`. The SHA-1 MACs are
-//! not offered; HMAC-SHA1 is only used for hashed `known_hosts` host names
-//! ([`hmac_sha1`]).
+//! their `-etm@openssh.com` forms, using `symcrypt_sys`'s `SymCryptHmacSha256*`
+//! and `SymCryptHmacSha512*` with a boxed expanded key and a stack state per
+//! packet. The SHA-1 MACs are not offered; HMAC-SHA1 is only used for hashed
+//! `known_hosts` host names ([`hmac_sha1`]).
 
-use std::mem::ManuallyDrop;
+use std::mem::MaybeUninit;
+use std::sync::Once;
 
-use symcrypt::hmac::{HmacSha256State, HmacSha512State, HmacState};
+use symcrypt_sys::{
+    SIZE_T, SYMCRYPT_ERROR_SYMCRYPT_NO_ERROR, SYMCRYPT_HMAC_SHA256_EXPANDED_KEY,
+    SYMCRYPT_HMAC_SHA256_STATE, SYMCRYPT_HMAC_SHA512_EXPANDED_KEY, SYMCRYPT_HMAC_SHA512_STATE,
+    SymCryptHmacSha256Append, SymCryptHmacSha256ExpandKey, SymCryptHmacSha256Init,
+    SymCryptHmacSha256Result, SymCryptHmacSha512Append, SymCryptHmacSha512ExpandKey,
+    SymCryptHmacSha512Init, SymCryptHmacSha512Result,
+};
 
 use crate::crypto::{CryptoError, Mac, Result};
 use crate::mac::crypto::CryptoMacAlgorithm;
 use crate::mac::crypto_etm::CryptoEtmMacAlgorithm;
 use crate::mac::{self, MacAlgorithm};
 
+/// Calls `SymCryptModuleInit` once, as SymCrypt requires before its other
+/// functions. (The `symcrypt` crate does it too, but only in its own
+/// functions.)
+fn init() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: no preconditions; it checks that the library is compatible
+        // with the headers `symcrypt-sys` was generated from.
+        unsafe {
+            symcrypt_sys::SymCryptModuleInit(
+                symcrypt_sys::SYMCRYPT_CODE_VERSION_API,
+                symcrypt_sys::SYMCRYPT_CODE_VERSION_MINOR,
+            )
+        }
+    });
+}
+
 macro_rules! hmac {
-    ($name:ident, $state:ty, $len:expr) => {
-        /// The keyed state, cloned for each MAC.
-        pub(crate) struct $name(ManuallyDrop<$state>);
+    (
+        $name:ident,
+        $expanded_key:ty,
+        $state:ty,
+        $expand_key:ident,
+        $init:ident,
+        $append:ident,
+        $result:ident,
+        $len:expr
+    ) => {
+        /// The expanded HMAC key, boxed so that its address never changes
+        /// (`SYMCRYPT_SET_MAGIC` records the struct's address in `magic`).
+        pub(crate) struct $name(Box<$expanded_key>);
 
         impl Mac for $name {
             const KEY_LEN: usize = $len;
@@ -25,44 +60,76 @@ macro_rules! hmac {
                 if key.len() != Self::KEY_LEN {
                     return Err(CryptoError);
                 }
-                <$state>::new(key)
-                    .map(|state| Self(ManuallyDrop::new(state)))
-                    .map_err(|_| CryptoError)
+                init();
+                let mut expanded_key = Box::<$expanded_key>::default();
+                // SAFETY: `expanded_key` is a writable expanded key whose heap
+                // address does not change afterwards, and `key` is valid for
+                // `key.len()` bytes.
+                let error =
+                    unsafe { $expand_key(&mut *expanded_key, key.as_ptr(), key.len() as SIZE_T) };
+                if error != SYMCRYPT_ERROR_SYMCRYPT_NO_ERROR {
+                    return Err(CryptoError);
+                }
+                Ok(Self(expanded_key))
             }
 
             fn compute(&self, data: &[&[u8]], output: &mut [u8]) {
-                let mut state = <$state>::clone(&self.0);
-                for data in data {
-                    state.append(data);
+                let mut state = MaybeUninit::<$state>::uninit();
+                let mut tag = [0u8; $len];
+                // SAFETY: `state` is initialized in place from the expanded key
+                // (`self.0`) and does not move before `Result`, which writes
+                // `OUTPUT_LEN` bytes to `tag` and wipes `state`.
+                unsafe {
+                    $init(state.as_mut_ptr(), &raw const *self.0);
+                    for data in data {
+                        $append(state.as_mut_ptr(), data.as_ptr(), data.len() as SIZE_T);
+                    }
+                    $result(state.as_mut_ptr(), tag.as_mut_ptr());
                 }
-                output.copy_from_slice(&state.result());
+                output.copy_from_slice(&tag);
             }
         }
 
         impl Drop for $name {
             fn drop(&mut self) {
-                // The state's own `Drop` wipes only its first bytes, but
-                // `result` resets it to the unkeyed hash state.
-                // SAFETY: `self.0` is not used again.
-                let _ = unsafe { ManuallyDrop::take(&mut self.0) }.result();
+                // SAFETY: wipes the entire expanded key in place before freeing
+                // the `Box`.
+                unsafe {
+                    symcrypt_sys::SymCryptWipe(
+                        (&raw mut *self.0).cast(),
+                        size_of::<$expanded_key>() as SIZE_T,
+                    );
+                }
             }
         }
     };
 }
 
-hmac!(SymCryptHmacSha256, HmacSha256State, 32);
-hmac!(SymCryptHmacSha512, HmacSha512State, 64);
+hmac!(
+    SymCryptHmacSha256,
+    SYMCRYPT_HMAC_SHA256_EXPANDED_KEY,
+    SYMCRYPT_HMAC_SHA256_STATE,
+    SymCryptHmacSha256ExpandKey,
+    SymCryptHmacSha256Init,
+    SymCryptHmacSha256Append,
+    SymCryptHmacSha256Result,
+    32
+);
+hmac!(
+    SymCryptHmacSha512,
+    SYMCRYPT_HMAC_SHA512_EXPANDED_KEY,
+    SYMCRYPT_HMAC_SHA512_STATE,
+    SymCryptHmacSha512ExpandKey,
+    SymCryptHmacSha512Init,
+    SymCryptHmacSha512Append,
+    SymCryptHmacSha512Result,
+    64
+);
 
 /// HMAC-SHA1 with a key of any length (see [`crate::crypto::hmac_sha1`]).
 pub(crate) fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<[u8; 20]> {
     ::symcrypt::hmac::hmac_sha1(key, data).map_err(|_| CryptoError)
 }
-
-// SAFETY: `symcrypt` declares the SHA-256 and SHA-384 states `Send` but not
-// this one, which has the same layout: an owned allocation whose only
-// pointer is to its expanded key, which is immutable and shared through an
-// `Arc`.
-unsafe impl Send for SymCryptHmacSha512 {}
 
 static HMAC_SHA256: CryptoMacAlgorithm<SymCryptHmacSha256> = CryptoMacAlgorithm::new();
 static HMAC_SHA512: CryptoMacAlgorithm<SymCryptHmacSha512> = CryptoMacAlgorithm::new();
@@ -139,6 +206,18 @@ mod tests {
         let (start, end) = data.split_at(data.len() / 2);
         let mut output = vec![0; M::OUTPUT_LEN];
         mac.compute(&[start, &[], end], &mut output);
+        assert_eq!(output, expected);
+
+        // Moving `mac` to another thread keeps the boxed expanded key's
+        // address stable (`SYMCRYPT_CHECK_MAGIC`).
+        let data = data.to_vec();
+        let output = std::thread::spawn(move || {
+            let mut output = vec![0; M::OUTPUT_LEN];
+            mac.compute(&[&data], &mut output);
+            output
+        })
+        .join()
+        .unwrap();
         assert_eq!(output, expected);
     }
 
