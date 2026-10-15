@@ -91,6 +91,23 @@ fn certificate_hash_alg(
     }
 }
 
+/// Whether the peer is OpenSSH 7.2–7.7, which refuses
+/// `rsa-sha2-256-cert-v01@openssh.com` and `rsa-sha2-512-cert-v01@openssh.com`
+/// as unknown key types (`SSH_BUG_SIGTYPE`), but accepts
+/// `ssh-rsa-cert-v01@openssh.com` signed with a SHA-2 signature.
+fn peer_needs_legacy_rsa_cert_name(remote_sshid: &[u8]) -> bool {
+    let Some(software) = remote_sshid
+        .strip_prefix(b"SSH-2.0-")
+        .or_else(|| remote_sshid.strip_prefix(b"SSH-1.99-"))
+    else {
+        return false;
+    };
+    let Some(rest) = software.strip_prefix(b"OpenSSH_7.") else {
+        return false;
+    };
+    matches!(rest.first(), Some(b'2'..=b'7')) && !matches!(rest.get(1), Some(b'0'..=b'9'))
+}
+
 impl Session {
     pub(crate) async fn client_read_encrypted<H: Handler>(
         &mut self,
@@ -133,10 +150,16 @@ impl Session {
                                     let mut auth_request = AuthRequest::new(meth);
                                     auth_request.certificate_hash_alg =
                                         certificate_hash_alg(meth, self.server_sig_algs.as_deref());
+                                    let name_hash_alg =
+                                        auth_request.certificate_hash_alg.filter(|_| {
+                                            !peer_needs_legacy_rsa_cert_name(
+                                                &self.common.remote_sshid,
+                                            )
+                                        });
                                     if enc.write_auth_request(
                                         &self.common.auth_user,
                                         meth,
-                                        auth_request.certificate_hash_alg,
+                                        name_hash_alg,
                                     )? {
                                         debug!("enc: auth request written");
                                         enc.state = EncryptedState::WaitingAuthRequest(auth_request)
@@ -291,6 +314,8 @@ impl Session {
 
                             // continue with userauth_pk_ok
                             let certificate_hash_alg = auth_request.certificate_hash_alg;
+                            let legacy_rsa_cert_name =
+                                peer_needs_legacy_rsa_cert_name(&self.common.remote_sshid);
                             match self.common.auth_method.take() {
                                 Some(auth_method @ auth::Method::PublicKey { .. }) => {
                                     self.common.buffer.clear();
@@ -298,6 +323,7 @@ impl Session {
                                         &self.common.auth_user,
                                         &auth_method,
                                         None,
+                                        false,
                                         &mut self.common.buffer,
                                     )?
                                 }
@@ -307,6 +333,7 @@ impl Session {
                                         &self.common.auth_user,
                                         &auth_method,
                                         certificate_hash_alg,
+                                        legacy_rsa_cert_name,
                                         &mut self.common.buffer,
                                     )?
                                 }
@@ -1136,7 +1163,10 @@ impl Session {
                 let mut auth_request = AuthRequest::new(&meth);
                 auth_request.certificate_hash_alg =
                     certificate_hash_alg(&meth, self.server_sig_algs.as_deref());
-                enc.write_auth_request(user, &meth, auth_request.certificate_hash_alg)?;
+                let name_hash_alg = auth_request
+                    .certificate_hash_alg
+                    .filter(|_| !peer_needs_legacy_rsa_cert_name(&self.common.remote_sshid));
+                enc.write_auth_request(user, &meth, name_hash_alg)?;
                 enc.state = EncryptedState::WaitingAuthRequest(auth_request);
             }
         }
@@ -1335,13 +1365,16 @@ impl Encrypted {
     }
 
     /// Sends the signed request answering `USERAUTH_PK_OK`.
-    /// `certificate_hash_alg` is the one [`Encrypted::write_auth_request`]
-    /// named the probe after.
+    /// `certificate_hash_alg` is the hash [`certificate_hash_alg`] chose when
+    /// the probe was sent; `legacy_rsa_cert_name` keeps the wire name as
+    /// `ssh-rsa-cert-v01@openssh.com` for OpenSSH 7.2–7.7 while still signing
+    /// with `certificate_hash_alg`.
     fn client_send_signature(
         &mut self,
         user: &str,
         method: &auth::Method,
         certificate_hash_alg: Option<HashAlg>,
+        legacy_rsa_cert_name: bool,
         buffer: &mut Vec<u8>,
     ) -> Result<(), crate::Error> {
         match method {
@@ -1362,15 +1395,17 @@ impl Encrypted {
                 })
             }
             auth::Method::OpenSshCertificate { key, cert } => {
+                let name_hash_alg = certificate_hash_alg.filter(|_| !legacy_rsa_cert_name);
                 let i0 = self.client_make_to_sign(
                     user,
                     &PublicKeyOrCertificate::Certificate(cert.clone()),
-                    certificate_hash_alg,
+                    name_hash_alg,
                     buffer,
                 )?;
 
                 // Extend with self-signature. RSA signs with the hash the
-                // request is named after; other keys ignore the hash.
+                // request is named after (or SHA-2 for OpenSSH 7.2–7.7); other
+                // keys ignore the hash.
                 let hash_alg = certificate_hash_alg.unwrap_or(HashAlg::Sha512);
                 crate::crypto::sign_held(key, 0, Some(hash_alg), buffer)?
                     .encoded()?
@@ -1650,8 +1685,18 @@ mod tests {
         server_sig_algs: Option<Vec<Algorithm>>,
         retry: bool,
     ) -> (Vec<u8>, Vec<u8>) {
+        publickey_requests_for_peer(method, b"", server_sig_algs, retry).await
+    }
+
+    async fn publickey_requests_for_peer(
+        method: auth::Method,
+        remote_sshid: &[u8],
+        server_sig_algs: Option<Vec<Algorithm>>,
+        retry: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
         // Waits for the answer to a keyboard-interactive request.
         let (mut session, _sender, _replies) = keyboard_interactive_session();
+        session.common.remote_sshid = remote_sshid.to_vec();
         session.server_sig_algs = server_sig_algs;
         let enc = session.common.encrypted.as_mut().unwrap();
         enc.session_id = CryptoVec::from(&b"session-id"[..]);
@@ -1682,6 +1727,45 @@ mod tests {
             .await
             .unwrap();
         (probe, take_written_payload(&mut session))
+    }
+
+    #[test]
+    fn detects_openssh_7_2_to_7_7_for_legacy_rsa_certificate_name() {
+        for sshid in [
+            &b"SSH-2.0-OpenSSH_7.2"[..],
+            b"SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.10",
+            b"SSH-2.0-OpenSSH_7.3",
+            b"SSH-2.0-OpenSSH_7.4p1 Debian-10+deb9u7",
+            b"SSH-2.0-OpenSSH_7.5",
+            b"SSH-2.0-OpenSSH_7.6p1 Ubuntu-4ubuntu0.7",
+            b"SSH-2.0-OpenSSH_7.7",
+            b"SSH-1.99-OpenSSH_7.4",
+        ] {
+            assert!(
+                peer_needs_legacy_rsa_cert_name(sshid),
+                "{:?}",
+                String::from_utf8_lossy(sshid)
+            );
+        }
+        for sshid in [
+            &b""[..],
+            b"SSH-2.0-OpenSSH_6.9p1",
+            b"SSH-2.0-OpenSSH_7.0",
+            b"SSH-2.0-OpenSSH_7.1p2",
+            b"SSH-2.0-OpenSSH_7.8",
+            b"SSH-2.0-OpenSSH_7.8p1",
+            b"SSH-2.0-OpenSSH_7.9p1",
+            b"SSH-2.0-OpenSSH_7.20",
+            b"SSH-2.0-OpenSSH_8.0",
+            b"SSH-2.0-OpenSSH_10.2",
+            b"SSH-2.0-russh_0.64.1",
+        ] {
+            assert!(
+                !peer_needs_legacy_rsa_cert_name(sshid),
+                "{:?}",
+                String::from_utf8_lossy(sshid)
+            );
+        }
     }
 
     #[test]
@@ -1742,6 +1826,43 @@ mod tests {
                 assert_eq!(algorithm, expected, "signed request, {context}");
                 let signature = signature.expect("signed request without a signature");
                 assert_eq!(signature.algorithm(), rsa(hash), "{context}");
+                assert_signed_by(&certificate, unsigned, &signature);
+            }
+        }
+    }
+
+    #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
+    #[tokio::test]
+    async fn rsa_certificate_uses_legacy_name_with_sha2_signature_for_openssh_7_2_to_7_7() {
+        let (key, certificate) = rsa_user_certificate();
+        let key = Arc::new(key);
+        let rsa = |hash| Algorithm::Rsa { hash: Some(hash) };
+        for (server_sig_algs, hash) in [
+            (None, HashAlg::Sha512),
+            (Some(vec![rsa(HashAlg::Sha256)]), HashAlg::Sha256),
+        ] {
+            for retry in [false, true] {
+                let method = auth::Method::OpenSshCertificate {
+                    key: key.clone(),
+                    cert: certificate.clone(),
+                };
+                let (probe, signed) = publickey_requests_for_peer(
+                    method,
+                    b"SSH-2.0-OpenSSH_7.4p1 Debian-10",
+                    server_sig_algs.clone(),
+                    retry,
+                )
+                .await;
+
+                let (algorithm, _, signature) = decode_userauth_certificate_request(&probe, false);
+                assert_eq!(algorithm, "ssh-rsa-cert-v01@openssh.com");
+                assert!(signature.is_none());
+
+                let (algorithm, unsigned, signature) =
+                    decode_userauth_certificate_request(&signed, true);
+                assert_eq!(algorithm, "ssh-rsa-cert-v01@openssh.com");
+                let signature = signature.expect("signed request without a signature");
+                assert_eq!(signature.algorithm(), rsa(hash));
                 assert_signed_by(&certificate, unsigned, &signature);
             }
         }
