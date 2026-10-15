@@ -28,8 +28,9 @@
 //! runs a pairwise consistency test. `Signatures::sign_held`, which russh
 //! uses for its own keys (server host keys, client and agent keys), imports
 //! a key once and keeps it for as long as its holder lives (see
-//! `key_cache`), so these checks run once per key. `Signatures::sign`
-//! imports the key for every signature.
+//! `key_cache`), so these checks run once per key. `Signatures::sign`,
+//! which `certificate::sign` uses for CA keys passed by reference, keeps a
+//! small LRU cache keyed by the SHA-256 digest of the encoded private key.
 //!
 //! Not implemented, so neither offered nor accepted: `ssh-ed25519` (SymCrypt
 //! has no EdDSA) unless the `ed25519-aws-lc` feature takes it from aws-lc-rs
@@ -42,7 +43,7 @@
 //! a peer that implements any of the algorithms above negotiates it instead.
 
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ::symcrypt::ecc::{CurveType, EcKey, EcKeyUsage};
 use ::symcrypt::errors::SymCryptError;
@@ -65,6 +66,13 @@ const KEY_CACHE_CAPACITY: usize = 32;
 
 /// The keys `Signatures::sign_held` imported.
 static SIGNING_KEYS: KeyCache<SigningKey> = KeyCache::new(KEY_CACHE_CAPACITY);
+
+/// How many imported keys `Signatures::sign` keeps at most.
+const BY_VALUE_CACHE_CAPACITY: usize = 8;
+
+/// The keys `Signatures::sign` imported, keyed by the SHA-256 digest of their
+/// OpenSSH private-key encoding.
+static BY_VALUE_KEYS: ByValueCache = ByValueCache::new(BY_VALUE_CACHE_CAPACITY);
 
 pub(crate) struct Signatures;
 
@@ -108,8 +116,7 @@ impl Signer for Signatures {
         hash_alg: Option<HashAlg>,
         message: &[u8],
     ) -> ssh_key::Result<Signature> {
-        let algorithm = signature_algorithm(key, hash_alg)?;
-        SigningKey::import(key)?.sign(algorithm, message)
+        sign_by_value(&BY_VALUE_KEYS, key, hash_alg, message)
     }
 
     fn sign_held<H: KeyHolder>(
@@ -124,6 +131,74 @@ impl Signer for Signatures {
     fn release_dropped_keys() {
         SIGNING_KEYS.remove_dropped();
     }
+}
+
+/// Bounded LRU cache of imported [`SigningKey`]s for [`Signatures::sign`],
+/// keyed by the SHA-256 digest of [`PrivateKey::to_bytes`] (which covers both
+/// the public and private key components and zeroizes the encoded buffer on
+/// drop).
+struct ByValueCache {
+    capacity: usize,
+    /// From the least to the most recently used.
+    entries: Mutex<Vec<([u8; 32], Arc<SigningKey>)>>,
+}
+
+impl ByValueCache {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn get_or_try_insert(&self, key: &PrivateKey) -> ssh_key::Result<Arc<SigningKey>> {
+        let digest = sha256(&key.to_bytes()?);
+        if let Some(imported) = self.touch(&digest) {
+            return Ok(imported);
+        }
+        // Imported without the lock, so that other keys can be used meanwhile.
+        let imported = Arc::new(SigningKey::import(key)?);
+        // Declared before locking so an evicted key is freed after the lock is released.
+        let mut evicted = None;
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = entries.iter().position(|(d, _)| *d == digest) {
+            let entry = entries.remove(index);
+            let cached = Arc::clone(&entry.1);
+            entries.push(entry);
+            return Ok(cached);
+        }
+        if entries.len() >= self.capacity && !entries.is_empty() {
+            evicted = Some(entries.remove(0));
+        }
+        entries.push((digest, Arc::clone(&imported)));
+        drop(entries);
+        drop(evicted);
+        Ok(imported)
+    }
+
+    fn touch(&self, digest: &[u8; 32]) -> Option<Arc<SigningKey>> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = entries.iter().position(|(d, _)| d == digest)?;
+        let entry = entries.remove(index);
+        let value = Arc::clone(&entry.1);
+        entries.push(entry);
+        Some(value)
+    }
+}
+
+/// Signs with `key`, imported into `cache` unless it already is.
+fn sign_by_value(
+    cache: &ByValueCache,
+    key: &PrivateKey,
+    hash_alg: Option<HashAlg>,
+    message: &[u8],
+) -> ssh_key::Result<Signature> {
+    // Checked first, so that no key is imported that cannot sign.
+    let algorithm = signature_algorithm(key, hash_alg)?;
+    let imported = cache.get_or_try_insert(key)?;
+    #[cfg(test)]
+    tests::signed_with(&imported);
+    imported.sign(algorithm, message)
 }
 
 /// Signs with key `slot` of `holder`, imported into `cache` unless it
@@ -508,7 +583,8 @@ mod tests {
 
     use super::key_cache::KeyCache;
     use super::{
-        Curve, DEFAULT_ORDER, KEY_CACHE_CAPACITY, SigningKey, rsa_public_components, sign_cached,
+        BY_VALUE_CACHE_CAPACITY, ByValueCache, Curve, DEFAULT_ORDER, KEY_CACHE_CAPACITY,
+        SigningKey, rsa_public_components, sign_by_value, sign_cached,
     };
     use crate::crypto::{
         KeyHolder, is_supported_signature_algorithm, sign, sign_held, verify, verify_certificate,
@@ -1557,6 +1633,7 @@ mod tests {
     #[test]
     fn forged_keys_never_sign_with_cached_keys() {
         let cache = KeyCache::new(KEY_CACHE_CAPACITY);
+        let by_value = ByValueCache::new(BY_VALUE_CACHE_CAPACITY);
         for (real, forgery, hash_alg) in forgeries() {
             assert_eq!(
                 real.public_key().key_data(),
@@ -1569,6 +1646,8 @@ mod tests {
                     sign_cached(&cache, forgery, 0, hash_alg, MESSAGE),
                     sign_cached(&cache, &config, 1, hash_alg, MESSAGE),
                     sign_held(forgery, 0, hash_alg, MESSAGE),
+                    sign_by_value(&by_value, forgery, hash_alg, MESSAGE),
+                    sign(forgery, hash_alg, MESSAGE),
                 ] {
                     assert_eq!(result.unwrap_err(), ssh_key::Error::Crypto);
                 }
@@ -1579,6 +1658,8 @@ mod tests {
             sign_checked(&cache, &real, 0, hash_alg);
             sign_checked(&cache, &config, 0, hash_alg);
             sign_held(&real, 0, hash_alg, MESSAGE).unwrap();
+            sign_by_value(&by_value, &real, hash_alg, MESSAGE).unwrap();
+            sign(&real, hash_alg, MESSAGE).unwrap();
             cannot_sign(&forgery);
             assert_eq!(cache.len(), 2);
 
@@ -1588,6 +1669,87 @@ mod tests {
             assert_ne!(Arc::as_ptr(&forgery), address);
             cannot_sign(&forgery);
             assert_eq!(cache.len(), 1);
+        }
+    }
+
+    /// `Signatures::sign` and `certificate::sign` reuse the cached
+    /// `SigningKey` when called repeatedly with the same `&PrivateKey`, and
+    /// evict the least recently used entry when full.
+    #[test]
+    fn sign_and_certificate_sign_reuse_cached_keys() {
+        let cache = ByValueCache::new(2);
+        let a = ecdsa_p256();
+        let b = rsa_2048();
+        let c = ecdsa_p384();
+
+        let imports = count_imports(|| {
+            for _ in 0..3 {
+                let sig = sign_by_value(&cache, &a, None, MESSAGE).unwrap();
+                verify(a.public_key().key_data(), MESSAGE, &sig).unwrap();
+            }
+        });
+        assert_eq!(imports, 1);
+        let imported_a = last_signed_with();
+
+        let imports = count_imports(|| {
+            for hash in [HashAlg::Sha256, HashAlg::Sha512, HashAlg::Sha256] {
+                let sig = sign_by_value(&cache, &b, Some(hash), MESSAGE).unwrap();
+                verify(b.public_key().key_data(), MESSAGE, &sig).unwrap();
+            }
+        });
+        assert_eq!(imports, 1);
+        let imported_b = last_signed_with();
+
+        // Touch `a`, making `b` the least recently used entry, then insert `c`.
+        assert_eq!(
+            count_imports(|| {
+                sign_by_value(&cache, &a, None, MESSAGE).unwrap();
+            }),
+            0
+        );
+        assert!(Weak::ptr_eq(&last_signed_with(), &imported_a));
+        assert_eq!(
+            count_imports(|| {
+                sign_by_value(&cache, &c, None, MESSAGE).unwrap();
+            }),
+            1
+        );
+        assert!(imported_b.upgrade().is_none());
+        assert!(imported_a.upgrade().is_some());
+
+        // `certificate::sign` calls `crate::crypto::sign(&ca, ...)`, which
+        // reuses the same imported CA key across certificates.
+        let subject = ecdsa_p256();
+        for ca in [rsa_2048(), ecdsa_p384()] {
+            let certify = |serial: u64| {
+                let mut builder = ssh_key::certificate::Builder::new(
+                    [serial as u8; 32],
+                    subject.public_key().key_data().clone(),
+                    0,
+                    u64::MAX,
+                )
+                .unwrap();
+                builder.serial(serial).unwrap();
+                builder.key_id("test").unwrap();
+                builder
+                    .cert_type(ssh_key::certificate::CertType::User)
+                    .unwrap();
+                builder.valid_principal("user").unwrap();
+                crate::keys::certificate::sign(builder, &ca).unwrap()
+            };
+            let first_cert = certify(1);
+            verify_certificate(&first_cert).unwrap();
+            let first_key = last_signed_with();
+            assert!(first_key.upgrade().is_some());
+
+            let imports = count_imports(|| {
+                for serial in 2..=4 {
+                    let cert = certify(serial);
+                    verify_certificate(&cert).unwrap();
+                    assert!(Weak::ptr_eq(&last_signed_with(), &first_key));
+                }
+            });
+            assert_eq!(imports, 0);
         }
     }
 

@@ -77,16 +77,16 @@ pub(crate) static ALGORITHMS: &[(&mac::Name, &(dyn MacAlgorithm + Send + Sync))]
     (&mac::HMAC_SHA512_ETM, &HMAC_SHA512_ETM),
 ];
 
-/// `hmac-sha2-256-etm@openssh.com` first, as in OpenSSH: with SymCrypt it
-/// is 2.0× (x86-64) and 1.7× (arm64) as fast as
-/// `hmac-sha2-512-etm@openssh.com`, which the other backends prefer
+/// Encrypt-then-MAC before plain MAC, and SHA-256 before SHA-512 in both,
+/// as in OpenSSH: with SymCrypt, HMAC-SHA-256 is 2.0× (x86-64) and 1.7×
+/// (arm64) as fast as HMAC-SHA-512, which the other backends prefer
 /// (<https://github.com/cataggar/russh/issues/23>). The MACs are only used
-/// with the AES-CTR ciphers. The rest is the other backends' order.
+/// with the AES-CTR ciphers.
 pub(crate) const DEFAULT_ORDER: &[mac::Name] = &[
     mac::HMAC_SHA256_ETM,
     mac::HMAC_SHA512_ETM,
-    mac::HMAC_SHA512,
     mac::HMAC_SHA256,
+    mac::HMAC_SHA512,
 ];
 
 #[cfg(test)]
@@ -116,8 +116,8 @@ mod tests {
             [
                 mac::HMAC_SHA256_ETM,
                 mac::HMAC_SHA512_ETM,
-                mac::HMAC_SHA512,
                 mac::HMAC_SHA256,
+                mac::HMAC_SHA512,
             ]
         );
         assert!(!MACS.contains_key(&mac::HMAC_SHA1));

@@ -1895,6 +1895,23 @@ mod unusable_keys {
         keys
     }
 
+    /// An encrypted key of an algorithm every backend can sign with, so that it
+    /// is unusable only because it is encrypted.
+    fn encrypted_key() -> PrivateKey {
+        let openssh = include_str!("../tests/data/keys/ecdsa-p384-short-encrypted");
+        let key = PrivateKey::from_openssh(openssh).unwrap();
+        assert!(key.is_encrypted());
+        assert!(keys::supports_signing(&key.algorithm()));
+        key
+    }
+
+    /// Host keys a server can't sign with: [`unusable_keys`] and an encrypted key.
+    fn unusable_host_keys() -> Vec<PrivateKey> {
+        let mut keys = unusable_keys();
+        keys.push(encrypted_key());
+        keys
+    }
+
     /// Accepts every user key and certificate, and records their algorithms.
     #[derive(Clone, Default)]
     struct Server {
@@ -2000,29 +2017,34 @@ mod unusable_keys {
     #[tokio::test]
     async fn server_refuses_host_keys_it_cannot_sign_with() {
         let _ = env_logger::try_init();
-        let unusable = unusable_keys();
+        let unusable = unusable_host_keys();
         let mut configs: Vec<Vec<PrivateKey>> =
             unusable.iter().cloned().map(|key| vec![key]).collect();
         configs.push(unusable);
         for keys in configs {
-            let algorithms: Vec<Algorithm> = keys.iter().map(PrivateKey::algorithm).collect();
+            let expected: Vec<(Algorithm, bool)> = keys
+                .iter()
+                .map(|key| (key.algorithm(), key.is_encrypted()))
+                .collect();
             let (server_stream, mut client_stream) = tokio::io::duplex(1 << 16);
             client_stream.write_all(b"SSH-2.0-test\r\n").await.unwrap();
             let result = server::run_stream(server_config(keys), server_stream, Server::default())
                 .await
                 .map(drop);
             let Err(crate::Error::InvalidConfig(message)) = result else {
-                panic!("{algorithms:?}: {result:?}");
+                panic!("{expected:?}: {result:?}");
             };
             assert!(
                 message.starts_with("the server can't sign with any of its host keys: "),
                 "{message}"
             );
-            for (index, algorithm) in algorithms.iter().enumerate() {
-                assert!(
-                    message.contains(&format!("host key {index} ({algorithm}): ")),
-                    "{message}"
-                );
+            for (index, (algorithm, encrypted)) in expected.iter().enumerate() {
+                let prefix = if *encrypted {
+                    format!("host key {index} ({algorithm}): key is encrypted")
+                } else {
+                    format!("host key {index} ({algorithm}): ")
+                };
+                assert!(message.contains(&prefix), "{message}");
             }
             // Not even the SSH identification string was sent.
             let mut sent = Vec::new();
@@ -2033,7 +2055,7 @@ mod unusable_keys {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let error = server::Server::run_on_socket(
             &mut Server::default(),
-            server_config(unusable_keys()),
+            server_config(unusable_host_keys()),
             &listener,
         )
         .await
@@ -2051,7 +2073,7 @@ mod unusable_keys {
     #[tokio::test]
     async fn server_signs_with_its_usable_host_key() {
         let _ = env_logger::try_init();
-        let mut host_keys = unusable_keys();
+        let mut host_keys = unusable_host_keys();
         host_keys.push(test_keys::key(0));
         let client = Client::default();
         let host_key = client.host_key.clone();
