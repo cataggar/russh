@@ -13,7 +13,7 @@
 //! | Category | File |
 //! |---|---|
 //! | `hash`: SHA-1, SHA-2 | `hash.rs` |
-//! | `kex`: X25519, ECDH P-256/P-384/P-521, ML-KEM-768 hybrid (no finite-field DH) | `kex.rs` |
+//! | `kex`: X25519, ECDH P-256/P-384/P-521, ML-KEM-768 hybrid, finite-field DH Groups 14–18 and DH-GEX SHA-256 (no SHA-1 finite-field DH) | `kex.rs` |
 //! | `sign`: ECDSA P-256/P-384/P-521, RSA SHA-2 host key, certificate and user signatures (no SHA-1 RSA; no Ed25519 without `ed25519-aws-lc`) | `sign.rs` |
 //! | `cipher`: AES-GCM, ChaCha20-Poly1305, AES-CTR | `cipher.rs` |
 //! | `mac`: HMAC-SHA2; HMAC-SHA1 only for hashed `known_hosts` host names | `mac.rs` |
@@ -34,10 +34,10 @@
 //! cfg). The ban check allows `aws-lc-rs` only with
 //! `--allow-aws-lc-ed25519`.
 //!
-//! A primitive SymCrypt lacks is `crate::crypto::Unsupported` (`Dh` in
-//! `kex`: `symcrypt-sys` has no bindings for SymCrypt's finite-field DH),
-//! and the algorithms that need it are left out of `ALGORITHMS`, so they are
-//! neither offered nor accepted.
+//! A primitive SymCrypt lacks is `crate::crypto::Unsupported`, and any
+//! algorithms that need it (or use SHA-1, such as the legacy SHA-1
+//! finite-field DH methods) are left out of `ALGORITHMS`, so they are neither
+//! offered nor accepted.
 //!
 //! # Changing a category
 //!
@@ -183,6 +183,12 @@ mod tests {
                     kex::ECDH_SHA2_NISTP256,
                     kex::ECDH_SHA2_NISTP384,
                     kex::ECDH_SHA2_NISTP521,
+                    kex::DH_GEX_SHA256,
+                    kex::DH_G18_SHA512,
+                    kex::DH_G17_SHA512,
+                    kex::DH_G16_SHA512,
+                    kex::DH_G15_SHA512,
+                    kex::DH_G14_SHA256,
                     kex::EXTENSION_SUPPORT_AS_CLIENT,
                     kex::EXTENSION_SUPPORT_AS_SERVER,
                     kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
@@ -270,6 +276,12 @@ mod tests {
                 kex::MLKEM768X25519_SHA256,
                 kex::CURVE25519,
                 kex::CURVE25519_PRE_RFC_8731,
+                kex::DH_GEX_SHA256,
+                kex::DH_G14_SHA256,
+                kex::DH_G15_SHA512,
+                kex::DH_G16_SHA512,
+                kex::DH_G17_SHA512,
+                kex::DH_G18_SHA512,
                 kex::ECDH_SHA2_NISTP256,
                 kex::ECDH_SHA2_NISTP384,
                 kex::ECDH_SHA2_NISTP521,
