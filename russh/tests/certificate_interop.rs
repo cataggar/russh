@@ -23,11 +23,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::openssh::{self, OpenSsh, STEP_TIMEOUT, Sshd};
-use russh::keys::certificate::{self, Builder, CertType, Field};
+use russh::keys::certificate::{self, Builder, CertType, Field, UserOptions};
 use russh::keys::key::safe_rng;
 use russh::keys::{
     Algorithm, Certificate, EcdsaCurve, HashAlg, PrivateKey, PublicKey, PublicKeyOrCertificate,
-    ssh_key,
+    known_host_ca_keys_path, ssh_key,
 };
 use russh::{Disconnect, Preferred, client};
 use tokio::time::timeout;
@@ -319,8 +319,31 @@ async fn client_validates_host_certificate() {
 
     let trusted = [ca.public_key()];
     let untrusted = untrusted_ca();
+    let known_hosts = root.join("known_hosts");
+    fs::write(
+        &known_hosts,
+        format!(
+            "@cert-authority [localhost]:{},127.0.0.1 {}\n",
+            sshd.addr().port(),
+            ca.public_key().to_openssh().unwrap()
+        ),
+    )
+    .unwrap();
+    let ca_from_known_hosts: Vec<PublicKey> =
+        known_host_ca_keys_path("localhost", sshd.addr().port(), &known_hosts)
+            .unwrap()
+            .into_iter()
+            .map(|(_, k)| k)
+            .collect();
+    assert_eq!(ca_from_known_hosts.len(), 1);
+    assert_eq!(
+        ca_from_known_hosts[0].key_data(),
+        ca.public_key().key_data()
+    );
+    let ca_refs: Vec<&PublicKey> = ca_from_known_hosts.iter().collect();
+
     for (host, trusted_cas, expected) in [
-        ("localhost", &trusted[..], Ok(())),
+        ("localhost", &ca_refs[..], Ok(())),
         ("127.0.0.1", &trusted[..], Ok(())),
         (
             "other.example.com",
@@ -465,6 +488,21 @@ fn ssh_keygen_certificates_validate() {
                 assert_eq!(
                     certificate::check_principal(&user, CertType::User, principal),
                     Ok(()),
+                    "{name}"
+                );
+                assert_eq!(
+                    certificate::validate_user(&user, principal, None, trusted),
+                    Ok(UserOptions {
+                        force_command: None,
+                        source_address: None,
+                        verify_required: false,
+                        permit_x11_forwarding: true,
+                        permit_agent_forwarding: true,
+                        permit_port_forwarding: true,
+                        permit_pty: true,
+                        permit_user_rc: true,
+                        no_touch_required: false,
+                    }),
                     "{name}"
                 );
             }

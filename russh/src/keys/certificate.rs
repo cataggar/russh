@@ -6,11 +6,15 @@
 //! it doesn't work at all. These functions do the same work through the
 //! backend:
 //!
-//! - [`sign`] signs the certificate a [`Builder`] describes with a CA key.
+//! - [`sign`] signs the certificate a [`Builder`] describes with a CA key, or
+//!   [`signing_data`] and [`SigningData::finish`] sign it with an external CA
+//!   key (such as one in an SSH agent).
 //! - [`validate`] and [`validate_at`] check that a certificate is signed by a
 //!   trusted CA and within its validity period.
 //! - [`check_principal`] checks the type of a certificate, and that a user or
 //!   host name is one of its principals.
+//! - [`UserOptions`] and [`validate_user`] parse and check the critical
+//!   options and extensions of a user certificate.
 //! - [`validate_host`] does all of that for the host certificate a server
 //!   presents to a client.
 //!
@@ -32,7 +36,8 @@
 //! | [`ValidBefore`](Field::ValidBefore) | has expired. |
 //! | [`Type`](Field::Type) | is a user certificate where a host certificate is expected, or the reverse. |
 //! | [`ValidPrincipals`](Field::ValidPrincipals) | isn't valid for the user or host name. |
-//! | [`CriticalOptions`](Field::CriticalOptions) | is a host certificate with critical options. |
+//! | [`CriticalOptions`](Field::CriticalOptions) | is a host certificate with critical options, or a user certificate with an unknown, malformed or unsatisfied critical option. |
+//! | [`Extensions`](Field::Extensions) | has a known flag extension with a non-empty value. |
 //!
 //! [`ssh_key::Error::AlgorithmUnsupported`] means that the backend can't sign
 //! or verify with the CA's algorithm, or that the CA signature uses SHA-1
@@ -77,6 +82,71 @@ pub use ssh_key::certificate::{Builder, CertType, Field};
 use ssh_key::public::KeyData;
 use ssh_key::{Algorithm, Certificate, HashAlg, PrivateKey, PublicKey, Signature};
 
+/// The encoded body of a certificate waiting for its CA [`Signature`], from
+/// [`signing_data`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SigningData {
+    encoded: Vec<u8>,
+}
+
+impl SigningData {
+    /// The bytes to sign with the CA key.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.encoded
+    }
+
+    /// Appends the CA's `signature` and verifies the resulting certificate
+    /// through the crypto backend.
+    ///
+    /// # Errors
+    ///
+    /// - [`Field::Signature`] if `signature` does not match the CA key or the
+    ///   certificate data.
+    /// - [`ssh_key::Error::AlgorithmUnsupported`] if the backend cannot verify
+    ///   with the CA's algorithm, or if `signature` uses SHA-1 (`ssh-rsa` or
+    ///   `ssh-dss`).
+    pub fn finish(mut self, signature: Signature) -> ssh_key::Result<Certificate> {
+        signature.encode_prefixed(&mut self.encoded)?;
+        let certificate = Certificate::from_bytes(&self.encoded)?;
+        verify_signature(&certificate)?;
+        Ok(certificate)
+    }
+}
+
+impl AsRef<[u8]> for SigningData {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+/// Encodes the certificate that `builder` describes for signing with `ca` by
+/// an external signer, such as an SSH agent
+/// ([`AgentClient::sign_request_signature`](crate::keys::agent::client::AgentClient::sign_request_signature)).
+///
+/// Sign [`SigningData::as_bytes`] with the CA key (for an RSA CA key, use
+/// `Some(HashAlg::Sha512)` or `Some(HashAlg::Sha256)`), then pass the
+/// [`Signature`] to [`SigningData::finish`]. When you hold the CA's
+/// [`PrivateKey`] in memory, call [`sign`] instead.
+///
+/// The builder's comment is not kept: set it with
+/// [`Certificate::set_comment`].
+///
+/// # Errors
+///
+/// - The errors of [`Builder::sign`] for invalid fields, e.g.
+///   [`Field::ValidPrincipals`] when no principal is set.
+/// - [`ssh_key::Error::AlgorithmUnsupported`] for a DSA CA key: [`validate`]
+///   and OpenSSH refuse its SHA-1 signatures.
+pub fn signing_data(builder: Builder, ca: &PublicKey) -> ssh_key::Result<SigningData> {
+    let algorithm = ca.algorithm();
+    if algorithm == Algorithm::Dsa {
+        return Err(ssh_key::Error::AlgorithmUnsupported { algorithm });
+    }
+    let encoded = signed_data(builder, ca.key_data())?;
+    Ok(SigningData { encoded })
+}
+
 /// Signs the certificate that `builder` describes with the private key of
 /// the CA, through the crypto backend.
 ///
@@ -98,14 +168,11 @@ pub fn sign(builder: Builder, ca: &PrivateKey) -> ssh_key::Result<Certificate> {
         Algorithm::Rsa { .. } => Some(HashAlg::Sha512),
         _ => None,
     };
-    let mut encoded = signed_data(builder, ca.public_key().key_data())?;
-    let signature = crate::crypto::sign(ca, hash_alg, &encoded)?;
-    signature.encode_prefixed(&mut encoded)?;
-    let certificate = Certificate::from_bytes(&encoded)?;
+    let data = signing_data(builder, ca.public_key())?;
+    let signature = crate::crypto::sign(ca, hash_alg, data.as_bytes())?;
     // A faulty signature can leak the private key (e.g. an RSA-CRT fault):
     // never hand one out.
-    crate::crypto::verify_certificate(&certificate).map_err(|_| ssh_key::Error::Crypto)?;
-    Ok(certificate)
+    data.finish(signature).map_err(|_| ssh_key::Error::Crypto)
 }
 
 /// Checks that `certificate` is signed by one of the `trusted_cas` and valid
@@ -210,6 +277,176 @@ pub fn check_principal(
     } else {
         Err(Field::ValidPrincipals.invalid_error())
     }
+}
+
+/// The critical options and extensions of a user [`Certificate`], as OpenSSH
+/// defines them (`PROTOCOL.certkeys`).
+///
+/// Returned by [`validate_user`] and [`UserOptions::from_certificate`].
+///
+/// In OpenSSH user certificates, the `permit-*` extensions default to `false`
+/// when absent from the certificate (`ssh-keygen -s` includes all five by
+/// default). A server handler that enforces certificate options should check
+/// these fields alongside [`force_command`](Self::force_command) and
+/// [`verify_required`](Self::verify_required).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UserOptions<'a> {
+    /// A command to run instead of whatever command or shell the client asks
+    /// for (`force-command` critical option).
+    pub force_command: Option<&'a str>,
+    /// The comma-separated list of source IPv4/IPv6 addresses or CIDR prefixes
+    /// from which the certificate is accepted (`source-address` critical
+    /// option). [`validate_user`] and [`Self::check_source_address`] check a
+    /// client IP address against it.
+    pub source_address: Option<&'a str>,
+    /// Whether the user's signature must assert user presence on a FIDO
+    /// authenticator (`verify-required` critical option).
+    pub verify_required: bool,
+    /// Whether X11 forwarding is permitted (`permit-X11-forwarding` extension).
+    pub permit_x11_forwarding: bool,
+    /// Whether agent forwarding is permitted (`permit-agent-forwarding`
+    /// extension).
+    pub permit_agent_forwarding: bool,
+    /// Whether port forwarding is permitted (`permit-port-forwarding`
+    /// extension).
+    pub permit_port_forwarding: bool,
+    /// Whether PTY allocation is permitted (`permit-pty` extension).
+    pub permit_pty: bool,
+    /// Whether running `~/.ssh/rc` is permitted (`permit-user-rc` extension).
+    pub permit_user_rc: bool,
+    /// Whether signatures made with this certificate need not assert user
+    /// presence (`no-touch-required` extension).
+    pub no_touch_required: bool,
+}
+
+impl<'a> UserOptions<'a> {
+    /// Parses the critical options and extensions of `certificate`.
+    ///
+    /// Critical options other than `force-command`, `source-address` and
+    /// `verify-required` are refused (`PROTOCOL.certkeys` /
+    /// `draft-miller-ssh-cert` §2.4). `source-address` is checked to be a
+    /// valid comma-separated list of IPv4/IPv6 addresses or CIDR prefixes with
+    /// zero host bits. Unknown extensions are ignored, while known flag
+    /// extensions (`permit-*`, `no-touch-required`) must have empty values.
+    ///
+    /// # Errors
+    ///
+    /// - [`Field::CriticalOptions`] for an unknown or malformed critical
+    ///   option.
+    /// - [`Field::Extensions`] if a known flag extension has a non-empty
+    ///   value.
+    pub fn from_certificate(certificate: &'a Certificate) -> ssh_key::Result<Self> {
+        let mut force_command = None;
+        let mut source_address = None;
+        let mut verify_required = false;
+
+        for (name, value) in certificate.critical_options().iter() {
+            match name.as_str() {
+                "force-command" => force_command = Some(value.as_str()),
+                "source-address" => {
+                    check_source_address_list(value, None)?;
+                    source_address = Some(value.as_str());
+                }
+                "verify-required" if value.is_empty() => verify_required = true,
+                _ => return Err(Field::CriticalOptions.invalid_error()),
+            }
+        }
+
+        let mut permit_x11_forwarding = false;
+        let mut permit_agent_forwarding = false;
+        let mut permit_port_forwarding = false;
+        let mut permit_pty = false;
+        let mut permit_user_rc = false;
+        let mut no_touch_required = false;
+
+        for (name, value) in certificate.extensions().iter() {
+            let flag = match name.as_str() {
+                "permit-X11-forwarding" => &mut permit_x11_forwarding,
+                "permit-agent-forwarding" => &mut permit_agent_forwarding,
+                "permit-port-forwarding" => &mut permit_port_forwarding,
+                "permit-pty" => &mut permit_pty,
+                "permit-user-rc" => &mut permit_user_rc,
+                "no-touch-required" => &mut no_touch_required,
+                _ => continue,
+            };
+            if !value.is_empty() {
+                return Err(Field::Extensions.invalid_error());
+            }
+            *flag = true;
+        }
+
+        Ok(Self {
+            force_command,
+            source_address,
+            verify_required,
+            permit_x11_forwarding,
+            permit_agent_forwarding,
+            permit_port_forwarding,
+            permit_pty,
+            permit_user_rc,
+            no_touch_required,
+        })
+    }
+
+    /// Checks that `client_ip` is allowed by [`Self::source_address`], if
+    /// present.
+    ///
+    /// # Errors
+    ///
+    /// [`Field::CriticalOptions`] if [`Self::source_address`] is set and
+    /// `client_ip` does not match any of its entries.
+    pub fn check_source_address(&self, client_ip: IpAddr) -> ssh_key::Result<()> {
+        match self.source_address {
+            Some(list) => check_source_address_list(list, Some(client_ip)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Checks a user certificate the way `sshd` does: [`validate`] it, check that
+/// it is a user certificate for `username` ([`check_principal`]), parse its
+/// critical options and extensions ([`UserOptions::from_certificate`]), and
+/// check `client_ip` against `source-address` if that critical option is
+/// present.
+///
+/// Pass `None` for `client_ip` when the transport has no IP address (e.g. a
+/// Unix domain socket); a certificate with a `source-address` critical option
+/// is then refused with [`Field::CriticalOptions`].
+///
+/// # Errors
+///
+/// Those of [`validate`], then [`check_principal`], then
+/// [`UserOptions::from_certificate`] and [`UserOptions::check_source_address`].
+pub fn validate_user<'a, 'b, I>(
+    certificate: &'a Certificate,
+    username: &str,
+    client_ip: Option<IpAddr>,
+    trusted_cas: I,
+) -> ssh_key::Result<UserOptions<'a>>
+where
+    I: IntoIterator<Item = &'b PublicKey>,
+{
+    validate_user_at(certificate, username, client_ip, now()?, trusted_cas)
+}
+
+fn validate_user_at<'a, 'b, I>(
+    certificate: &'a Certificate,
+    username: &str,
+    client_ip: Option<IpAddr>,
+    unix_timestamp: u64,
+    trusted_cas: I,
+) -> ssh_key::Result<UserOptions<'a>>
+where
+    I: IntoIterator<Item = &'b PublicKey>,
+{
+    validate_at(certificate, unix_timestamp, trusted_cas)?;
+    check_principal(certificate, CertType::User, username)?;
+    let options = UserOptions::from_certificate(certificate)?;
+    if options.source_address.is_some() {
+        let ip = client_ip.ok_or_else(|| Field::CriticalOptions.invalid_error())?;
+        options.check_source_address(ip)?;
+    }
+    Ok(options)
 }
 
 /// Checks a host certificate the way `ssh` does: [`validate`] it, then check
@@ -367,9 +604,89 @@ fn canonical_host(host: &str) -> String {
     }
 }
 
+fn parse_cidr(entry: &str) -> Option<(IpAddr, u8)> {
+    match entry.split_once('/') {
+        Some((addr, prefix)) => {
+            let addr = addr.parse::<IpAddr>().ok()?;
+            if prefix.is_empty()
+                || (prefix.len() > 1 && prefix.starts_with('0'))
+                || !prefix.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            let len = prefix.parse::<u8>().ok()?;
+            Some((addr, len))
+        }
+        None => {
+            let addr = entry.parse::<IpAddr>().ok()?;
+            let len = match addr {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            Some((addr, len))
+        }
+    }
+}
+
+/// Validates one `source-address` CIDR entry (`addr` or `addr/len` with zero
+/// host bits, like OpenSSH's `addr_pton_cidr`), and returns whether
+/// `client_ip` falls within it.
+fn cidr_contains(entry: &str, client_ip: Option<IpAddr>) -> Option<bool> {
+    let (net, len) = parse_cidr(entry)?;
+    match net {
+        IpAddr::V4(net) => {
+            if len > 32 {
+                return None;
+            }
+            let mask = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+            let net_bits = u32::from(net);
+            if (net_bits & !mask) != 0 {
+                return None;
+            }
+            Some(matches!(
+                client_ip,
+                Some(IpAddr::V4(ip)) if (u32::from(ip) & mask) == net_bits
+            ))
+        }
+        IpAddr::V6(net) => {
+            if len > 128 {
+                return None;
+            }
+            let mask = if len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - len)
+            };
+            let net_bits = u128::from(net);
+            if (net_bits & !mask) != 0 {
+                return None;
+            }
+            Some(matches!(
+                client_ip,
+                Some(IpAddr::V6(ip)) if (u128::from(ip) & mask) == net_bits
+            ))
+        }
+    }
+}
+
+fn check_source_address_list(list: &str, client_ip: Option<IpAddr>) -> ssh_key::Result<()> {
+    let mut matched = false;
+    for entry in list.split(',') {
+        let Some(contains) = cidr_contains(entry, client_ip) else {
+            return Err(Field::CriticalOptions.invalid_error());
+        };
+        matched |= contains;
+    }
+    if client_ip.is_none() || matched {
+        Ok(())
+    } else {
+        Err(Field::CriticalOptions.invalid_error())
+    }
+}
+
 /// Whether `name` matches `pattern`, in which `*` matches any sequence of
 /// bytes and `?` any single byte: OpenSSH's `match_pattern`.
-fn matches_pattern(pattern: &[u8], name: &[u8]) -> bool {
+pub(crate) fn matches_pattern(pattern: &[u8], name: &[u8]) -> bool {
     let (mut p, mut n) = (0, 0);
     // After a `*`: the pattern position after it, and the name position it
     // has matched up to.
@@ -797,5 +1114,172 @@ mod tests {
             validate_host_at(&with_option, host, NOW, trusted),
             Err(Field::CriticalOptions.invalid_error())
         );
+    }
+
+    #[test]
+    fn user_options_and_validate_user() {
+        let ca = key!("ecdsa-p256");
+        let trusted = [ca.public_key()];
+
+        let plain = sign(builder(CertType::User, &["alice"]), &ca).unwrap();
+        let expected_plain = UserOptions {
+            force_command: None,
+            source_address: None,
+            verify_required: false,
+            permit_x11_forwarding: false,
+            permit_agent_forwarding: false,
+            permit_port_forwarding: false,
+            permit_pty: false,
+            permit_user_rc: false,
+            no_touch_required: false,
+        };
+        assert_eq!(
+            validate_user_at(&plain, "alice", None, NOW, trusted),
+            Ok(expected_plain)
+        );
+
+        let mut b = builder(CertType::User, &["alice"]);
+        b.critical_option("force-command", "/bin/true").unwrap();
+        b.critical_option("source-address", "192.0.2.0/24,2001:db8::/32,198.51.100.7")
+            .unwrap();
+        b.critical_option("verify-required", "").unwrap();
+        for ext in [
+            "permit-X11-forwarding",
+            "permit-agent-forwarding",
+            "permit-port-forwarding",
+            "permit-pty",
+            "permit-user-rc",
+            "no-touch-required",
+            "unknown-extension@example.com",
+        ] {
+            b.extension(ext, "").unwrap();
+        }
+        let cert = sign(b, &ca).unwrap();
+        let expected = UserOptions {
+            force_command: Some("/bin/true"),
+            source_address: Some("192.0.2.0/24,2001:db8::/32,198.51.100.7"),
+            verify_required: true,
+            permit_x11_forwarding: true,
+            permit_agent_forwarding: true,
+            permit_port_forwarding: true,
+            permit_pty: true,
+            permit_user_rc: true,
+            no_touch_required: true,
+        };
+
+        for allowed in ["192.0.2.1", "192.0.2.254", "2001:db8:1::1", "198.51.100.7"] {
+            let ip: IpAddr = allowed.parse().unwrap();
+            assert_eq!(
+                validate_user_at(&cert, "alice", Some(ip), NOW, trusted),
+                Ok(expected),
+                "{allowed}"
+            );
+        }
+        for denied in ["192.0.3.1", "2001:db9::1", "198.51.100.8"] {
+            let ip: IpAddr = denied.parse().unwrap();
+            assert_eq!(
+                validate_user_at(&cert, "alice", Some(ip), NOW, trusted),
+                Err(Field::CriticalOptions.invalid_error()),
+                "{denied}"
+            );
+        }
+        assert_eq!(
+            validate_user_at(&cert, "alice", None, NOW, trusted),
+            Err(Field::CriticalOptions.invalid_error())
+        );
+
+        for bad_source in [
+            "",
+            "192.0.2.1/24",
+            "192.0.2.0/33",
+            "192.0.2.0/08",
+            "192.0.2.0/",
+            "192.0.2.1,",
+            ",192.0.2.1",
+            "2001:db8::1/64",
+            "2001:db8::/129",
+            "192.0.2.0/24,not-an-ip",
+        ] {
+            let mut b = builder(CertType::User, &["alice"]);
+            b.critical_option("source-address", bad_source).unwrap();
+            let cert = sign(b, &ca).unwrap();
+            assert_eq!(
+                UserOptions::from_certificate(&cert),
+                Err(Field::CriticalOptions.invalid_error()),
+                "{bad_source:?}"
+            );
+        }
+
+        let mut unknown_crit = builder(CertType::User, &["alice"]);
+        unknown_crit
+            .critical_option("unknown-option", "value")
+            .unwrap();
+        let unknown_crit = sign(unknown_crit, &ca).unwrap();
+        assert_eq!(
+            UserOptions::from_certificate(&unknown_crit),
+            Err(Field::CriticalOptions.invalid_error())
+        );
+
+        let mut bad_verify = builder(CertType::User, &["alice"]);
+        bad_verify
+            .critical_option("verify-required", "yes")
+            .unwrap();
+        let bad_verify = sign(bad_verify, &ca).unwrap();
+        assert_eq!(
+            UserOptions::from_certificate(&bad_verify),
+            Err(Field::CriticalOptions.invalid_error())
+        );
+
+        let mut bad_ext = builder(CertType::User, &["alice"]);
+        bad_ext.extension("permit-pty", "yes").unwrap();
+        let bad_ext = sign(bad_ext, &ca).unwrap();
+        assert_eq!(
+            UserOptions::from_certificate(&bad_ext),
+            Err(Field::Extensions.invalid_error())
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_certificate_via_agent_client() {
+        use std::sync::Arc;
+
+        use crate::keys::agent;
+
+        #[derive(Clone)]
+        struct TestAgent;
+        impl agent::server::Agent for TestAgent {
+            fn confirm(
+                self,
+                _: Arc<PrivateKey>,
+            ) -> Box<dyn futures::Future<Output = (Self, bool)> + Send + Unpin> {
+                Box::new(futures::future::ready((self, true)))
+            }
+        }
+
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let _ = agent::server::serve(tokio_stream::once(Ok(server_stream)), TestAgent).await;
+        });
+        let mut agent = agent::client::AgentClient::connect(client_stream);
+
+        for ca in [key!("ecdsa-p256"), key!("rsa-2048")] {
+            if !can_sign(&ca) {
+                continue;
+            }
+            agent.add_identity(&ca, &[]).await.unwrap();
+            let data = signing_data(builder(CertType::User, &["alice"]), ca.public_key()).unwrap();
+            let signature = agent
+                .sign_request_signature(ca.public_key(), Some(HashAlg::Sha512), data.as_bytes())
+                .await
+                .unwrap();
+            let cert = data.finish(signature).unwrap();
+            assert_eq!(validate_at(&cert, NOW, [ca.public_key()]), Ok(()));
+            assert_eq!(check_principal(&cert, CertType::User, "alice"), Ok(()));
+        }
+
+        let ca = key!("ecdsa-p256");
+        let data = signing_data(builder(CertType::User, &["alice"]), ca.public_key()).unwrap();
+        let bad_sig = Signature::new(Algorithm::Ed25519, vec![0; 64]).unwrap();
+        assert_eq!(data.finish(bad_sig), Err(Field::Signature.invalid_error()));
     }
 }

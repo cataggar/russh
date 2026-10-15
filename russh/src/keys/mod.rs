@@ -98,7 +98,9 @@ pub mod agent;
 pub mod known_hosts;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use known_hosts::{check_known_hosts, check_known_hosts_path};
+pub use known_hosts::{
+    check_known_hosts, check_known_hosts_path, known_host_ca_keys, known_host_ca_keys_path,
+};
 
 pub use crate::cert::PublicKeyOrCertificate;
 
