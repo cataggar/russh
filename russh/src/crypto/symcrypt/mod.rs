@@ -163,7 +163,7 @@ mod tests {
     /// What russh offers by default with this backend, in order: only
     /// algorithms SymCrypt implements, so `supported()` removes nothing.
     /// The ciphers and MACs are the other backends' defaults, but with
-    /// `aes256-gcm@openssh.com` and `hmac-sha2-256-etm@openssh.com` first
+    /// `aes256-gcm@openssh.com` and the SHA-256 MACs first
     /// (see `cipher::DEFAULT_ORDER` and `mac::DEFAULT_ORDER`).
     /// `aes128-gcm@openssh.com` is implemented, but only offered when
     /// configured.
@@ -217,8 +217,8 @@ mod tests {
                 [
                     mac::HMAC_SHA256_ETM,
                     mac::HMAC_SHA512_ETM,
-                    mac::HMAC_SHA512,
                     mac::HMAC_SHA256,
+                    mac::HMAC_SHA512,
                 ]
             );
             assert_eq!(
