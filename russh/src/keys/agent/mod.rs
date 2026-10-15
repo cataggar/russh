@@ -15,13 +15,27 @@ pub enum Constraint {
     KeyLifetime { seconds: u32 },
     /// Signatures need to be confirmed by the agent (for instance using a dialog).
     Confirm,
-    /// Custom constraints
+    /// Custom constraints (`SSH_AGENT_CONSTRAIN_EXTENSION`, `255`).
     ///
-    /// russh sends `name` and `details` each as an SSH string, with a
-    /// `uint32` length prefix. The draft's format for the details is
-    /// `byte[]`, defined by each extension, so this matches extensions
-    /// whose details are a single string, such as OpenSSH's
-    /// `sk-provider@openssh.com` and `restrict-destination-v00@openssh.com`.
+    /// [RFC 9987 §5.2.7.3](https://www.rfc-editor.org/rfc/rfc9987.html#section-5.2.7.3)
+    /// defines this constraint as `string name` followed by `byte[] details`,
+    /// where the encoding of `details` is defined by each extension.
+    ///
+    /// russh encodes both `name` and `details` as SSH `string`s, each prefixed
+    /// with a `uint32` length. This matches extensions whose `byte[] details`
+    /// is a single SSH `string`:
+    ///
+    /// - OpenSSH's `sk-provider@openssh.com` (for `add_identity`), where
+    ///   `details` is the provider path string.
+    /// - OpenSSH's `restrict-destination-v00@openssh.com`, where `details` is
+    ///   the encoded destination-constraint string.
+    ///
+    /// Extensions whose `byte[] details` is not a single outer `string` cannot
+    /// be expressed with this variant — in particular, OpenSSH's
+    /// `associated-certs-v00@openssh.com` (for `add_smartcard_key`), whose
+    /// details are `bool certs_only` followed by `string certificates` (the
+    /// first byte of `details`'s `uint32` length prefix would be read as
+    /// `certs_only`).
     Extensions { name: Vec<u8>, details: Vec<u8> },
 }
 

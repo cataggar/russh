@@ -16,7 +16,7 @@ use {std, tokio};
 
 use super::{Constraint, msg};
 use crate::CryptoVec;
-use crate::helpers::{EncodedExt, sign_with_hash_alg};
+use crate::helpers::sign_with_hash_alg;
 use crate::keys::Error;
 use crate::keys::key::PrivateKeyWithHashAlg;
 
@@ -26,8 +26,14 @@ const MAX_AGENT_FRAME_LEN: usize = 256 * 1024;
 #[allow(clippy::type_complexity)]
 struct KeyStore(Arc<RwLock<HashMap<Vec<u8>, (Arc<PrivateKey>, SystemTime, Vec<Constraint>)>>>);
 
-#[derive(Clone)]
-struct Lock(Arc<RwLock<CryptoVec>>);
+#[derive(Default)]
+struct LockState {
+    passphrase: CryptoVec,
+    failed_unlocks: u32,
+}
+
+#[derive(Clone, Default)]
+struct Lock(Arc<RwLock<LockState>>);
 
 #[allow(missing_docs)]
 #[derive(Debug)]
@@ -67,7 +73,7 @@ where
     A: Agent + Send + Sync + 'static,
 {
     let keys = KeyStore(Arc::new(RwLock::new(HashMap::new())));
-    let lock = Lock(Arc::new(RwLock::new(CryptoVec::new())));
+    let lock = Lock::default();
     while let Some(Ok(stream)) = listener.next().await {
         russh_util::runtime::spawn(
             (Connection {
@@ -130,8 +136,8 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
 
     async fn respond(&mut self, writebuf: &mut Vec<u8>) -> Result<(), Error> {
         let is_locked = {
-            if let Ok(password) = self.lock.0.read() {
-                !password.is_empty()
+            if let Ok(lock) = self.lock.0.read() {
+                !lock.passphrase.is_empty()
             } else {
                 true
             }
@@ -140,16 +146,17 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         let agentref = self.agent.as_ref().ok_or(Error::AgentFailure)?;
 
         match self.buf.split_first() {
-            Some((&11, _))
-                if !is_locked && agentref.confirm_request(MessageType::RequestKeys).await =>
-            {
+            Some((&11, _)) if agentref.confirm_request(MessageType::RequestKeys).await => {
                 // request identities
-                if let Ok(keys) = self.keys.0.read() {
+                if is_locked {
+                    msg::IDENTITIES_ANSWER.encode(writebuf)?;
+                    0u32.encode(writebuf)?;
+                } else if let Ok(keys) = self.keys.0.read() {
                     msg::IDENTITIES_ANSWER.encode(writebuf)?;
                     (keys.len() as u32).encode(writebuf)?;
-                    for (k, _) in keys.iter() {
+                    for (k, (key, _, _)) in keys.iter() {
                         k.encode(writebuf)?;
-                        "".encode(writebuf)?;
+                        key.comment().encode(writebuf)?;
                     }
                 } else {
                     msg::FAILURE.encode(writebuf)?
@@ -160,7 +167,7 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
             {
                 // sign request
                 let agent = self.agent.take().ok_or(Error::AgentFailure)?;
-                let (agent, signed) = self.try_sign(agent, &mut r, writebuf).await?;
+                let (agent, signed) = self.try_sign(agent, &mut r, writebuf).await;
                 self.agent = Some(agent);
                 if signed {
                     return Ok(());
@@ -205,7 +212,7 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
                 if !is_locked && agentref.confirm_request(MessageType::Lock).await =>
             {
                 // lock
-                if let Ok(()) = self.lock(&mut r) {
+                if let Ok(true) = self.lock(&mut r) {
                     writebuf.push(msg::SUCCESS)
                 } else {
                     writebuf.push(msg::FAILURE)
@@ -215,7 +222,7 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
                 if is_locked && agentref.confirm_request(MessageType::Unlock).await =>
             {
                 // unlock
-                if let Ok(true) = self.unlock(&mut r) {
+                if let Ok(true) = self.unlock(&mut r).await {
                     writebuf.push(msg::SUCCESS)
                 } else {
                     writebuf.push(msg::FAILURE)
@@ -240,22 +247,31 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         Ok(())
     }
 
-    fn lock<R: Reader>(&self, r: &mut R) -> Result<(), Error> {
+    fn lock<R: Reader>(&self, r: &mut R) -> Result<bool, Error> {
         let password = Bytes::decode(r)?;
+        if password.is_empty() {
+            return Ok(false);
+        }
         let mut lock = self.lock.0.write().or(Err(Error::AgentFailure))?;
-        lock.extend(&password);
-        Ok(())
+        lock.passphrase.extend(&password);
+        lock.failed_unlocks = 0;
+        Ok(true)
     }
 
-    fn unlock<R: Reader>(&self, r: &mut R) -> Result<bool, Error> {
+    async fn unlock<R: Reader>(&self, r: &mut R) -> Result<bool, Error> {
         let password = Bytes::decode(r)?;
-        let mut lock = self.lock.0.write().or(Err(Error::AgentFailure))?;
-        if bool::from(lock[..].ct_eq(&password)) {
-            lock.clear();
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let delay = {
+            let mut lock = self.lock.0.write().or(Err(Error::AgentFailure))?;
+            if bool::from(lock.passphrase[..].ct_eq(&password)) {
+                lock.passphrase.clear();
+                lock.failed_unlocks = 0;
+                return Ok(true);
+            }
+            lock.failed_unlocks = lock.failed_unlocks.saturating_add(1).min(100);
+            Duration::from_millis(100 * u64::from(lock.failed_unlocks))
+        };
+        sleep(delay).await;
+        Ok(false)
     }
 
     fn remove_identity<R: Reader>(&self, r: &mut R) -> Result<bool, Error> {
@@ -277,11 +293,14 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         writebuf: &mut Vec<u8>,
     ) -> Result<bool, Error> {
         let (blob, key_pair) = {
-            let keypair = crate::keys::format::openssh::decode_keypair(r)?;
-            let private_key = ssh_key::private::PrivateKey::new(keypair, "")?;
-            let _comment = String::decode(r)?;
+            let (blob, keypair) = crate::keys::format::openssh::decode_agent_key(r)?;
+            let comment = String::decode(r)?;
+            let private_key = ssh_key::private::PrivateKey::new(keypair, comment)?;
+            if !crate::crypto::can_sign_with_key_type(&private_key.algorithm()) {
+                return Ok(false);
+            }
 
-            (private_key.public_key().key_data().encoded()?, private_key)
+            (blob, private_key)
         };
 
         let mut c = Vec::new();
@@ -334,23 +353,22 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         Ok(true)
     }
 
-    async fn try_sign<R: Reader>(
-        &self,
-        agent: A,
-        r: &mut R,
-        writebuf: &mut Vec<u8>,
-    ) -> Result<(A, bool), Error> {
+    async fn try_sign<R: Reader>(&self, agent: A, r: &mut R, writebuf: &mut Vec<u8>) -> (A, bool) {
+        let Ok(blob) = Bytes::decode(r) else {
+            return (agent, false);
+        };
         let mut needs_confirm = false;
         let key = {
-            let blob = Bytes::decode(r)?;
-            let k = self.keys.0.read().or(Err(Error::AgentFailure))?;
-            if let Some((key, _, constraints)) = k.get(&blob.to_vec()) {
+            let Ok(k) = self.keys.0.read() else {
+                return (agent, false);
+            };
+            if let Some((key, _, constraints)) = k.get(blob.as_ref()) {
                 if constraints.contains(&Constraint::Confirm) {
                     needs_confirm = true;
                 }
                 key.clone()
             } else {
-                return Ok((agent, false));
+                return (agent, false);
             }
         };
         let agent = if needs_confirm {
@@ -360,14 +378,15 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
             }
             .await;
             if !ok {
-                return Ok((agent, false));
+                return (agent, false);
             }
             agent
         } else {
             agent
         };
-        writebuf.push(msg::SIGN_RESPONSE);
-        let data = Bytes::decode(r)?;
+        let Ok(data) = Bytes::decode(r) else {
+            return (agent, false);
+        };
 
         // Sign RSA with the hash that the flags select, as OpenSSH's agent
         // does (`agent_decode_alg` in ssh-agent.c): SHA-256 if
@@ -385,12 +404,19 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
             None
         };
 
-        sign_with_hash_alg(&PrivateKeyWithHashAlg::new(key, hash_alg), &data)?.encode(writebuf)?;
+        let Ok(signature) = sign_with_hash_alg(&PrivateKeyWithHashAlg::new(key, hash_alg), &data)
+        else {
+            return (agent, false);
+        };
+        writebuf.push(msg::SIGN_RESPONSE);
+        if signature.encode(writebuf).is_err() {
+            return (agent, false);
+        }
 
         let len = writebuf.len();
         BigEndian::write_u32(writebuf, (len - 4) as u32);
 
-        Ok((agent, true))
+        (agent, true)
     }
 }
 
@@ -411,9 +437,7 @@ mod tests {
         runtime.block_on(async {
             let (server, mut client) = tokio::io::duplex(64);
             let connection = Connection {
-                lock: Lock(std::sync::Arc::new(std::sync::RwLock::new(
-                    crate::CryptoVec::new(),
-                ))),
+                lock: Lock::default(),
                 keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
                     std::collections::HashMap::new(),
                 ))),
@@ -453,9 +477,7 @@ mod tests {
         let ecdsa = decode_secret_key(include_str!("../../../tests/data/keys/ecdsa-p256"), None)?;
         let (server, client) = tokio::io::duplex(1 << 16);
         let connection = Connection {
-            lock: Lock(std::sync::Arc::new(std::sync::RwLock::new(
-                crate::CryptoVec::new(),
-            ))),
+            lock: Lock::default(),
             keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashMap::new(),
             ))),
@@ -486,13 +508,19 @@ mod tests {
             crate::crypto::verify(key.public_key().key_data(), data, &signature)?;
         }
 
-        // SymCrypt has no SHA-1 RSA signatures: the request fails.
+        // SymCrypt has no SHA-1 RSA signatures: the request fails with
+        // SSH_AGENT_FAILURE, and the connection stays open for later requests.
         #[cfg(russh_backend = "symcrypt")]
-        assert!(
-            sign_request(&mut stream, rsa.public_key(), data, 0)
-                .await
-                .is_err()
-        );
+        {
+            assert!(
+                sign_request(&mut stream, rsa.public_key(), data, 0)
+                    .await
+                    .is_err()
+            );
+            let signature = sign_request(&mut stream, rsa.public_key(), data, RSA_SHA2_256).await?;
+            assert_eq!(signature.algorithm().as_str(), "rsa-sha2-256");
+            crate::crypto::verify(rsa.public_key().key_data(), data, &signature)?;
+        }
         Ok(())
     }
 
@@ -546,9 +574,7 @@ mod tests {
 
         let (server, client) = tokio::io::duplex(1 << 16);
         let connection = Connection {
-            lock: Lock(std::sync::Arc::new(std::sync::RwLock::new(
-                crate::CryptoVec::new(),
-            ))),
+            lock: Lock::default(),
             keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashMap::new(),
             ))),
@@ -608,9 +634,7 @@ mod tests {
 
         let (server, mut stream) = tokio::io::duplex(1 << 16);
         let connection = Connection {
-            lock: Lock(std::sync::Arc::new(std::sync::RwLock::new(
-                crate::CryptoVec::new(),
-            ))),
+            lock: Lock::default(),
             keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashMap::new(),
             ))),
@@ -676,6 +700,251 @@ mod tests {
             u32::decode(&mut signature)?;
             let signature = ssh_key::Signature::decode(&mut signature)?;
             crate::crypto::verify(key.public_key().key_data(), &data, &signature)?;
+        }
+        Ok(())
+    }
+
+    /// A failed sign request (for an unknown key or a malformed request)
+    /// answers `SSH_AGENT_FAILURE` without dropping the connection, and
+    /// `add_identity` refuses keys that the backend cannot sign with.
+    #[tokio::test]
+    async fn failed_sign_and_unsupported_key_do_not_close_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::AsyncReadExt;
+
+        use super::msg;
+        use crate::keys::agent::client::AgentClient;
+        use crate::keys::generate_secret_key;
+
+        let (server, mut stream) = tokio::io::duplex(1 << 16);
+        let connection = Connection {
+            lock: Lock::default(),
+            keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ))),
+            agent: Some(()),
+            s: server,
+            buf: Vec::new(),
+        };
+        tokio::spawn(async move { connection.run().await });
+
+        // Truncated SIGN_REQUEST body answers SSH_AGENT_FAILURE instead of
+        // closing the connection.
+        stream.write_all(&[0, 0, 0, 1, msg::SIGN_REQUEST]).await?;
+        let mut reply = [0u8; 5];
+        stream.read_exact(&mut reply).await?;
+        assert_eq!(reply, [0, 0, 0, 1, msg::FAILURE]);
+
+        let mut client = AgentClient::connect(stream);
+        let key = generate_secret_key()?;
+        // Unknown key answers SSH_AGENT_FAILURE.
+        assert!(matches!(
+            client
+                .sign_request_signature(key.public_key(), None, b"data")
+                .await,
+            Err(Error::AgentFailure)
+        ));
+
+        // Keys that the backend cannot sign with are refused on add.
+        #[cfg(not(feature = "dsa"))]
+        {
+            use ssh_key::Mpint;
+            use ssh_key::private::{DsaKeypair, DsaPrivateKey, KeypairData};
+            use ssh_key::public::DsaPublicKey;
+
+            let dsa_pub = DsaPublicKey::new(
+                Mpint::from_positive_bytes(&[3]),
+                Mpint::from_positive_bytes(&[2]),
+                Mpint::from_positive_bytes(&[2]),
+                Mpint::from_positive_bytes(&[2]),
+            )?;
+            let dsa_priv = DsaPrivateKey::new(Mpint::from_positive_bytes(&[1]))?;
+            let dsa = ssh_key::PrivateKey::new(
+                KeypairData::Dsa(DsaKeypair::new(dsa_pub, dsa_priv)?),
+                "",
+            )?;
+            assert!(matches!(
+                client.add_identity(&dsa, &[]).await,
+                Err(Error::AgentFailure)
+            ));
+            assert!(client.request_identities().await?.is_empty());
+        }
+        #[cfg(all(russh_backend = "symcrypt", not(russh_ed25519_aws_lc)))]
+        {
+            let ed25519 = crate::keys::decode_secret_key(
+                include_str!("../../../tests/data/keys/ed25519"),
+                None,
+            )?;
+            assert!(matches!(
+                client.add_identity(&ed25519, &[]).await,
+                Err(Error::AgentFailure)
+            ));
+            assert!(client.request_identities().await?.is_empty());
+        }
+        #[cfg(all(not(russh_backend = "symcrypt"), not(feature = "rsa")))]
+        {
+            let rsa = crate::keys::decode_secret_key(
+                include_str!("../../../tests/data/keys/rsa-2048"),
+                None,
+            )?;
+            assert!(matches!(
+                client.add_identity(&rsa, &[]).await,
+                Err(Error::AgentFailure)
+            ));
+            assert!(client.request_identities().await?.is_empty());
+        }
+
+        // The connection still works for a supported key.
+        client.add_identity(&key, &[]).await?;
+        let sig = client
+            .sign_request_signature(key.public_key(), None, b"data")
+            .await?;
+        crate::crypto::verify(key.public_key().key_data(), b"data", &sig)?;
+        Ok(())
+    }
+
+    /// Failed unlock attempts wait 0.1 s more after each failure, and a
+    /// successful unlock resets the counter.
+    #[tokio::test]
+    async fn failed_unlock_delays_increase_and_reset_on_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::{Duration, Instant};
+
+        use crate::keys::agent::client::AgentClient;
+
+        let lock = Lock::default();
+        let (server, client) = tokio::io::duplex(1 << 16);
+        let connection = Connection {
+            lock: lock.clone(),
+            keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ))),
+            agent: Some(()),
+            s: server,
+            buf: Vec::new(),
+        };
+        tokio::spawn(async move { connection.run().await });
+        let mut client = AgentClient::connect(client);
+
+        client.lock(b"secret").await?;
+        for attempt in 1..=2u32 {
+            let start = Instant::now();
+            assert!(matches!(
+                client.unlock(b"wrong").await,
+                Err(Error::AgentFailure)
+            ));
+            assert!(
+                start.elapsed() >= Duration::from_millis(90 * u64::from(attempt)),
+                "attempt {attempt}: {:?}",
+                start.elapsed()
+            );
+            assert_eq!(lock.0.read().unwrap().failed_unlocks, attempt);
+        }
+
+        client.unlock(b"secret").await?;
+        assert_eq!(lock.0.read().unwrap().failed_unlocks, 0);
+
+        client.lock(b"secret").await?;
+        assert!(matches!(
+            client.unlock(b"wrong").await,
+            Err(Error::AgentFailure)
+        ));
+        assert_eq!(lock.0.read().unwrap().failed_unlocks, 1);
+        Ok(())
+    }
+
+    /// Certificates added to the agent (including short ECDSA scalars and RSA
+    /// certificates) are listed with their comments and sign requests.
+    #[tokio::test]
+    async fn holds_and_signs_with_certificates() -> Result<(), Box<dyn std::error::Error>> {
+        use ssh_encoding::Decode;
+        use ssh_key::certificate::{Builder, CertType};
+
+        use crate::keys::agent::AgentIdentity;
+        use crate::keys::agent::client::AgentClient;
+        use crate::keys::key::safe_rng;
+        use crate::keys::{certificate, decode_secret_key, generate_secret_key};
+
+        let (server, client) = tokio::io::duplex(1 << 16);
+        let connection = Connection {
+            lock: Lock::default(),
+            keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ))),
+            agent: Some(()),
+            s: server,
+            buf: Vec::new(),
+        };
+        tokio::spawn(async move { connection.run().await });
+        let mut client = AgentClient::connect(client);
+
+        let ca = generate_secret_key()?;
+        #[allow(unused_mut)]
+        let mut cases = vec![
+            (
+                decode_secret_key(include_str!("../../../tests/data/keys/ecdsa-p256"), None)?,
+                None,
+                "ecdsa-cert-comment",
+            ),
+            (
+                decode_secret_key(
+                    include_str!("../../../tests/data/keys/ecdsa-p256-short"),
+                    None,
+                )?,
+                None,
+                "short-ecdsa-cert-comment",
+            ),
+        ];
+        #[cfg(any(not(russh_backend = "symcrypt"), russh_ed25519_aws_lc))]
+        cases.push((
+            decode_secret_key(include_str!("../../../tests/data/keys/ed25519"), None)?,
+            None,
+            "ed25519-cert-comment",
+        ));
+        #[cfg(any(feature = "rsa", russh_backend = "symcrypt"))]
+        cases.push((
+            decode_secret_key(include_str!("../../../tests/data/keys/rsa-2048"), None)?,
+            Some(crate::keys::HashAlg::Sha512),
+            "rsa-cert-comment",
+        ));
+
+        for (mut key, hash_alg, comment) in cases {
+            key.set_comment(comment);
+            let mut builder =
+                Builder::new_with_random_nonce(&mut safe_rng(), key.public_key(), 0, u64::MAX - 1)?;
+            builder.cert_type(CertType::User)?;
+            builder.key_id(comment)?;
+            builder.valid_principal("alice")?;
+            let cert = certificate::sign(builder, &ca)?;
+
+            // Mismatched key and certificate are rejected.
+            assert!(matches!(
+                client.add_certificate(&cert, &ca, &[]).await,
+                Err(Error::KeyIsCorrupt)
+            ));
+
+            client.add_certificate(&cert, &key, &[]).await?;
+            let identities = client.request_identities().await?;
+            assert_eq!(identities.len(), 1);
+            assert_eq!(identities[0].comment(), comment);
+            let AgentIdentity::Certificate {
+                ref certificate, ..
+            } = identities[0]
+            else {
+                return Err("expected certificate identity".into());
+            };
+            assert_eq!(certificate.to_bytes()?, cert.to_bytes()?);
+
+            let data = b"signed with certificate".to_vec();
+            let signed = client
+                .sign_request(&identities[0], hash_alg, data.clone())
+                .await?;
+            let mut signature = signed.strip_prefix(&data[..]).ok_or("no data")?;
+            u32::decode(&mut signature)?;
+            let signature = ssh_key::Signature::decode(&mut signature)?;
+            crate::crypto::verify(cert.public_key(), &data, &signature)?;
+
+            client.remove_all_identities().await?;
         }
         Ok(())
     }

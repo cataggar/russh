@@ -992,7 +992,8 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
             .await
         });
 
-        let key = decode_secret_key(ED25519_KEY, Some("blabla")).unwrap();
+        let key =
+            decode_secret_key(include_str!("../../tests/data/keys/ecdsa-p256"), None).unwrap();
         let stream = tokio::net::UnixStream::connect(&agent_path).await.unwrap();
         let mut client = agent::client::AgentClient::connect(stream);
         let lifetime = || agent::Constraint::KeyLifetime { seconds: 60 };
