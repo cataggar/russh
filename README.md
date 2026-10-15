@@ -58,7 +58,7 @@ This backend is for deployments that must do their cryptography in SymCrypt and 
 
 - SymCrypt does all of the SSH protocol's cryptography: key exchange, exchange hashes and key derivation, ciphers, MACs, and the signatures of host keys, user keys and certificates. It also provides the randomness: packet padding, KEXINIT cookies and ephemeral keys.
 - Only algorithms that this backend implements are negotiated. Russh removes the others from `Preferred`, so they are neither advertised nor accepted.
-- Dependencies: the dependency graph has no `ring`, `aws-lc-rs`, `rand`, `getrandom` or RustCrypto primitive crates (such as `aes`, `ctr`, `cbc`, `hmac`, `sha1`, `p256`, `curve25519-dalek`, `ed25519-dalek`, `rsa`, `ml-kem` or `bcrypt-pbkdf`), which CI enforces with a `cargo tree` ban check (`ci/symcrypt-ban-check.sh`). The one exception is `sha2`, which `ssh-key` always depends on to compute key fingerprints; russh doesn't use it for protocol cryptography. Helpers outside the SSH transport use SymCrypt too, such as matching hashed `known_hosts` entries (HMAC-SHA1).
+- Dependencies: the dependency graph has no `ring`, `aws-lc-rs`, `rand`, `getrandom` or RustCrypto primitive crates (such as `aes`, `ctr`, `cbc`, `hmac`, `sha1`, `sha2`, `p256`, `curve25519-dalek`, `ed25519-dalek`, `rsa`, `ml-kem` or `bcrypt-pbkdf`), which CI enforces with a `cargo tree` ban check (`ci/symcrypt-ban-check.sh`). Helpers outside the SSH transport use SymCrypt too, such as matching hashed `known_hosts` entries (HMAC-SHA1).
 
 Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to this backend, only RustCrypto crates.
 
@@ -69,6 +69,18 @@ russh = { git = "https://github.com/cataggar/russh", default-features = false, f
 ```
 
 With it, [aws-lc-rs](https://github.com/aws/aws-lc-rs) signs with Ed25519 keys, verifies `ssh-ed25519` signatures (host keys, user keys and certificate CAs), and computes Ed25519 public keys, to generate keys and to load PKCS#8 v1 keys. SymCrypt still does everything else, including the randomness of new Ed25519 keys. `ssh-ed25519` is the last host key and user key algorithm in `Preferred::default()`, so a peer that supports any other algorithm of this backend uses that one. It adds `aws-lc-rs` and `aws-lc-sys` to the dependency graph, and no RustCrypto crates: CI checks this with `ci/symcrypt-ban-check.sh --allow-aws-lc-ed25519`. [#62](https://github.com/cataggar/russh/issues/62) tracks moving Ed25519 to SymCrypt if it ever implements EdDSA.
+
+**`ssh-key` without `sha2`.** Russh uses a [fork of `ssh-key`](https://github.com/cataggar/RustCrypto-SSH) in which `sha2` is a feature, and enables that feature only with the `aws-lc-rs` and `ring` backends. With only `symcrypt`, the `ssh_key` APIs that need `sha2` are therefore missing, including through the `russh::keys` re-exports:
+
+- Key fingerprints: `fingerprint()`, `Fingerprint::new` and the `DotSsh` lookups by fingerprint. The `Fingerprint` type itself remains.
+- Hashing with `sha2`: `HashAlg::digest`, `SshSig::sign`, `SshSig::signed_data` and the `sha2` re-export. `SshSig::sign_prehash` and `signed_data_for_prehash` remain, for hashes computed with SymCrypt.
+- `Certificate::validate` and `validate_at`, `PrivateKey::sign` and `PublicKey::verify`. With this backend, these could only fail anyway: `ssh-key` makes and verifies signatures with RustCrypto crates, which this backend leaves out. `russh::keys::certificate::validate` checks certificates with SymCrypt.
+
+If you need them, for example for fingerprints, add `ssh-key` with its `sha2` feature to your dependencies; this brings `sha2` back. Copy the `git` and `rev` from russh's workspace `Cargo.toml`: from another source, Cargo would build a second `ssh-key`, and russh's would still lack the feature.
+
+```toml
+ssh-key = { git = "https://github.com/cataggar/RustCrypto-SSH", rev = "6a7e2a86860054a961a379ca6656373ef9b057a3", default-features = false, features = ["sha2"] }
+```
 
 **Requirements.** The `symcrypt` crate links the native SymCrypt library dynamically, so the library must be present both when you build and when you run your program. It needs SymCrypt 103.8.0 or newer, and supports Windows, Ubuntu and Azure Linux 3, on x86-64 and ARM64. Russh's CI tests this backend on Ubuntu 24.04 (x86-64 and ARM64) and Windows (x86-64). The `symcrypt` crate's [install guide](https://github.com/microsoft/rust-symcrypt/blob/7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb/rust-symcrypt/INSTALL.md) has the details.
 

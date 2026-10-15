@@ -57,14 +57,12 @@ banned=(
 )
 
 # A banned crate is allowed if all its direct dependents are listed here.
-#   sha2: ssh-key computes key fingerprints with it, whatever its features.
 #   aws-lc-rs, aws-lc-sys: Ed25519, with --allow-aws-lc-ed25519 only.
 #   getrandom: with --allow-aws-lc-ed25519 only, from `jobserver`, which `cc`
 #     uses to build aws-lc-sys. jobserver depends on it on Windows hosts only,
 #     to name its semaphore; it runs in the build script, not in russh.
 allowed_dependents() {
     case "$1" in
-    sha2) echo "ssh-key ssh-encoding" ;;
     aws-lc-rs) [ "$allow_aws_lc_ed25519" -eq 0 ] || echo "russh" ;;
     aws-lc-sys) [ "$allow_aws_lc_ed25519" -eq 0 ] || echo "aws-lc-rs" ;;
     getrandom) [ "$allow_aws_lc_ed25519" -eq 0 ] || echo "jobserver" ;;

@@ -27,8 +27,9 @@ rsa = ["dep:rsa", "dep:pkcs1", "ssh-key/rsa"]
 serde = ["ssh-key/serde"]
 # Alternative crypto backend; links the native SymCrypt library (see the
 # `symcrypt-sys` crate for how it is found, e.g. `SYMCRYPT_LIB_PATH`).
-# It does not enable `_rustcrypto`: `ci/symcrypt-ban-check.sh` checks that
-# this backend alone pulls in no other crypto implementation.
+# It does not enable `_rustcrypto`, nor therefore `ssh-key/sha2` (README.md
+# lists the ssh-key APIs that need it): `ci/symcrypt-ban-check.sh` checks
+# that this backend alone pulls in no other crypto implementation.
 symcrypt = ["dep:symcrypt", "dep:symcrypt-sys", "dep:pkcs1", "pkcs1/alloc"]
 # With the `symcrypt` backend: `ssh-ed25519` signatures and Ed25519 keys from
 # `aws-lc-rs`, since SymCrypt has no EdDSA; everything else stays in SymCrypt.
@@ -39,7 +40,8 @@ ed25519-aws-lc = ["dep:aws-lc-rs"]
 # Private, enabled by the `aws-lc-rs` and `ring` backends: the pure-Rust
 # crypto they use for every category but their AEADs (src/crypto/rustcrypto),
 # `rand`, and the RustCrypto-based features of `pkcs8` and `ssh-key` (key
-# generation and checks, encrypted and PPK keys).
+# generation and checks, encrypted and PPK keys, and with `sha2`, key
+# fingerprints).
 _rustcrypto = [
   "dep:aes",
   "dep:block-padding",
@@ -82,6 +84,7 @@ _rustcrypto = [
   "ssh-key/p521",
   "ssh-key/ppk",
   "ssh-key/sha1",
+  "ssh-key/sha2",
 ]
 _bench = ["dep:criterion"]
 
@@ -188,6 +191,9 @@ rand.workspace = true
 shell-escape = "0.1"
 ratatui = "0.30"
 tempfile = "3.14.0"
+# Key fingerprints in the tests, whatever the backend. The ban check leaves
+# dev-dependencies out, so `sha2` stays out of what `symcrypt` ships.
+ssh-key = { workspace = true, features = ["sha2"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 russh-sftp = "2.3.0"

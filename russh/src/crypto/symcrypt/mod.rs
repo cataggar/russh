@@ -23,8 +23,10 @@
 //! Nothing comes from the `crypto::rustcrypto` code of the `aws_lc` and
 //! `ring` backends, which is not even compiled: its crates and `rand` come
 //! with the private `_rustcrypto` feature, which `symcrypt` does not enable.
+//! `_rustcrypto` also enables `ssh-key`'s `sha2` feature (README.md lists the
+//! `ssh_key` APIs that need it), so `ssh-key` doesn't depend on `sha2` either.
 //! `ci/symcrypt-ban-check.sh` checks that no other crypto implementation is
-//! in the dependency graph (`sha2` is, for ssh-key's key fingerprints only).
+//! in the dependency graph.
 //!
 //! The one exception is opt-in: SymCrypt has no EdDSA, so the
 //! `ed25519-aws-lc` feature takes Ed25519 signatures and keys from
