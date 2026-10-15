@@ -152,6 +152,27 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         }
     }
 
+    fn encode_constraints(&mut self, constraints: &[Constraint]) -> Result<(), Error> {
+        for cons in constraints {
+            match *cons {
+                Constraint::KeyLifetime { seconds } => {
+                    msg::CONSTRAIN_LIFETIME.encode(&mut self.buf)?;
+                    seconds.encode(&mut self.buf)?;
+                }
+                Constraint::Confirm => self.buf.push(msg::CONSTRAIN_CONFIRM),
+                Constraint::Extensions {
+                    ref name,
+                    ref details,
+                } => {
+                    msg::CONSTRAIN_EXTENSION.encode(&mut self.buf)?;
+                    name.encode(&mut self.buf)?;
+                    details.encode(&mut self.buf)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Send a key to the agent, with a (possibly empty) slice of
     /// constraints to apply when using the key to sign.
     pub async fn add_identity(
@@ -170,27 +191,72 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         }
 
         key.key_data().encode(&mut self.buf)?;
-        "".encode(&mut self.buf)?; // comment field
+        key.comment().encode(&mut self.buf)?;
+        self.encode_constraints(constraints)?;
 
-        if !constraints.is_empty() {
-            for cons in constraints {
-                match *cons {
-                    Constraint::KeyLifetime { seconds } => {
-                        msg::CONSTRAIN_LIFETIME.encode(&mut self.buf)?;
-                        seconds.encode(&mut self.buf)?;
-                    }
-                    Constraint::Confirm => self.buf.push(msg::CONSTRAIN_CONFIRM),
-                    Constraint::Extensions {
-                        ref name,
-                        ref details,
-                    } => {
-                        msg::CONSTRAIN_EXTENSION.encode(&mut self.buf)?;
-                        name.encode(&mut self.buf)?;
-                        details.encode(&mut self.buf)?;
-                    }
+        let len = self.buf.len() - 4;
+        BigEndian::write_u32(&mut self.buf[..], len as u32);
+
+        self.read_success().await?;
+        Ok(())
+    }
+
+    /// Send a certificate and its matching private key to the agent, with a
+    /// (possibly empty) slice of constraints to apply when using the
+    /// certificate to sign.
+    pub async fn add_certificate(
+        &mut self,
+        cert: &Certificate,
+        key: &PrivateKey,
+        constraints: &[Constraint],
+    ) -> Result<(), Error> {
+        if cert.public_key() != key.public_key().key_data() {
+            return Err(Error::KeyIsCorrupt);
+        }
+
+        self.buf.clear();
+        self.buf.resize(4, 0);
+        if constraints.is_empty() {
+            self.buf.push(msg::ADD_IDENTITY)
+        } else {
+            self.buf.push(msg::ADD_ID_CONSTRAINED)
+        }
+
+        cert.algorithm()
+            .to_certificate_type()
+            .encode(&mut self.buf)?;
+        cert.to_bytes()?.encode(&mut self.buf)?;
+
+        match key.key_data() {
+            ssh_key::private::KeypairData::Dsa(pair) => {
+                pair.private().encode(&mut self.buf)?;
+            }
+            ssh_key::private::KeypairData::Ecdsa(pair) => {
+                ssh_key::Mpint::from_positive_bytes(pair.private_key_bytes())
+                    .encode(&mut self.buf)?;
+            }
+            ssh_key::private::KeypairData::Ed25519(pair) => {
+                pair.encode(&mut self.buf)?;
+            }
+            ssh_key::private::KeypairData::Rsa(pair) => {
+                pair.private().encode(&mut self.buf)?;
+            }
+            _ => {
+                return Err(ssh_key::Error::AlgorithmUnsupported {
+                    algorithm: key.algorithm(),
                 }
+                .into());
             }
         }
+
+        let comment = if !key.comment().is_empty() {
+            key.comment().as_bytes()
+        } else {
+            cert.comment().as_bytes()
+        };
+        comment.encode(&mut self.buf)?;
+        self.encode_constraints(constraints)?;
+
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
 
@@ -218,25 +284,7 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         }
         id.encode(&mut self.buf)?;
         pin.encode(&mut self.buf)?;
-        if !constraints.is_empty() {
-            for cons in constraints {
-                match *cons {
-                    Constraint::KeyLifetime { seconds } => {
-                        msg::CONSTRAIN_LIFETIME.encode(&mut self.buf)?;
-                        seconds.encode(&mut self.buf)?;
-                    }
-                    Constraint::Confirm => self.buf.push(msg::CONSTRAIN_CONFIRM),
-                    Constraint::Extensions {
-                        ref name,
-                        ref details,
-                    } => {
-                        msg::CONSTRAIN_EXTENSION.encode(&mut self.buf)?;
-                        name.encode(&mut self.buf)?;
-                        details.encode(&mut self.buf)?;
-                    }
-                }
-            }
-        }
+        self.encode_constraints(constraints)?;
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
         self.read_success().await?;
@@ -600,12 +648,36 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
     /// byte.
     ///
     /// Returns `Ok(())` if the agent answers `SSH_AGENT_SUCCESS` or
-    /// `SSH_AGENT_EXTENSION_RESPONSE`. The contents of either reply are
-    /// discarded. Fails with [`Error::AgentFailure`] if the agent answers
-    /// `SSH_AGENT_FAILURE`, which usually means it doesn't support the
-    /// extension, or `SSH_AGENT_EXTENSION_FAILURE`. Any other reply fails
-    /// with [`Error::AgentProtocolError`].
+    /// `SSH_AGENT_EXTENSION_RESPONSE` (whose extension type matches `typ`).
+    /// The contents of either reply are discarded; use
+    /// [`Self::extension_response`] to read the reply payload. Fails with
+    /// [`Error::AgentFailure`] if the agent answers `SSH_AGENT_FAILURE`,
+    /// which usually means it doesn't support the extension, or
+    /// `SSH_AGENT_EXTENSION_FAILURE`. Any other reply fails with
+    /// [`Error::AgentProtocolError`].
     pub async fn extension(&mut self, typ: &[u8], ext: &[u8]) -> Result<(), Error> {
+        self.extension_response(typ, ext).await.map(|_| ())
+    }
+
+    /// Send an `SSH_AGENTC_EXTENSION` request to the agent and return the
+    /// extension-specific reply bytes.
+    ///
+    /// `typ` is the extension name. `ext` is the extension contents, already
+    /// encoded in the format that extension defines; it is sent as is, not
+    /// wrapped in a string.
+    ///
+    /// Per [RFC 9987 §5.8](https://www.rfc-editor.org/rfc/rfc9987.html#section-5.8):
+    /// - If the agent answers `SSH_AGENT_SUCCESS`, returns the remaining
+    ///   bytes of the frame (empty for standard `SSH_AGENT_SUCCESS`, or the
+    ///   extension reply payload for draft-04 agents such as Pageant).
+    /// - If the agent answers `SSH_AGENT_EXTENSION_RESPONSE`, reads the
+    ///   leading extension type `string`, checks that it equals `typ`
+    ///   (failing with [`Error::AgentProtocolError`] on mismatch), and
+    ///   returns the remaining bytes of the frame.
+    /// - If the agent answers `SSH_AGENT_FAILURE` or
+    ///   `SSH_AGENT_EXTENSION_FAILURE`, fails with [`Error::AgentFailure`].
+    /// - Any other reply fails with [`Error::AgentProtocolError`].
+    pub async fn extension_response(&mut self, typ: &[u8], ext: &[u8]) -> Result<Vec<u8>, Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
         msg::EXTENSION.encode(&mut self.buf)?;
@@ -614,14 +686,45 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         let len = self.buf.len() - 4;
         BigEndian::write_u32(&mut self.buf[..], len as u32);
         self.read_response().await?;
-        match self.buf.first() {
-            Some(&msg::SUCCESS) | Some(&msg::EXTENSION_RESPONSE) => Ok(()),
-            Some(&msg::FAILURE) | Some(&msg::EXTENSION_FAILURE) => Err(Error::AgentFailure),
+        match self.buf.split_first() {
+            Some((&msg::SUCCESS, r)) => Ok(r.to_vec()),
+            Some((&msg::EXTENSION_RESPONSE, mut r)) => {
+                let reply_type = Bytes::decode(&mut r)?;
+                if reply_type.as_ref() != typ {
+                    return Err(Error::AgentProtocolError);
+                }
+                Ok(r.to_vec())
+            }
+            Some((&(msg::FAILURE | msg::EXTENSION_FAILURE), _)) => Err(Error::AgentFailure),
             _ => Err(Error::AgentProtocolError),
         }
     }
 
-    /// Ask the agent what extensions about supported extensions.
+    /// Query the agent for the names of its supported extensions using the
+    /// `"query"` extension ([RFC 9987 §5.8.1](https://www.rfc-editor.org/rfc/rfc9987.html#section-5.8.1)).
+    ///
+    /// Accepts both `SSH_AGENT_EXTENSION_RESPONSE` with `"query"` followed
+    /// by `string[]` (RFC 9987 §5.8.1, used by OpenSSH >= 10.3) and
+    /// `SSH_AGENT_SUCCESS` followed by `string[]` (draft-miller-ssh-agent-04
+    /// §4.7.1, used by Pageant). Fails with [`Error::AgentFailure`] if the
+    /// agent does not support the `"query"` extension.
+    pub async fn query_extensions(&mut self) -> Result<Vec<String>, Error> {
+        let reply = self.extension_response(b"query", b"").await?;
+        let mut r = reply.as_slice();
+        let mut exts = Vec::new();
+        while !r.is_empty() {
+            exts.push(String::decode(&mut r)?);
+        }
+        Ok(exts)
+    }
+
+    /// Ask the agent about a supported extension.
+    #[cfg_attr(
+        not(test),
+        deprecated(
+            note = "use `query_extensions` or `extension_response` instead; `query_extension` takes `ext` by value and discards the reply"
+        )
+    )]
     pub async fn query_extension(&mut self, typ: &[u8], mut ext: CryptoVec) -> Result<bool, Error> {
         self.buf.clear();
         self.buf.resize(4, 0);
@@ -633,10 +736,20 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
 
         match self.buf.split_first() {
             Some((&msg::SUCCESS, mut r)) => {
-                ext.extend(&Bytes::decode(&mut r)?);
+                if !r.is_empty() {
+                    ext.extend(&Bytes::decode(&mut r)?);
+                }
                 Ok(true)
             }
-            _ => Ok(false),
+            Some((&msg::EXTENSION_RESPONSE, mut r)) => {
+                if Bytes::decode(&mut r)?.as_ref() != typ {
+                    return Err(Error::AgentProtocolError);
+                }
+                ext.extend(r);
+                Ok(true)
+            }
+            Some((&(msg::FAILURE | msg::EXTENSION_FAILURE), _)) => Ok(false),
+            _ => Err(Error::AgentProtocolError),
         }
     }
 }
@@ -814,11 +927,12 @@ mod tests {
         Ok(())
     }
 
-    /// `extension` succeeds if the agent answers `SSH_AGENT_SUCCESS`, with or
-    /// without contents, or `SSH_AGENT_EXTENSION_RESPONSE`. It fails with
-    /// `AgentFailure` on `SSH_AGENT_FAILURE` and
-    /// `SSH_AGENT_EXTENSION_FAILURE`, and with `AgentProtocolError` on
-    /// anything else.
+    /// `extension` and `extension_response` succeed if the agent answers
+    /// `SSH_AGENT_SUCCESS`, with or without contents, or
+    /// `SSH_AGENT_EXTENSION_RESPONSE` with the requested extension type.
+    /// They fail with `AgentFailure` on `SSH_AGENT_FAILURE` and
+    /// `SSH_AGENT_EXTENSION_FAILURE`, and with `AgentProtocolError` if the
+    /// response type mismatches or the reply is unexpected.
     #[tokio::test]
     async fn extension_fails_unless_the_agent_answers_success()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -828,23 +942,111 @@ mod tests {
             b"reply",
         ]
         .concat();
-        let replies: [(&[u8], &str); 7] = [
-            (&[msg::SUCCESS], "Ok"),
+        let mismatched_extension_response = [
+            &[msg::EXTENSION_RESPONSE, 0, 0, 0, 17][..],
+            b"other@example.com",
+            b"reply",
+        ]
+        .concat();
+        let success_with_payload = [msg::SUCCESS, 0, 0, 0, 5, b'r', b'e', b'p', b'l', b'y'];
+        let replies = [
+            (&[msg::SUCCESS][..], "Ok", Some(&b""[..])),
             (
-                &[msg::SUCCESS, 0, 0, 0, 5, b'r', b'e', b'p', b'l', b'y'],
+                &success_with_payload,
                 "Ok",
+                Some(&[0, 0, 0, 5, b'r', b'e', b'p', b'l', b'y']),
             ),
-            (&extension_response, "Ok"),
-            (&[msg::FAILURE], "AgentFailure"),
-            (&[msg::EXTENSION_FAILURE], "AgentFailure"),
-            (&[msg::IDENTITIES_ANSWER, 0, 0, 0, 0], "AgentProtocolError"),
-            (&[], "AgentProtocolError"),
+            (&extension_response, "Ok", Some(b"reply")),
+            (&mismatched_extension_response, "AgentProtocolError", None),
+            (&[msg::FAILURE], "AgentFailure", None),
+            (&[msg::EXTENSION_FAILURE], "AgentFailure", None),
+            (
+                &[msg::IDENTITIES_ANSWER, 0, 0, 0, 0],
+                "AgentProtocolError",
+                None,
+            ),
+            (&[], "AgentProtocolError", None),
         ];
-        for (reply, expected) in replies {
+        for (reply, expected, expected_payload) in replies {
             let (mut client, _agent) = agent_answering(&frame(reply)).await?;
             let result = client.extension(b"ext@example.com", b"data").await;
             assert_eq!(outcome(&result), expected, "answered {reply:?}");
+
+            let (mut client, _agent) = agent_answering(&frame(reply)).await?;
+            let result = client.extension_response(b"ext@example.com", b"data").await;
+            assert_eq!(outcome(&result), expected, "answered {reply:?}");
+            if let Some(payload) = expected_payload {
+                assert_eq!(result?, payload, "answered {reply:?}");
+            }
         }
+        Ok(())
+    }
+
+    /// `query_extensions` decodes the extension list from both RFC 9987
+    /// §5.8.1 (`SSH_AGENT_EXTENSION_RESPONSE` + `"query"` + `string[]`, used
+    /// by OpenSSH >= 10.3) and draft-miller-ssh-agent-04 §4.7.1
+    /// (`SSH_AGENT_SUCCESS` + `string[]`, used by Pageant). `query_extension`
+    /// accepts both reply formats too.
+    #[tokio::test]
+    async fn query_extensions_accepts_rfc9987_and_draft04_replies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use ssh_encoding::Encode;
+
+        let mut ext_list = Vec::new();
+        "session-bind@openssh.com".encode(&mut ext_list)?;
+        "ext@example.com".encode(&mut ext_list)?;
+
+        let mut rfc9987_reply = vec![msg::EXTENSION_RESPONSE];
+        "query".encode(&mut rfc9987_reply)?;
+        rfc9987_reply.extend_from_slice(&ext_list);
+
+        let mut draft04_reply = vec![msg::SUCCESS];
+        draft04_reply.extend_from_slice(&ext_list);
+
+        for reply in [&rfc9987_reply[..], &draft04_reply[..]] {
+            let (mut client, agent) = agent_answering(&frame(reply)).await?;
+            let exts = client.query_extensions().await?;
+            assert_eq!(exts, ["session-bind@openssh.com", "ext@example.com"]);
+            assert_eq!(
+                written(client, agent).await?,
+                [&[0, 0, 0, 10, msg::EXTENSION, 0, 0, 0, 5][..], b"query"].concat()
+            );
+
+            let (mut client, _agent) = agent_answering(&frame(reply)).await?;
+            assert!(client.query_extension(b"query", CryptoVec::new()).await?);
+        }
+
+        // Empty list in either format.
+        let mut rfc9987_empty = vec![msg::EXTENSION_RESPONSE];
+        "query".encode(&mut rfc9987_empty)?;
+        for reply in [&rfc9987_empty[..], &[msg::SUCCESS][..]] {
+            let (mut client, _agent) = agent_answering(&frame(reply)).await?;
+            assert!(client.query_extensions().await?.is_empty());
+            let (mut client, _agent) = agent_answering(&frame(reply)).await?;
+            assert!(client.query_extension(b"query", CryptoVec::new()).await?);
+        }
+
+        // Unsupported or failed query.
+        for reply in [msg::FAILURE, msg::EXTENSION_FAILURE] {
+            let (mut client, _agent) = agent_answering(&frame(&[reply])).await?;
+            assert_eq!(outcome(&client.query_extensions().await), "AgentFailure");
+            let (mut client, _agent) = agent_answering(&frame(&[reply])).await?;
+            assert!(!client.query_extension(b"query", CryptoVec::new()).await?);
+        }
+
+        // Wrong extension name in SSH_AGENT_EXTENSION_RESPONSE.
+        let mut wrong_type = vec![msg::EXTENSION_RESPONSE];
+        "other".encode(&mut wrong_type)?;
+        let (mut client, _agent) = agent_answering(&frame(&wrong_type)).await?;
+        assert_eq!(
+            outcome(&client.query_extensions().await),
+            "AgentProtocolError"
+        );
+        let (mut client, _agent) = agent_answering(&frame(&wrong_type)).await?;
+        assert_eq!(
+            outcome(&client.query_extension(b"query", CryptoVec::new()).await),
+            "AgentProtocolError"
+        );
         Ok(())
     }
 
@@ -890,29 +1092,50 @@ mod tests {
     #[tokio::test]
     async fn russhs_agent_refusals_are_errors() -> Result<(), Box<dyn std::error::Error>> {
         let mut client = russhs_agent();
-        let key = generate_secret_key()?;
-        let public = key.public_key();
+        let mut key = generate_secret_key()?;
+        key.set_comment("test-key-comment");
+        let public = key.public_key().clone();
         client.add_identity(&key, &[]).await?;
+
+        let identities = client.request_identities().await?;
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].comment(), "test-key-comment");
+
+        // An empty lock passphrase is refused and leaves the agent unlocked.
+        assert_eq!(outcome(&client.lock(b"").await), "AgentFailure");
+        assert_eq!(client.request_identities().await?.len(), 1);
+        let signature = client
+            .sign_request_signature(&public, None, b"data")
+            .await?;
+        crate::crypto::verify(public.key_data(), b"data", &signature)?;
 
         assert_eq!(outcome(&client.unlock(b"passphrase").await), "AgentFailure");
         client.lock(b"passphrase").await?;
         assert_eq!(outcome(&client.lock(b"passphrase").await), "AgentFailure");
-        let signature = client.sign_request_signature(public, None, b"data").await;
+        // While locked, REQUEST_IDENTITIES returns an empty list rather than
+        // SSH_AGENT_FAILURE.
+        assert!(client.request_identities().await?.is_empty());
+        let signature = client.sign_request_signature(&public, None, b"data").await;
         assert_eq!(outcome(&signature), "AgentFailure");
-        let (mut client, base64) = client.sign_request_base64(public, None, b"data").await;
+        let (mut client, base64) = client.sign_request_base64(&public, None, b"data").await;
         assert_eq!(outcome(&base64), "AgentFailure");
         assert_eq!(outcome(&client.unlock(b"wrong").await), "AgentFailure");
         client.unlock(b"passphrase").await?;
 
-        let signature = client.sign_request_signature(public, None, b"data").await?;
+        let identities = client.request_identities().await?;
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].comment(), "test-key-comment");
+        let signature = client
+            .sign_request_signature(&public, None, b"data")
+            .await?;
         crate::crypto::verify(public.key_data(), b"data", &signature)?;
-        let (mut client, base64) = client.sign_request_base64(public, None, b"data").await;
+        let (mut client, base64) = client.sign_request_base64(&public, None, b"data").await;
         assert!(!base64?.is_empty());
 
         let other = generate_secret_key()?;
         let removed = client.remove_identity(other.public_key()).await;
         assert_eq!(outcome(&removed), "AgentFailure");
-        client.remove_identity(public).await?;
+        client.remove_identity(&public).await?;
         assert!(client.request_identities().await?.is_empty());
         Ok(())
     }

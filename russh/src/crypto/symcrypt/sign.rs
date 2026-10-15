@@ -68,7 +68,7 @@ const KEY_CACHE_CAPACITY: usize = 32;
 static SIGNING_KEYS: KeyCache<SigningKey> = KeyCache::new(KEY_CACHE_CAPACITY);
 
 /// How many imported keys `Signatures::sign` keeps at most.
-const BY_VALUE_CACHE_CAPACITY: usize = 8;
+const BY_VALUE_CACHE_CAPACITY: usize = 32;
 
 /// The keys `Signatures::sign` imported, keyed by the SHA-256 digest of their
 /// OpenSSH private-key encoding.
@@ -1718,34 +1718,37 @@ mod tests {
         assert!(imported_a.upgrade().is_some());
 
         // `certificate::sign` calls `crate::crypto::sign(&ca, ...)`, which
-        // reuses the same imported CA key across certificates.
+        // signs via `ByValueCache` and reuses the imported CA key across
+        // certificates. Use a dedicated `ByValueCache` to assert zero
+        // re-imports deterministically when other unit tests run in parallel.
+        let cert_cache = ByValueCache::new(BY_VALUE_CACHE_CAPACITY);
         let subject = ecdsa_p256();
-        for ca in [rsa_2048(), ecdsa_p384()] {
-            let certify = |serial: u64| {
-                let mut builder = ssh_key::certificate::Builder::new(
-                    [serial as u8; 32],
-                    subject.public_key().key_data().clone(),
-                    0,
-                    u64::MAX,
-                )
+        for (ca, hash) in [(rsa_2048(), Some(HashAlg::Sha512)), (ecdsa_p384(), None)] {
+            let mut builder = ssh_key::certificate::Builder::new(
+                [1u8; 32],
+                subject.public_key().key_data().clone(),
+                0,
+                u64::MAX,
+            )
+            .unwrap();
+            builder.serial(1).unwrap();
+            builder.key_id("test").unwrap();
+            builder
+                .cert_type(ssh_key::certificate::CertType::User)
                 .unwrap();
-                builder.serial(serial).unwrap();
-                builder.key_id("test").unwrap();
-                builder
-                    .cert_type(ssh_key::certificate::CertType::User)
-                    .unwrap();
-                builder.valid_principal("user").unwrap();
-                crate::keys::certificate::sign(builder, &ca).unwrap()
-            };
-            let first_cert = certify(1);
-            verify_certificate(&first_cert).unwrap();
+            builder.valid_principal("user").unwrap();
+            let cert = crate::keys::certificate::sign(builder, &ca).unwrap();
+            verify_certificate(&cert).unwrap();
+
+            let sig = sign_by_value(&cert_cache, &ca, hash, MESSAGE).unwrap();
+            verify(ca.public_key().key_data(), MESSAGE, &sig).unwrap();
             let first_key = last_signed_with();
             assert!(first_key.upgrade().is_some());
 
             let imports = count_imports(|| {
-                for serial in 2..=4 {
-                    let cert = certify(serial);
-                    verify_certificate(&cert).unwrap();
+                for _ in 0..3 {
+                    let sig = sign_by_value(&cert_cache, &ca, hash, MESSAGE).unwrap();
+                    verify(ca.public_key().key_data(), MESSAGE, &sig).unwrap();
                     assert!(Weak::ptr_eq(&last_signed_with(), &first_key));
                 }
             });

@@ -43,22 +43,63 @@ pub fn decode_openssh(secret: &[u8], _password: Option<&str>) -> Result<PrivateK
     Ok(key)
 }
 
+/// Decodes a plain key pair or a certificate with its private key as OpenSSH
+/// encodes it in the agent protocol (`SSH_AGENTC_ADD_IDENTITY` and
+/// `SSH_AGENTC_ADD_ID_CONSTRAINED`), returning the identity blob (the
+/// encoded public key or the raw certificate bytes) and the [`KeypairData`].
+pub(crate) fn decode_agent_key(
+    reader: &mut impl ssh_encoding::Reader,
+) -> Result<(Vec<u8>, ssh_key::private::KeypairData), Error> {
+    use ssh_encoding::Decode;
+    use ssh_key::{Algorithm, Certificate};
+
+    use crate::helpers::{AlgorithmExt, EncodedExt};
+
+    let algorithm_name = String::decode(reader)?;
+    if algorithm_name.ends_with("-cert-v01@openssh.com") {
+        let cert_alg = Algorithm::new_certificate_ext(&algorithm_name)?;
+        let cert_blob = Vec::<u8>::decode(reader)?;
+        let cert = Certificate::from_bytes(&cert_blob)?;
+        if cert.public_key().algorithm().with_hash_alg(None) != cert_alg.with_hash_alg(None) {
+            return Err(Error::KeyIsCorrupt);
+        }
+        let keypair = decode_cert_keypair(cert.public_key(), reader)?;
+        Ok((cert_blob, keypair))
+    } else {
+        let algorithm = Algorithm::new(&algorithm_name)?;
+        let keypair = decode_keypair_as(reader, algorithm)?;
+        let public = ssh_key::public::KeyData::try_from(&keypair)?.encoded()?;
+        Ok((public, keypair))
+    }
+}
+
 /// Decodes a key pair as OpenSSH encodes it in a private key and in the
 /// agent protocol (`SSH_AGENTC_ADD_IDENTITY`): the algorithm name, then the
 /// key's fields.
 ///
 /// ssh-key reads the key, once an ECDSA private scalar shorter than it reads
 /// is padded (see [`raw`]).
-#[cfg(not(russh_backend = "symcrypt"))]
+#[allow(dead_code)]
 pub(crate) fn decode_keypair(
     reader: &mut impl ssh_encoding::Reader,
 ) -> Result<ssh_key::private::KeypairData, Error> {
-    use ssh_encoding::{Decode, Encode};
+    use ssh_encoding::Decode;
+    use ssh_key::Algorithm;
+
+    let algorithm = Algorithm::decode(reader)?;
+    decode_keypair_as(reader, algorithm)
+}
+
+#[cfg(not(russh_backend = "symcrypt"))]
+fn decode_keypair_as(
+    reader: &mut impl ssh_encoding::Reader,
+    algorithm: ssh_key::Algorithm,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Decode;
     use ssh_key::Algorithm;
     use ssh_key::private::KeypairData;
     use zeroize::Zeroizing;
 
-    let algorithm = Algorithm::decode(reader)?;
     let Algorithm::Ecdsa { curve } = algorithm else {
         return Ok(KeypairData::decode_as(reader, algorithm)?);
     };
@@ -66,17 +107,79 @@ pub(crate) fn decode_keypair(
     // reads again, with the scalar padded if it is short.
     let curve_name = Vec::<u8>::decode(reader)?;
     let point = Vec::<u8>::decode(reader)?;
-    let mut scalar = Zeroizing::new(Vec::<u8>::decode(reader)?);
+    let scalar = Zeroizing::new(Vec::<u8>::decode(reader)?);
+    decode_ecdsa_keypair(curve, &curve_name, &point, scalar)
+}
+
+#[cfg(not(russh_backend = "symcrypt"))]
+fn decode_ecdsa_keypair(
+    curve: ssh_key::EcdsaCurve,
+    curve_name: &[u8],
+    point: &[u8],
+    mut scalar: zeroize::Zeroizing<Vec<u8>>,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Encode;
+    use ssh_key::Algorithm;
+    use ssh_key::private::KeypairData;
+    use zeroize::Zeroizing;
+
     if raw::is_short_scalar(&scalar) {
-        scalar = raw::padded_scalar(curve, &scalar, &point)?;
+        scalar = raw::padded_scalar(curve, &scalar, point)?;
     }
     let mut fields = Zeroizing::new(Vec::with_capacity(
         12 + curve_name.len() + point.len() + scalar.len(),
     ));
-    curve_name.as_slice().encode(&mut *fields)?;
-    point.as_slice().encode(&mut *fields)?;
+    curve_name.encode(&mut *fields)?;
+    point.encode(&mut *fields)?;
     scalar.as_slice().encode(&mut *fields)?;
-    Ok(KeypairData::decode_as(&mut fields.as_slice(), algorithm)?)
+    Ok(KeypairData::decode_as(
+        &mut fields.as_slice(),
+        Algorithm::Ecdsa { curve },
+    )?)
+}
+
+#[cfg(not(russh_backend = "symcrypt"))]
+fn decode_cert_keypair(
+    public: &ssh_key::public::KeyData,
+    reader: &mut impl ssh_encoding::Reader,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Decode;
+    use ssh_key::private::{
+        DsaKeypair, DsaPrivateKey, Ed25519Keypair, KeypairData, RsaKeypair, RsaPrivateKey,
+    };
+    use ssh_key::public::KeyData;
+    use zeroize::Zeroizing;
+
+    match public {
+        KeyData::Dsa(pk) => {
+            let private = DsaPrivateKey::decode(reader)?;
+            Ok(KeypairData::Dsa(DsaKeypair::new(pk.clone(), private)?))
+        }
+        KeyData::Ecdsa(pk) => {
+            let scalar = Zeroizing::new(Vec::<u8>::decode(reader)?);
+            decode_ecdsa_keypair(
+                pk.curve(),
+                pk.curve().as_str().as_bytes(),
+                pk.as_sec1_bytes(),
+                scalar,
+            )
+        }
+        KeyData::Ed25519(pk) => {
+            let keypair = Ed25519Keypair::decode(reader)?;
+            if keypair.public != *pk {
+                return Err(Error::KeyIsCorrupt);
+            }
+            Ok(KeypairData::Ed25519(keypair))
+        }
+        KeyData::Rsa(pk) => {
+            let private = RsaPrivateKey::decode(reader)?;
+            Ok(KeypairData::Rsa(RsaKeypair::new(pk.clone(), private)?))
+        }
+        _ => Err(ssh_key::Error::AlgorithmUnsupported {
+            algorithm: public.algorithm(),
+        }
+        .into()),
+    }
 }
 
 /// Decodes a key pair as OpenSSH encodes it in a private key and in the
@@ -88,8 +191,9 @@ pub(crate) fn decode_keypair(
 /// shorter than ssh-key reads (see [`raw`]) or have leading zeros, as ssh-key
 /// writes it; `iqmp` is recomputed. ssh-key reads the other key types.
 #[cfg(russh_backend = "symcrypt")]
-pub(crate) fn decode_keypair(
+fn decode_keypair_as(
     reader: &mut impl ssh_encoding::Reader,
+    algorithm: ssh_key::Algorithm,
 ) -> Result<ssh_key::private::KeypairData, Error> {
     use ssh_encoding::Decode;
     use ssh_key::private::KeypairData;
@@ -98,11 +202,7 @@ pub(crate) fn decode_keypair(
 
     use crate::crypto::symcrypt::keys;
 
-    fn positive(mpint: &Mpint) -> Result<&[u8], Error> {
-        mpint.as_positive_bytes().ok_or(Error::KeyIsCorrupt)
-    }
-
-    match Algorithm::decode(reader)? {
+    match algorithm {
         Algorithm::Ecdsa { curve } => {
             if EcdsaCurve::decode(reader)? != curve {
                 return Err(ssh_key::Error::AlgorithmUnknown.into());
@@ -122,20 +222,81 @@ pub(crate) fn decode_keypair(
         Algorithm::Rsa { .. } => {
             let n = Mpint::decode(reader)?;
             let e = Mpint::decode(reader)?;
-            let d = Zeroizing::new(Mpint::decode(reader)?);
-            let _iqmp = Zeroizing::new(Mpint::decode(reader)?);
-            let p = Zeroizing::new(Mpint::decode(reader)?);
-            let q = Zeroizing::new(Mpint::decode(reader)?);
-            let keypair = keys::rsa_keypair(
-                positive(&n)?,
-                positive(&e)?,
-                positive(&d)?,
-                positive(&p)?,
-                positive(&q)?,
-            )?;
-            Ok(KeypairData::Rsa(keypair))
+            decode_symcrypt_rsa_private(&n, &e, reader)
         }
         algorithm => Ok(KeypairData::decode_as(reader, algorithm)?),
+    }
+}
+
+#[cfg(russh_backend = "symcrypt")]
+fn decode_symcrypt_rsa_private(
+    n: &ssh_key::Mpint,
+    e: &ssh_key::Mpint,
+    reader: &mut impl ssh_encoding::Reader,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Decode;
+    use ssh_key::Mpint;
+    use ssh_key::private::KeypairData;
+    use zeroize::Zeroizing;
+
+    use crate::crypto::symcrypt::keys;
+
+    fn positive(mpint: &Mpint) -> Result<&[u8], Error> {
+        mpint.as_positive_bytes().ok_or(Error::KeyIsCorrupt)
+    }
+
+    let d = Zeroizing::new(Mpint::decode(reader)?);
+    let _iqmp = Zeroizing::new(Mpint::decode(reader)?);
+    let p = Zeroizing::new(Mpint::decode(reader)?);
+    let q = Zeroizing::new(Mpint::decode(reader)?);
+    let keypair = keys::rsa_keypair(
+        positive(n)?,
+        positive(e)?,
+        positive(&d)?,
+        positive(&p)?,
+        positive(&q)?,
+    )?;
+    Ok(KeypairData::Rsa(keypair))
+}
+
+#[cfg(russh_backend = "symcrypt")]
+fn decode_cert_keypair(
+    public: &ssh_key::public::KeyData,
+    reader: &mut impl ssh_encoding::Reader,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Decode;
+    use ssh_key::private::{DsaKeypair, DsaPrivateKey, Ed25519Keypair, KeypairData};
+    use ssh_key::public::KeyData;
+    use zeroize::Zeroizing;
+
+    use crate::crypto::symcrypt::keys;
+
+    match public {
+        KeyData::Dsa(pk) => {
+            let private = DsaPrivateKey::decode(reader)?;
+            Ok(KeypairData::Dsa(DsaKeypair::new(pk.clone(), private)?))
+        }
+        KeyData::Ecdsa(pk) => {
+            let scalar = Zeroizing::new(Vec::<u8>::decode(reader)?);
+            let point = pk.as_sec1_bytes();
+            if point.first() != Some(&0x04) {
+                return Err(Error::KeyIsCorrupt);
+            }
+            let keypair = keys::ecdsa_keypair(pk.curve(), &scalar, Some(point))?;
+            Ok(KeypairData::Ecdsa(keypair))
+        }
+        KeyData::Ed25519(pk) => {
+            let keypair = Ed25519Keypair::decode(reader)?;
+            if keypair.public != *pk {
+                return Err(Error::KeyIsCorrupt);
+            }
+            Ok(KeypairData::Ed25519(keypair))
+        }
+        KeyData::Rsa(pk) => decode_symcrypt_rsa_private(pk.n(), pk.e(), reader),
+        _ => Err(ssh_key::Error::AlgorithmUnsupported {
+            algorithm: public.algorithm(),
+        }
+        .into()),
     }
 }
 
