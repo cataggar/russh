@@ -936,7 +936,7 @@ mod tests {
     #[test]
     fn verifies_openssh_p521_signatures() {
         // What an SSHSIG signature covers (PROTOCOL.sshsig), hashed by
-        // SymCrypt: `SshSig::signed_data` would use `sha2` (#27).
+        // SymCrypt rather than by `sha2`, as `SshSig::signed_data` would.
         fn signed_data(message: &[u8]) -> Vec<u8> {
             let mut data = b"SSHSIG".to_vec();
             let digest = symcrypt::hash::sha512(message);

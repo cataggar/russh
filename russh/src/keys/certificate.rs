@@ -1,7 +1,7 @@
 //! Signing and validating OpenSSH certificates with russh's crypto backend.
 //!
 //! `ssh-key` signs certificates ([`Builder::sign`]) and validates them
-//! ([`Certificate::validate`]) with its own RustCrypto code. That bypasses
+//! (`Certificate::validate`) with its own RustCrypto code. That bypasses
 //! the crypto backend russh was built with, and with the `symcrypt` backend
 //! it doesn't work at all. These functions do the same work through the
 //! backend:
@@ -125,7 +125,7 @@ where
 /// Checks that `certificate` is signed by one of the `trusted_cas` and valid
 /// at `unix_timestamp`.
 ///
-/// These are the checks of [`Certificate::validate_at`], with three
+/// These are the checks of `Certificate::validate_at`, with three
 /// differences: the CA key is compared with the trusted keys themselves
 /// rather than their fingerprints, the crypto backend verifies the
 /// signature, and SHA-1 CA signatures (`ssh-rsa` and `ssh-dss`) are refused,
