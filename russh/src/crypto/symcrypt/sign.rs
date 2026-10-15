@@ -31,6 +31,10 @@
 //! `key_cache`), so these checks run once per key. `Signatures::sign`,
 //! which `certificate::sign` uses for CA keys passed by reference, keeps a
 //! small LRU cache keyed by the SHA-256 digest of the encoded private key.
+//! Importing an RSA public key also computes the Montgomery parameter for
+//! the modulus (`SymCryptIntToModulus`), so `Verifier::verify` keeps a
+//! bounded LRU cache of imported RSA public keys keyed by the exact `(n, e)`
+//! modulus and exponent bytes.
 //!
 //! Not implemented, so neither offered nor accepted: `ssh-ed25519` (SymCrypt
 //! has no EdDSA) unless the `ed25519-aws-lc` feature takes it from aws-lc-rs
@@ -73,6 +77,13 @@ const BY_VALUE_CACHE_CAPACITY: usize = 32;
 /// The keys `Signatures::sign` imported, keyed by the SHA-256 digest of their
 /// OpenSSH private-key encoding.
 static BY_VALUE_KEYS: ByValueCache = ByValueCache::new(BY_VALUE_CACHE_CAPACITY);
+
+/// How many imported RSA public keys `Verifier::verify` keeps at most.
+const RSA_VERIFY_CACHE_CAPACITY: usize = 32;
+
+/// The RSA public keys `Verifier::verify` imported, keyed by their exact
+/// `(n, e)` modulus and public-exponent bytes.
+static RSA_VERIFY_KEYS: RsaVerifyCache = RsaVerifyCache::new(RSA_VERIFY_CACHE_CAPACITY);
 
 pub(crate) struct Signatures;
 
@@ -475,13 +486,10 @@ fn sign_ecdsa(curve: Curve, key: &EcKey, message: &[u8]) -> ssh_key::Result<Vec<
 /// (`OPENSSL_RSA_MAX_MODULUS_BITS`).
 const RSA_MODULUS_BITS: RangeInclusive<usize> = 1024..=16384;
 
-/// The modulus and public exponent of `key`, big-endian without leading
-/// zeros as SymCrypt imports them, if the modulus is odd and of an accepted
-/// size, and the exponent odd, at least 3 and at most 64 bits long.
-fn rsa_public_components(key: &RsaPublicKey) -> ssh_key::Result<(&[u8], &[u8])> {
-    let (Some(n), Some(e)) = (key.n().as_positive_bytes(), key.e().as_positive_bytes()) else {
-        return Err(ssh_key::Error::PublicKey);
-    };
+/// Checks that the big-endian, non-zero-padded modulus `n` and public
+/// exponent `e` have an odd modulus of an accepted bit length and an odd
+/// public exponent of 3 to 64 bits.
+fn check_rsa_public_components(n: &[u8], e: &[u8]) -> ssh_key::Result<()> {
     let bits = n.first().map_or(0, |top| {
         n.len()
             .saturating_mul(8)
@@ -489,7 +497,7 @@ fn rsa_public_components(key: &RsaPublicKey) -> ssh_key::Result<(&[u8], &[u8])> 
     });
     let odd = |value: &[u8]| value.last().is_some_and(|low| low & 1 == 1);
     if RSA_MODULUS_BITS.contains(&bits) && odd(n) && odd(e) && e != [1] && e.len() <= 8 {
-        Ok((n, e))
+        Ok(())
     } else {
         debug!(
             "rejecting an RSA key of {bits} bits with a {}-byte public exponent",
@@ -497,6 +505,17 @@ fn rsa_public_components(key: &RsaPublicKey) -> ssh_key::Result<(&[u8], &[u8])> 
         );
         Err(ssh_key::Error::PublicKey)
     }
+}
+
+/// The modulus and public exponent of `key`, big-endian without leading
+/// zeros as SymCrypt imports them, if the modulus is odd and of an accepted
+/// size, and the exponent odd, at least 3 and at most 64 bits long.
+fn rsa_public_components(key: &RsaPublicKey) -> ssh_key::Result<(&[u8], &[u8])> {
+    let (Some(n), Some(e)) = (key.n().as_positive_bytes(), key.e().as_positive_bytes()) else {
+        return Err(ssh_key::Error::PublicKey);
+    };
+    check_rsa_public_components(n, e)?;
+    Ok((n, e))
 }
 
 /// The digest of `message` that `rsa-sha2-256` or `rsa-sha2-512` signs
@@ -511,7 +530,105 @@ fn rsa_digest(hash: HashAlg, message: &[u8]) -> ssh_key::Result<(Vec<u8>, HashAl
     }
 }
 
+/// Strips leading zero bytes from a big-endian unsigned integer slice.
+fn uint_bytes(mut bytes: &[u8]) -> &[u8] {
+    while let [0, rest @ ..] = bytes {
+        bytes = rest;
+    }
+    bytes
+}
+
+type RsaVerifyEntry = (Box<[u8]>, Box<[u8]>, Arc<RsaKey>);
+
+/// Bounded LRU cache of imported [`RsaKey`]s for [`Verifier::verify`], keyed
+/// by the exact `(n, e)` modulus and public-exponent bytes (never a hash
+/// digest, since public keys come from untrusted peers).
+struct RsaVerifyCache {
+    capacity: usize,
+    /// From the most to the least recently used.
+    entries: Mutex<Vec<RsaVerifyEntry>>,
+}
+
+impl RsaVerifyCache {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn get_or_try_insert(&self, n: &[u8], e: &[u8]) -> signature::Result<Arc<RsaKey>> {
+        let (n, e) = (uint_bytes(n), uint_bytes(e));
+        check_rsa_public_components(n, e)?;
+        if let Some(imported) = self.touch(n, e) {
+            return Ok(imported);
+        }
+        // Imported without the lock, so that other keys can be used meanwhile.
+        #[cfg(test)]
+        tests::count_rsa_verify_import();
+        let key = Arc::new(
+            RsaKey::set_public_key(n, e, RsaKeyUsage::Sign).map_err(|error| {
+                debug!("SymCrypt rejected an RSA public key: {error}");
+                signature::Error::new()
+            })?,
+        );
+        // Declared before locking so an evicted key is freed after the lock is released.
+        let mut evicted = None;
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = entries
+            .iter()
+            .position(|(entry_n, entry_e, _)| (entry_n.as_ref(), entry_e.as_ref()) == (n, e))
+        {
+            let entry = entries.remove(index);
+            let cached = Arc::clone(&entry.2);
+            entries.insert(0, entry);
+            return Ok(cached);
+        }
+        if entries.len() >= self.capacity {
+            evicted = entries.pop();
+        }
+        entries.insert(0, (n.into(), e.into(), Arc::clone(&key)));
+        drop(entries);
+        drop(evicted);
+        Ok(key)
+    }
+
+    fn touch(&self, n: &[u8], e: &[u8]) -> Option<Arc<RsaKey>> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = entries
+            .iter()
+            .position(|(entry_n, entry_e, _)| (entry_n.as_ref(), entry_e.as_ref()) == (n, e))?;
+        let entry = entries.remove(index);
+        let value = Arc::clone(&entry.2);
+        entries.insert(0, entry);
+        Some(value)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+}
+
+#[cfg(test)]
+fn rsa_verify_key(n: &[u8], e: &[u8]) -> signature::Result<Arc<RsaKey>> {
+    RSA_VERIFY_KEYS.get_or_try_insert(n, e)
+}
+
 fn verify_rsa(
+    key: &RsaPublicKey,
+    hash: HashAlg,
+    message: &[u8],
+    blob: &[u8],
+) -> signature::Result<()> {
+    verify_rsa_cached(&RSA_VERIFY_KEYS, key, hash, message, blob)
+}
+
+fn verify_rsa_cached(
+    cache: &RsaVerifyCache,
     key: &RsaPublicKey,
     hash: HashAlg,
     message: &[u8],
@@ -531,11 +648,11 @@ fn verify_rsa(
         .ok_or_else(signature::Error::new)?
         .copy_from_slice(blob);
     let (digest, hash) = rsa_digest(hash, message)?;
-    let key = RsaKey::set_public_key(n, e, RsaKeyUsage::Sign).map_err(|error| {
-        debug!("SymCrypt rejected an RSA public key: {error}");
-        signature::Error::new()
-    })?;
-    key.pkcs1_verify(&digest, &padded, hash)
+    let imported = cache.get_or_try_insert(n, e)?;
+    #[cfg(test)]
+    tests::verified_rsa_with(&imported);
+    imported
+        .pkcs1_verify(&digest, &padded, hash)
         .map_err(|_| signature::Error::new())
 }
 
@@ -584,7 +701,8 @@ mod tests {
     use super::key_cache::KeyCache;
     use super::{
         BY_VALUE_CACHE_CAPACITY, ByValueCache, Curve, DEFAULT_ORDER, KEY_CACHE_CAPACITY,
-        SigningKey, rsa_public_components, sign_by_value, sign_cached,
+        RSA_VERIFY_CACHE_CAPACITY, RsaKey, RsaVerifyCache, SigningKey, rsa_public_components,
+        rsa_verify_key, sign_by_value, sign_cached, verify_rsa_cached,
     };
     use crate::crypto::{
         KeyHolder, is_supported_signature_algorithm, sign, sign_held, verify, verify_certificate,
@@ -1432,6 +1550,10 @@ mod tests {
         static IMPORTS: Cell<usize> = const { Cell::new(0) };
         /// The imported key this thread last signed with.
         static SIGNED_WITH: RefCell<Weak<SigningKey>> = const { RefCell::new(Weak::new()) };
+        /// How many RSA public keys this thread imported to verify with.
+        static RSA_VERIFY_IMPORTS: Cell<usize> = const { Cell::new(0) };
+        /// The imported RSA public key this thread last verified with.
+        static VERIFIED_RSA_WITH: RefCell<Weak<RsaKey>> = const { RefCell::new(Weak::new()) };
     }
 
     pub(super) fn count_import() {
@@ -1452,6 +1574,26 @@ mod tests {
         let before = IMPORTS.get();
         f();
         IMPORTS.get() - before
+    }
+
+    pub(super) fn count_rsa_verify_import() {
+        RSA_VERIFY_IMPORTS.set(RSA_VERIFY_IMPORTS.get() + 1);
+    }
+
+    pub(super) fn verified_rsa_with(key: &Arc<RsaKey>) {
+        VERIFIED_RSA_WITH.set(Arc::downgrade(key));
+    }
+
+    /// The imported RSA public key this thread last verified with, unless it was freed.
+    fn last_verified_rsa_with() -> Weak<RsaKey> {
+        VERIFIED_RSA_WITH.with_borrow(Weak::clone)
+    }
+
+    /// How many RSA public keys this thread imports to verify with while running `f`.
+    fn count_rsa_verify_imports(f: impl FnOnce()) -> usize {
+        let before = RSA_VERIFY_IMPORTS.get();
+        f();
+        RSA_VERIFY_IMPORTS.get() - before
     }
 
     const MESSAGE: &[u8] = b"message";
@@ -1753,6 +1895,191 @@ mod tests {
                 }
             });
             assert_eq!(imports, 0);
+        }
+    }
+
+    /// `Verifier::verify` reuses the cached `RsaKey` across `rsa-sha2-256`
+    /// and `rsa-sha2-512` verifications with the same `(n, e)`, keeps
+    /// distinct `(n, e)` entries separate, and evicts the least recently
+    /// used entry at capacity.
+    #[test]
+    fn rsa_verify_reuses_cached_keys_and_evicts_lru() {
+        let cache = RsaVerifyCache::new(RSA_VERIFY_CACHE_CAPACITY);
+        let key_2048 = rsa_2048();
+        let KeyData::Rsa(public_2048) = key_2048.public_key().key_data() else {
+            panic!("not an RSA key");
+        };
+        let (n_2048, e_2048) = rsa_public_components(public_2048).unwrap();
+
+        let imports = count_rsa_verify_imports(|| {
+            verify_rsa_cached(
+                &cache,
+                public_2048,
+                HashAlg::Sha256,
+                b"sample",
+                &RSA_2048_SHA256,
+            )
+            .unwrap();
+        });
+        assert_eq!(imports, 1);
+        let first_key = last_verified_rsa_with();
+        assert!(first_key.upgrade().is_some());
+
+        let imports = count_rsa_verify_imports(|| {
+            for (hash, sig) in [
+                (HashAlg::Sha512, &RSA_2048_SHA512[..]),
+                (HashAlg::Sha256, &RSA_2048_SHA256[..]),
+                (HashAlg::Sha512, &RSA_2048_SHA512[..]),
+            ] {
+                verify_rsa_cached(&cache, public_2048, hash, b"sample", sig).unwrap();
+                assert!(Weak::ptr_eq(&last_verified_rsa_with(), &first_key));
+            }
+        });
+        assert_eq!(imports, 0);
+
+        // Leading zero bytes in `n` or `e` are stripped before lookup, so they
+        // match the existing cache entry without re-importing.
+        let padded_n = [&[0, 0], n_2048].concat();
+        let padded_e = [&[0], e_2048].concat();
+        let imports = count_rsa_verify_imports(|| {
+            let looked_up = cache.get_or_try_insert(&padded_n, &padded_e).unwrap();
+            assert!(Arc::ptr_eq(&looked_up, &first_key.upgrade().unwrap()));
+        });
+        assert_eq!(imports, 0);
+
+        // `Verifier::verify` populates and reuses `RSA_VERIFY_KEYS`.
+        verify(
+            key_2048.public_key().key_data(),
+            b"sample",
+            &Signature::new(RSA_SHA256, RSA_2048_SHA256).unwrap(),
+        )
+        .unwrap();
+        let global_first = rsa_verify_key(n_2048, e_2048).unwrap();
+        verify(
+            key_2048.public_key().key_data(),
+            b"sample",
+            &Signature::new(RSA_SHA512, RSA_2048_SHA512).unwrap(),
+        )
+        .unwrap();
+        let global_second = rsa_verify_key(n_2048, e_2048).unwrap();
+        assert!(Arc::ptr_eq(&global_first, &global_second));
+
+        // Distinct `(n, e)` pairs do not collide, and LRU eviction drops the
+        // least recently used entry when full.
+        let lru = RsaVerifyCache::new(2);
+        let key_1024 = rsa_1024();
+        let KeyData::Rsa(public_1024) = key_1024.public_key().key_data() else {
+            panic!("not an RSA key");
+        };
+        let (n_1024, e_1024) = rsa_public_components(public_1024).unwrap();
+
+        let imported_a = lru.get_or_try_insert(n_2048, e_2048).unwrap();
+        let imported_b = lru.get_or_try_insert(n_1024, e_1024).unwrap();
+        assert!(!Arc::ptr_eq(&imported_a, &imported_b));
+        assert_eq!(lru.len(), 2);
+
+        let weak_a = Arc::downgrade(&imported_a);
+        let weak_b = Arc::downgrade(&imported_b);
+        drop(imported_a);
+        drop(imported_b);
+
+        // Touch `a`, making `b` the least recently used entry, then insert `c`
+        // (same modulus `n_2048` with a different public exponent `e = 3`).
+        assert_eq!(
+            count_rsa_verify_imports(|| {
+                let touched = lru.get_or_try_insert(n_2048, e_2048).unwrap();
+                assert!(Weak::ptr_eq(&Arc::downgrade(&touched), &weak_a));
+            }),
+            0
+        );
+        let imported_c = lru.get_or_try_insert(n_2048, &[3]).unwrap();
+        let weak_c = Arc::downgrade(&imported_c);
+        drop(imported_c);
+        assert_eq!(lru.len(), 2);
+        assert!(weak_b.upgrade().is_none());
+        assert!(weak_a.upgrade().is_some());
+        assert!(weak_c.upgrade().is_some());
+        assert!(!Weak::ptr_eq(&weak_a, &weak_c));
+
+        // Capacity bound (32 entries): inserting 36 distinct keys keeps the 32
+        // most recently used and evicts the first 4.
+        let bounded = RsaVerifyCache::new(RSA_VERIFY_CACHE_CAPACITY);
+        let mut weaks = Vec::new();
+        for i in 0..(RSA_VERIFY_CACHE_CAPACITY + 4) {
+            let mut n = n_2048.to_vec();
+            n[1] = i as u8;
+            let key = bounded.get_or_try_insert(&n, e_2048).unwrap();
+            weaks.push(Arc::downgrade(&key));
+        }
+        assert_eq!(bounded.len(), RSA_VERIFY_CACHE_CAPACITY);
+        assert!(weaks[..4].iter().all(|w| w.upgrade().is_none()));
+        assert!(weaks[4..].iter().all(|w| w.upgrade().is_some()));
+    }
+
+    /// Invalid RSA public keys fail `rsa_public_components` or
+    /// `RsaKey::set_public_key` and are never inserted into `RsaVerifyCache`.
+    #[test]
+    fn invalid_rsa_public_keys_are_not_cached() {
+        let cache = RsaVerifyCache::new(RSA_VERIFY_CACHE_CAPACITY);
+        let key_2048 = rsa_2048();
+        let KeyData::Rsa(public_2048) = key_2048.public_key().key_data() else {
+            panic!("not an RSA key");
+        };
+        let (n_2048, e_2048) = rsa_public_components(public_2048).unwrap();
+
+        let mut even_n = n_2048.to_vec();
+        *even_n.last_mut().unwrap() &= !1;
+        let small_odd_n = [0x81; 16];
+        let mut n_1023_bits = [0xff; 128];
+        n_1023_bits[0] = 0x7f;
+
+        // Rejected before or during import in `get_or_try_insert`.
+        for (bad_n, bad_e) in [
+            (&[][..], e_2048),
+            (&[0, 0][..], e_2048),
+            (&even_n[..], e_2048),
+            (&small_odd_n[..], e_2048),
+            (&n_1023_bits[..], e_2048),
+            (n_2048, &[][..]),
+            (n_2048, &[0, 0][..]),
+            (n_2048, &[1][..]),
+            (n_2048, &[2][..]),
+            (n_2048, &[1, 0, 0][..]),
+            (n_2048, &[1; 9][..]),
+        ] {
+            assert!(
+                cache.get_or_try_insert(bad_n, bad_e).is_err(),
+                "n len {}, e len {}",
+                bad_n.len(),
+                bad_e.len()
+            );
+            assert_eq!(cache.len(), 0);
+        }
+
+        // Rejected by `rsa_public_components` in `verify_rsa_cached`.
+        for (bad_n, bad_e) in [
+            (&even_n[..], e_2048),
+            (&small_odd_n[..], e_2048),
+            (&n_1023_bits[..], e_2048),
+            (n_2048, &[1][..]),
+            (n_2048, &[1, 0, 0][..]),
+        ] {
+            let bad_key = RsaPublicKey::new(
+                Mpint::from_positive_bytes(bad_e),
+                Mpint::from_positive_bytes(bad_n),
+            )
+            .unwrap();
+            assert!(
+                verify_rsa_cached(
+                    &cache,
+                    &bad_key,
+                    HashAlg::Sha256,
+                    b"sample",
+                    &RSA_2048_SHA256
+                )
+                .is_err()
+            );
+            assert_eq!(cache.len(), 0);
         }
     }
 

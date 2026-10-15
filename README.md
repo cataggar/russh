@@ -107,8 +107,7 @@ ssh-key = { git = "https://github.com/cataggar/RustCrypto-SSH", rev = "6a7e2a868
 **Algorithms.** [Supported algorithms](#supported-algorithms) has the full lists. Unlike the other backends, `symcrypt` doesn't offer:
 
 - `ssh-ed25519`: SymCrypt has no EdDSA. The `ed25519-aws-lc` feature adds it, from aws-lc-rs (see above).
-- Finite-field Diffie-Hellman (`diffie-hellman-group*` and `diffie-hellman-group-exchange-*`): the `symcrypt` crate has no API for it.
-- Legacy algorithms, which this backend doesn't implement: SHA-1 signatures and MACs (`ssh-rsa`, `hmac-sha1`, `hmac-sha1-etm@openssh.com`), the CBC modes, `3des-cbc` and `ssh-dss`.
+- Legacy algorithms, which this backend doesn't implement: SHA-1 key exchanges, signatures and MACs (`diffie-hellman-group1-sha1`, `diffie-hellman-group14-sha1`, `diffie-hellman-group-exchange-sha1`, `ssh-rsa`, `hmac-sha1`, `hmac-sha1-etm@openssh.com`), the CBC modes, `3des-cbc` and `ssh-dss`.
 - Security key signatures (`sk-ssh-ed25519@openssh.com`, `sk-ecdsa-sha2-nistp256@openssh.com`): not implemented in this backend.
 
 **Private keys.** `keys::decode_secret_key`, `keys::load_secret_key` and `keys::pkcs8::decode_pkcs8` read unencrypted keys in the OpenSSH, PKCS#8 (PEM or DER), SEC1 (`BEGIN EC PRIVATE KEY`) and PKCS#1 (`BEGIN RSA PRIVATE KEY`) formats, and SymCrypt checks the ECDSA and RSA key material. They fail with `keys::Error::UnsupportedKeyType`, whose message names the symcrypt backend, for:
@@ -140,15 +139,15 @@ The available algorithms depend on the [crypto backend](#crypto-backends); `aws-
 |---|---|---|
 | `mlkem768x25519-sha256` (post-quantum hybrid) | default | default |
 | `curve25519-sha256`, `curve25519-sha256@libssh.org` | default | default |
-| `diffie-hellman-group-exchange-sha256` (GEX) | default | — |
-| `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512` | default | — |
-| `diffie-hellman-group14-sha256` | default | — |
+| `diffie-hellman-group-exchange-sha256` (GEX) | default | default |
+| `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512` | default | default |
+| `diffie-hellman-group14-sha256` | default | default |
 | `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` | opt-in | default |
 | `diffie-hellman-group14-sha1` | opt-in | — |
 | `diffie-hellman-group1-sha1` | opt-in | — |
 | `diffie-hellman-group-exchange-sha1` (GEX) | opt-in | — |
 
-All backends support OpenSSH strict key exchange (Terrapin mitigation). `aws-lc-rs` and `ring` also support programmatic group choice for DH-GEX.
+All backends support OpenSSH strict key exchange (Terrapin mitigation) and programmatic group choice for DH-GEX.
 
 ### Ciphers
 

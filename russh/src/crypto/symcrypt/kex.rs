@@ -1,12 +1,18 @@
-//! Key agreement for the SymCrypt backend: X25519 and ECDH on NIST P-256,
-//! P-384 and P-521 (`symcrypt::ecc`), and ML-KEM-768 (`symcrypt::mlkem`),
-//! which run `curve25519-sha256` (and `@libssh.org`), `ecdh-sha2-nistp256`,
-//! `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` and `mlkem768x25519-sha256`.
+//! Key agreement for the SymCrypt backend:
 //!
-//! Finite-field Diffie-Hellman is not offered: `symcrypt-sys` has no
-//! bindings for SymCrypt's DL groups or DH, so `Dh` is [`Unsupported`], and
-//! `diffie-hellman-group*` and `diffie-hellman-group-exchange-*` are not in
-//! [`ALGORITHMS`].
+//! - X25519 and ECDH on NIST P-256, P-384 and P-521 (`symcrypt::ecc`), for
+//!   `curve25519-sha256` (and `@libssh.org`), `ecdh-sha2-nistp256`,
+//!   `ecdh-sha2-nistp384` and `ecdh-sha2-nistp521`;
+//! - ML-KEM-768 (`symcrypt::mlkem`), for `mlkem768x25519-sha256`;
+//! - finite-field Diffie-Hellman over RFC 3526 Groups 14–18 and custom DH-GEX
+//!   groups (SymCrypt's `SymCryptDlgroup*` / `SymCryptDlkey*` /
+//!   `SymCryptDhSecretAgreement` C API), for
+//!   `diffie-hellman-group-exchange-sha256`, `diffie-hellman-group14-sha256`
+//!   and `diffie-hellman-group{15,16,17,18}-sha512`.
+//!
+//! The SHA-1 finite-field Diffie-Hellman methods (`diffie-hellman-group1-sha1`,
+//! `diffie-hellman-group14-sha1` and `diffie-hellman-group-exchange-sha1`) are
+//! not offered.
 //!
 //! SymCrypt validates peer keys when importing them:
 //! - NIST points must be uncompressed (`0x04 || x || y`, as OpenSSH sends
@@ -18,21 +24,412 @@
 //!   7748 §7 allows it; honest peers' keys are always in the subgroup).
 //! - ML-KEM encapsulation keys get the FIPS 203 §7.2 checks; a malformed
 //!   ciphertext of the right length is implicitly rejected (FIPS 203 §6.3).
+//! - Finite-field DH peer public keys must lie in `(1, p - 1)` and, on the
+//!   named RFC 3526 safe-prime groups, in the prime-order subgroup of order
+//!   `q = (p - 1) / 2` (`y^q == 1 mod p`, SP 800-56A §5.6.2.3.1).
 //!
 //! Private keys are wiped by SymCrypt when they are dropped (`EcKey`,
-//! `MlKemKey`), and shared secrets are returned in [`Zeroizing`] buffers.
+//! `MlKemKey`, `SymCryptDlkeyFree`), and shared secrets are returned in
+//! [`Zeroizing`] buffers.
 
+use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::ptr::{self, NonNull};
+use std::sync::{LazyLock, Once};
 
 use symcrypt::ecc::{CurveType, EcKey, EcKeyUsage};
 use symcrypt::mlkem::{MlKemKey, MlKemParams};
+use symcrypt_sys::{
+    _SYMCRYPT_NUMBER_FORMAT_SYMCRYPT_NUMBER_FORMAT_MSB_FIRST as SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
+    SYMCRYPT_CODE_VERSION_API, SYMCRYPT_CODE_VERSION_MINOR, SYMCRYPT_ERROR,
+    SYMCRYPT_ERROR_SYMCRYPT_NO_ERROR as SYMCRYPT_NO_ERROR, SYMCRYPT_NUMBER_FORMAT,
+    SymCryptModuleInit,
+};
 use zeroize::Zeroizing;
 
-use crate::crypto::{CryptoError, Kem, KeyAgreement, Result, Unsupported};
+use crate::crypto::{CryptoError, FfDh, Kem, KeyAgreement, Result};
+use crate::kex::dh::groups::{DH_GROUP14, DH_GROUP15, DH_GROUP16, DH_GROUP17, DH_GROUP18, DhGroup};
 use crate::kex::{self, KexType};
 
-/// Not offered by this backend.
-pub(crate) type Dh = Unsupported;
+// `symcrypt-sys` does not run bindgen over SymCrypt's DLGROUP / DLKEY / DH
+// declarations. Mirror the C signatures from `symcrypt.h` and link against
+// the same shared library that `symcrypt-sys`'s `build.rs` configures.
+#[allow(non_camel_case_types)]
+mod ffi {
+    use super::{SYMCRYPT_ERROR, SYMCRYPT_NUMBER_FORMAT, c_void};
+
+    #[repr(C)]
+    pub(super) struct SYMCRYPT_DLGROUP {
+        _private: [u8; 0],
+    }
+
+    #[repr(C)]
+    pub(super) struct SYMCRYPT_DLKEY {
+        _private: [u8; 0],
+    }
+
+    pub(super) const SYMCRYPT_DLGROUP_FIPS_NONE: u32 = 0;
+    pub(super) const SYMCRYPT_DLGROUP_DH_SAFEPRIMETYPE_IKE_3526: u32 = 1;
+    pub(super) const SYMCRYPT_FLAG_DLKEY_DH: u32 = 0x2000;
+    pub(super) const SYMCRYPT_FLAG_KEY_NO_FIPS: u32 = 0x100;
+
+    #[link(name = "symcrypt", kind = "dylib")]
+    unsafe extern "C" {
+        pub(super) fn SymCryptDlgroupAllocate(
+            n_bits_of_p: u32,
+            n_bits_of_q: u32,
+        ) -> *mut SYMCRYPT_DLGROUP;
+        pub(super) fn SymCryptDlgroupFree(p_dlgroup: *mut SYMCRYPT_DLGROUP);
+        pub(super) fn SymCryptDlgroupSetValue(
+            pb_prime_p: *const u8,
+            cb_prime_p: usize,
+            pb_prime_q: *const u8,
+            cb_prime_q: usize,
+            pb_gen_g: *const u8,
+            cb_gen_g: usize,
+            num_format: SYMCRYPT_NUMBER_FORMAT,
+            p_hash_algorithm: *const c_void,
+            pb_seed: *const u8,
+            cb_seed: usize,
+            gen_counter: u32,
+            fips_standard: u32,
+            p_dlgroup: *mut SYMCRYPT_DLGROUP,
+        ) -> SYMCRYPT_ERROR;
+        pub(super) fn SymCryptDlgroupSetValueSafePrime(
+            dh_safe_prime_type: u32,
+            p_dlgroup: *mut SYMCRYPT_DLGROUP,
+        ) -> SYMCRYPT_ERROR;
+
+        pub(super) fn SymCryptDlkeyAllocate(
+            p_dlgroup: *const SYMCRYPT_DLGROUP,
+        ) -> *mut SYMCRYPT_DLKEY;
+        pub(super) fn SymCryptDlkeyFree(pk_obj: *mut SYMCRYPT_DLKEY);
+        pub(super) fn SymCryptDlkeySizeofPublicKey(pk_dlkey: *const SYMCRYPT_DLKEY) -> u32;
+        pub(super) fn SymCryptDlkeyGenerate(
+            flags: u32,
+            pk_dlkey: *mut SYMCRYPT_DLKEY,
+        ) -> SYMCRYPT_ERROR;
+        pub(super) fn SymCryptDlkeySetValue(
+            pb_private_key: *const u8,
+            cb_private_key: usize,
+            pb_public_key: *const u8,
+            cb_public_key: usize,
+            num_format: SYMCRYPT_NUMBER_FORMAT,
+            flags: u32,
+            pk_dlkey: *mut SYMCRYPT_DLKEY,
+        ) -> SYMCRYPT_ERROR;
+        pub(super) fn SymCryptDlkeyGetValue(
+            pk_dlkey: *const SYMCRYPT_DLKEY,
+            pb_private_key: *mut u8,
+            cb_private_key: usize,
+            pb_public_key: *mut u8,
+            cb_public_key: usize,
+            num_format: SYMCRYPT_NUMBER_FORMAT,
+            flags: u32,
+        ) -> SYMCRYPT_ERROR;
+        pub(super) fn SymCryptDhSecretAgreement(
+            pk_private: *const SYMCRYPT_DLKEY,
+            pk_public: *const SYMCRYPT_DLKEY,
+            num_format: SYMCRYPT_NUMBER_FORMAT,
+            flags: u32,
+            pb_agreed_secret: *mut u8,
+            cb_agreed_secret: usize,
+        ) -> SYMCRYPT_ERROR;
+    }
+}
+
+fn init() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: `SymCryptModuleInit` is idempotent and thread-safe; the
+        // version constants come from the paired `symcrypt-sys` crate.
+        unsafe {
+            SymCryptModuleInit(SYMCRYPT_CODE_VERSION_API, SYMCRYPT_CODE_VERSION_MINOR);
+        }
+    });
+}
+
+struct DlGroup(NonNull<ffi::SYMCRYPT_DLGROUP>);
+
+// SAFETY: Once initialized by `SymCryptDlgroupSetValue*`, a `SYMCRYPT_DLGROUP`
+// is immutable and safe to share or move across threads.
+unsafe impl Send for DlGroup {}
+unsafe impl Sync for DlGroup {}
+
+impl Drop for DlGroup {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` was allocated by `SymCryptDlgroupAllocate` and is
+        // uniquely owned by `self`.
+        unsafe {
+            ffi::SymCryptDlgroupFree(self.0.as_ptr());
+        }
+    }
+}
+
+impl DlGroup {
+    fn new_safe_prime(bits: u32) -> Option<Self> {
+        init();
+        // SAFETY: `SymCryptModuleInit` has been called; `SymCryptDlgroupAllocate`
+        // returns either a valid pointer or null on allocation failure.
+        let ptr = unsafe { ffi::SymCryptDlgroupAllocate(bits, 0) };
+        let group = Self(NonNull::new(ptr)?);
+        // SAFETY: `group.0` was allocated with `bits` matching one of the
+        // RFC 3526 safe-prime bit lengths supported by SymCrypt.
+        let err = unsafe {
+            ffi::SymCryptDlgroupSetValueSafePrime(
+                ffi::SYMCRYPT_DLGROUP_DH_SAFEPRIMETYPE_IKE_3526,
+                group.0.as_ptr(),
+            )
+        };
+        (err == SYMCRYPT_NO_ERROR).then_some(group)
+    }
+
+    fn new_custom(prime: &[u8], generator: &[u8]) -> Result<Self> {
+        if !(128..=1024).contains(&prime.len())
+            || prime.last().is_none_or(|b| b & 1 != 1)
+            || !in_range(generator, prime)
+        {
+            return Err(CryptoError);
+        }
+        let bits = u32::try_from(prime.len())
+            .ok()
+            .and_then(|n| n.checked_mul(8))
+            .ok_or(CryptoError)?;
+        init();
+        // SAFETY: `SymCryptModuleInit` has been called; `bits` is in
+        // `1024..=8192`.
+        let ptr = unsafe { ffi::SymCryptDlgroupAllocate(bits, 0) };
+        let group = Self(NonNull::new(ptr).ok_or(CryptoError)?);
+        // SAFETY: `prime` and `generator` are valid slices within the allocated
+        // group's modulus capacity (`bits`), and `group.0` is a valid group
+        // object.
+        let err = unsafe {
+            ffi::SymCryptDlgroupSetValue(
+                prime.as_ptr(),
+                prime.len(),
+                ptr::null(),
+                0,
+                generator.as_ptr(),
+                generator.len(),
+                SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
+                ptr::null(),
+                ptr::null(),
+                0,
+                0,
+                ffi::SYMCRYPT_DLGROUP_FIPS_NONE,
+                group.0.as_ptr(),
+            )
+        };
+        if err != SYMCRYPT_NO_ERROR {
+            return Err(CryptoError);
+        }
+        Ok(group)
+    }
+}
+
+static GROUP14: LazyLock<Option<DlGroup>> = LazyLock::new(|| DlGroup::new_safe_prime(2048));
+static GROUP15: LazyLock<Option<DlGroup>> = LazyLock::new(|| DlGroup::new_safe_prime(3072));
+static GROUP16: LazyLock<Option<DlGroup>> = LazyLock::new(|| DlGroup::new_safe_prime(4096));
+static GROUP17: LazyLock<Option<DlGroup>> = LazyLock::new(|| DlGroup::new_safe_prime(6144));
+static GROUP18: LazyLock<Option<DlGroup>> = LazyLock::new(|| DlGroup::new_safe_prime(8192));
+
+enum GroupRef {
+    Static(&'static DlGroup),
+    Owned(DlGroup),
+}
+
+impl GroupRef {
+    fn as_ptr(&self) -> *const ffi::SYMCRYPT_DLGROUP {
+        match self {
+            Self::Static(group) => group.0.as_ptr(),
+            Self::Owned(group) => group.0.as_ptr(),
+        }
+    }
+}
+
+struct DlKey(NonNull<ffi::SYMCRYPT_DLKEY>);
+
+// SAFETY: A `SYMCRYPT_DLKEY` is uniquely owned by `DlKey` and is not mutated
+// concurrently across threads.
+unsafe impl Send for DlKey {}
+unsafe impl Sync for DlKey {}
+
+impl Drop for DlKey {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` was allocated by `SymCryptDlkeyAllocate`, is
+        // uniquely owned by `self`, and its backing `SYMCRYPT_DLGROUP` is still
+        // alive when `DlKey` is dropped.
+        unsafe {
+            ffi::SymCryptDlkeyFree(self.0.as_ptr());
+        }
+    }
+}
+
+impl DlKey {
+    fn allocate(group: *const ffi::SYMCRYPT_DLGROUP) -> Result<Self> {
+        // SAFETY: `group` is an initialized `SYMCRYPT_DLGROUP` that outlives
+        // the returned `DlKey`.
+        let ptr = unsafe { ffi::SymCryptDlkeyAllocate(group) };
+        Ok(Self(NonNull::new(ptr).ok_or(CryptoError)?))
+    }
+}
+
+fn strip_leading_zeros(mut bytes: &[u8]) -> &[u8] {
+    while let [0, rest @ ..] = bytes {
+        bytes = rest;
+    }
+    bytes
+}
+
+/// Checks `1 < x < p - 1` for big-endian unsigned integers `x` and `prime`,
+/// where `prime` has no leading zero bytes, is at least 128 bytes long, and is
+/// odd.
+fn in_range(x: &[u8], prime: &[u8]) -> bool {
+    let x = strip_leading_zeros(x);
+    let ([x_prefix @ .., x_last], [p_prefix @ .., p_last]) = (x, prime) else {
+        return false;
+    };
+    if x_prefix.is_empty() && *x_last <= 1 {
+        return false;
+    }
+    if x.len() != prime.len() {
+        return x.len() < prime.len();
+    }
+    // `prime` is odd, so `p - 1` has the same prefix bytes and last byte
+    // `p_last - 1`.
+    (x_prefix, *x_last) < (p_prefix, p_last.saturating_sub(1))
+}
+
+fn resolve_group(prime: &[u8], generator: &[u8]) -> Result<(GroupRef, u32)> {
+    if generator == [2] {
+        let named = if prime == &*DH_GROUP14.prime {
+            Some(&*GROUP14)
+        } else if prime == &*DH_GROUP15.prime {
+            Some(&*GROUP15)
+        } else if prime == &*DH_GROUP16.prime {
+            Some(&*GROUP16)
+        } else if prime == &*DH_GROUP17.prime {
+            Some(&*GROUP17)
+        } else if prime == &*DH_GROUP18.prime {
+            Some(&*GROUP18)
+        } else {
+            None
+        };
+        if let Some(group) = named {
+            let group = group.as_ref().ok_or(CryptoError)?;
+            return Ok((GroupRef::Static(group), ffi::SYMCRYPT_FLAG_DLKEY_DH));
+        }
+    }
+    let group = DlGroup::new_custom(prime, generator)?;
+    Ok((
+        GroupRef::Owned(group),
+        ffi::SYMCRYPT_FLAG_DLKEY_DH | ffi::SYMCRYPT_FLAG_KEY_NO_FIPS,
+    ))
+}
+
+/// Ephemeral finite-field Diffie-Hellman key pair backed by SymCrypt's
+/// `SYMCRYPT_DLGROUP` / `SYMCRYPT_DLKEY` C API.
+pub(crate) struct Dh {
+    /// Must be declared before `group` so `SymCryptDlkeyFree` runs before
+    /// `SymCryptDlgroupFree` (`SymCryptDlkeyFree` reads group sizes through
+    /// `pkObj->pDlgroup`).
+    private_key: DlKey,
+    group: GroupRef,
+    prime: Vec<u8>,
+    flags: u32,
+}
+
+impl FfDh for Dh {
+    fn generate(group: &DhGroup, _is_server: bool) -> Result<(Self, Vec<u8>)> {
+        let prime = strip_leading_zeros(&group.prime);
+        let generator = strip_leading_zeros(&group.generator);
+        let (group_ref, flags) = resolve_group(prime, generator)?;
+        let private_key = DlKey::allocate(group_ref.as_ptr())?;
+        // SAFETY: `private_key` is a freshly allocated `SYMCRYPT_DLKEY` bound
+        // to `group_ref`.
+        let err = unsafe { ffi::SymCryptDlkeyGenerate(flags, private_key.0.as_ptr()) };
+        if err != SYMCRYPT_NO_ERROR {
+            return Err(CryptoError);
+        }
+        // SAFETY: `private_key` is a valid key object.
+        let pub_len =
+            usize::try_from(unsafe { ffi::SymCryptDlkeySizeofPublicKey(private_key.0.as_ptr()) })
+                .map_err(|_| CryptoError)?;
+        let mut public_key = vec![0u8; pub_len];
+        // SAFETY: `public_key` has `pub_len` writable bytes; a null private-key
+        // pointer with length 0 exports only the public key.
+        let err = unsafe {
+            ffi::SymCryptDlkeyGetValue(
+                private_key.0.as_ptr(),
+                ptr::null_mut(),
+                0,
+                public_key.as_mut_ptr(),
+                public_key.len(),
+                SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
+                0,
+            )
+        };
+        if err != SYMCRYPT_NO_ERROR || !in_range(&public_key, prime) {
+            return Err(CryptoError);
+        }
+        Ok((
+            Self {
+                private_key,
+                group: group_ref,
+                prime: prime.to_vec(),
+                flags,
+            },
+            public_key,
+        ))
+    }
+
+    fn agree(&self, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        let peer = strip_leading_zeros(peer_public_key);
+        if !in_range(peer, &self.prime) {
+            return Err(CryptoError);
+        }
+        let peer_key = DlKey::allocate(self.group.as_ptr())?;
+        // SAFETY: `peer` is non-empty and at most `self.prime.len()` bytes
+        // (`cbPrimeP`), and `peer_key` is allocated on the same `SYMCRYPT_DLGROUP`.
+        let err = unsafe {
+            ffi::SymCryptDlkeySetValue(
+                ptr::null(),
+                0,
+                peer.as_ptr(),
+                peer.len(),
+                SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
+                self.flags,
+                peer_key.0.as_ptr(),
+            )
+        };
+        if err != SYMCRYPT_NO_ERROR {
+            return Err(CryptoError);
+        }
+        // SAFETY: `self.private_key` is a valid key object.
+        let secret_len = usize::try_from(unsafe {
+            ffi::SymCryptDlkeySizeofPublicKey(self.private_key.0.as_ptr())
+        })
+        .map_err(|_| CryptoError)?;
+        let mut shared = Zeroizing::new(vec![0u8; secret_len]);
+        // SAFETY: `self.private_key` and `peer_key` belong to the same
+        // `SYMCRYPT_DLGROUP`, and `shared` has `secret_len` (`cbPrimeP`)
+        // writable bytes.
+        let err = unsafe {
+            ffi::SymCryptDhSecretAgreement(
+                self.private_key.0.as_ptr(),
+                peer_key.0.as_ptr(),
+                SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
+                0,
+                shared.as_mut_ptr(),
+                shared.len(),
+            )
+        };
+        if err != SYMCRYPT_NO_ERROR || !in_range(&shared, &self.prime) {
+            return Err(CryptoError);
+        }
+        Ok(shared)
+    }
+}
 
 pub(crate) struct X25519;
 
@@ -186,11 +583,17 @@ pub(crate) static ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))] = &[
     (&kex::ECDH_SHA2_NISTP256, &kex::_ECDH_SHA2_NISTP256),
     (&kex::ECDH_SHA2_NISTP384, &kex::_ECDH_SHA2_NISTP384),
     (&kex::ECDH_SHA2_NISTP521, &kex::_ECDH_SHA2_NISTP521),
+    (&kex::DH_GEX_SHA256, &kex::_DH_GEX_SHA256),
+    (&kex::DH_G18_SHA512, &kex::_DH_G18_SHA512),
+    (&kex::DH_G17_SHA512, &kex::_DH_G17_SHA512),
+    (&kex::DH_G16_SHA512, &kex::_DH_G16_SHA512),
+    (&kex::DH_G15_SHA512, &kex::_DH_G15_SHA512),
+    (&kex::DH_G14_SHA256, &kex::_DH_G14_SHA256),
 ];
 
 /// Default key exchange preference: all of them, in the order of
-/// `kex::ALL_KEX_ALGORITHMS` (the RFC 8308 / strict-kex extension
-/// pseudo-algorithms are appended by `Preferred`).
+/// [`ALGORITHMS`] (the RFC 8308 / strict-kex extension pseudo-algorithms are
+/// appended by `Preferred`).
 pub(crate) const DEFAULT_ORDER: &[kex::Name] = &[
     kex::MLKEM768X25519_SHA256,
     kex::CURVE25519,
@@ -198,6 +601,12 @@ pub(crate) const DEFAULT_ORDER: &[kex::Name] = &[
     kex::ECDH_SHA2_NISTP256,
     kex::ECDH_SHA2_NISTP384,
     kex::ECDH_SHA2_NISTP521,
+    kex::DH_GEX_SHA256,
+    kex::DH_G18_SHA512,
+    kex::DH_G17_SHA512,
+    kex::DH_G16_SHA512,
+    kex::DH_G15_SHA512,
+    kex::DH_G14_SHA256,
 ];
 
 #[cfg(test)]
@@ -208,9 +617,10 @@ mod tests {
 
     use super::*;
     use crate::cipher::{self, SealingKey};
+    use crate::client::GexParams;
     use crate::crypto::symcrypt::hash::{Sha256, Sha384, Sha512};
     use crate::crypto::{FfDh, Hash};
-    use crate::kex::dh::groups::DH_GROUP14;
+    use crate::kex::dh::groups::{DH_GROUP1, DH_GROUP14, DhGroupUInt};
     use crate::kex::{
         KexAlgorithm, KexAlgorithmImplementor, SharedSecret, compute_keys, encode_mpint,
     };
@@ -228,6 +638,39 @@ mod tests {
         hex!("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
     const X25519_SHARED: [u8; 32] =
         hex!("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+
+    // Known-answer test vector for RFC 3526 2048-bit MODP Group 14 (`DH_GROUP14`)
+    // using `ALICE_PRIVATE` and `BOB_PRIVATE` as big-endian exponents.
+    const DH14_ALICE_PUBLIC: [u8; 256] = hex!(
+        "5784573243556b2a5943d9f7c7cbe8f0b0348e937e579f2964ef6a484dd5b9dd"
+        "38b17df216a5f8dc55e7e8ef7c9b9256d152b33879fec77aaa95186a3f28b39d"
+        "bd66262cb005915ff257ee9a7b299ca17599187d1fbf866a75155232b91886f7"
+        "f5dc3a2ca99014f441854a69204ff30d55cbf9a0972405398f2acf7f80de2a75"
+        "689436bc0c84a8b2e7e9f4791203ea7ac6eebc09a3d58dd6d16a1a0d64874474"
+        "9e929785cdf84b73c5c519c83db85c624262970fe3f48604ad0a5e1da21c0e70"
+        "17b4e7863981adae25c05cc10c34fe30557366f3e1a3c581367180ee7d7fe1e7"
+        "414711e6e26f2a651b29ed1d464fe1a90f822d64115c66da285552c1f5e0fe67"
+    );
+    const DH14_BOB_PUBLIC: [u8; 256] = hex!(
+        "dce454917767021012065aa3208969c8abc123b7ea7327e33d6dbea29baa5158"
+        "e5c8f9fa2e0b8413c85861d75d1c6bb182926db13ecec2fdead9d977f65ca04b"
+        "58876a2e6aeffe9f41a51c933661ed6d7c8bd3e189b77fae46b19f4b57f4f7b6"
+        "071c41285f623156a881e12b2e41272ead74110910b03448c05cd63247d72ca8"
+        "58c434e0539169c0786414a76b4197a22e3938535a827f9341170d5169e0d1c8"
+        "b1586a6357de612d2d3e75c4ff48352c046236a8ff831b34e0541817bb101a7b"
+        "7fc97500293750e8cba39001de2a54b3288b1b22c937f83affcc91f1b51c5aca"
+        "af14cc5f9930ed883cb1ceae9bd7b44cfaf851928f1ef959d7f3810975f685fe"
+    );
+    const DH14_SHARED: [u8; 256] = hex!(
+        "37d4642afc2829669eeeeccdafc7d9ed8762412b9c8b6b8d7c67e704a1388ba3"
+        "18d23eedbd2c1809cb06aa91973978d0c1eb82da33beae9f9d04031f28cc106c"
+        "de4fe3e40dd89cca6632224287992c827e3400228ca4ae9f81705d69949d61ba"
+        "cecbb4262885c98d2ad20b30788a7dfcf6428014bbe4f2584088620757ce3744"
+        "e51212094ef2aed7b739c2546554290d0ee93c75471cb00c9e202a1638a9fdc7"
+        "56da0f6cc41f1adec7fd725ebae438b55ab56ff1436ae528640fb535214432eb"
+        "4c64f012354569868f59fd74e6f7d224805047b32c7cbbfffeddc05ffb1aaaea"
+        "2de1cc9b360afe1cbac4fd0a476c45b9e509294f126022321d4922b1ac58a285"
+    );
 
     /// Imports an RFC 7748 scalar (SymCrypt only takes clamped ones).
     fn x25519_private_key(scalar: &[u8; 32]) -> EcKey {
@@ -576,9 +1019,178 @@ mod tests {
         assert!(MlKem768::encapsulate(&encapsulation_key).is_err());
     }
 
+    fn dh_from_private(group: &DhGroup, private_bytes: &[u8]) -> (Dh, Vec<u8>) {
+        let prime = strip_leading_zeros(&group.prime);
+        let generator = strip_leading_zeros(&group.generator);
+        let (group_ref, flags) = resolve_group(prime, generator).unwrap();
+        let private_key = DlKey::allocate(group_ref.as_ptr()).unwrap();
+        let err = unsafe {
+            ffi::SymCryptDlkeySetValue(
+                private_bytes.as_ptr(),
+                private_bytes.len(),
+                ptr::null(),
+                0,
+                SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
+                flags,
+                private_key.0.as_ptr(),
+            )
+        };
+        assert_eq!(err, SYMCRYPT_NO_ERROR);
+        let pub_len =
+            usize::try_from(unsafe { ffi::SymCryptDlkeySizeofPublicKey(private_key.0.as_ptr()) })
+                .unwrap();
+        let mut public_key = vec![0u8; pub_len];
+        let err = unsafe {
+            ffi::SymCryptDlkeyGetValue(
+                private_key.0.as_ptr(),
+                ptr::null_mut(),
+                0,
+                public_key.as_mut_ptr(),
+                public_key.len(),
+                SYMCRYPT_NUMBER_FORMAT_MSB_FIRST,
+                0,
+            )
+        };
+        assert_eq!(err, SYMCRYPT_NO_ERROR);
+        (
+            Dh {
+                private_key,
+                group: group_ref,
+                prime: prime.to_vec(),
+                flags,
+            },
+            public_key,
+        )
+    }
+
     #[test]
-    fn dh_is_unsupported() {
-        assert!(<Dh as FfDh>::generate(&DH_GROUP14, false).is_err());
+    fn dh_known_answer_and_leading_zero_mpint() {
+        let (alice, alice_pub) = dh_from_private(&DH_GROUP14, &ALICE_PRIVATE);
+        let (bob, bob_pub) = dh_from_private(&DH_GROUP14, &BOB_PRIVATE);
+        assert_eq!(alice_pub.as_slice(), &DH14_ALICE_PUBLIC);
+        assert_eq!(bob_pub.as_slice(), &DH14_BOB_PUBLIC);
+
+        // `DH14_BOB_PUBLIC[0]` is `0xdc` (MSB bit 7 set), so SSH `mpint`
+        // encoding prepends a `0x00` sign byte (`cbPrimeP + 1` = 257 bytes).
+        assert!(bob_pub[0] & 0x80 != 0);
+        let mut bob_mpint = Vec::with_capacity(bob_pub.len() + 1);
+        bob_mpint.push(0x00);
+        bob_mpint.extend_from_slice(&bob_pub);
+
+        let alice_shared = alice.agree(&bob_mpint).unwrap();
+        let bob_shared = bob.agree(&alice_pub).unwrap();
+        assert_eq!(alice_shared.as_slice(), &DH14_SHARED);
+        assert_eq!(bob_shared.as_slice(), &DH14_SHARED);
+    }
+
+    #[test]
+    fn dh_round_trip_named_and_custom_groups() {
+        // Custom 2048-bit group with generator 4 (quadratic residue subgroup of
+        // Group 14), plus RFC 2409 1024-bit `DH_GROUP1` (with and without
+        // leading zero padding), exercising `SymCryptDlgroupSetValue` with
+        // `SYMCRYPT_FLAG_KEY_NO_FIPS`.
+        let custom_g4 = DhGroup {
+            prime: DH_GROUP14.prime.clone(),
+            generator: DhGroupUInt::new(&[4]),
+        };
+        let mut padded_prime = vec![0x00, 0x00];
+        padded_prime.extend_from_slice(&DH_GROUP1.prime);
+        let custom_padded = DhGroup {
+            prime: DhGroupUInt::from(padded_prime),
+            generator: DhGroupUInt::new(&[0x00, 2]),
+        };
+
+        for group in [
+            &DH_GROUP14,
+            &DH_GROUP15,
+            &DH_GROUP16,
+            &DH_GROUP17,
+            &DH_GROUP18,
+            &DH_GROUP1,
+            &custom_g4,
+            &custom_padded,
+        ] {
+            let (alice, alice_pub) = Dh::generate(group, false).unwrap();
+            let (bob, bob_pub) = Dh::generate(group, true).unwrap();
+            let expected_len = strip_leading_zeros(&group.prime).len();
+            assert_eq!(alice_pub.len(), expected_len);
+            assert_eq!(bob_pub.len(), expected_len);
+
+            let mut bob_mpint = vec![0x00];
+            bob_mpint.extend_from_slice(&bob_pub);
+            let s1 = alice.agree(&bob_mpint).unwrap();
+            let s2 = bob.agree(&alice_pub).unwrap();
+            assert_eq!(s1.as_slice(), s2.as_slice());
+        }
+    }
+
+    #[test]
+    fn dh_rejects_invalid_groups_and_peer_public_keys() {
+        // Invalid custom groups: prime too short (< 128 bytes), too long
+        // (> 1024 bytes), even prime, or out-of-range generator.
+        let mut even_prime = DH_GROUP14.prime.to_vec();
+        *even_prime.last_mut().unwrap() &= !1;
+
+        for bad_group in [
+            DhGroup {
+                prime: DhGroupUInt::from(vec![0xff; 127]),
+                generator: DhGroupUInt::new(&[2]),
+            },
+            DhGroup {
+                prime: DhGroupUInt::from(vec![0xff; 1025]),
+                generator: DhGroupUInt::new(&[2]),
+            },
+            DhGroup {
+                prime: DhGroupUInt::from(even_prime),
+                generator: DhGroupUInt::new(&[2]),
+            },
+            DhGroup {
+                prime: DH_GROUP14.prime.clone(),
+                generator: DhGroupUInt::new(&[0]),
+            },
+            DhGroup {
+                prime: DH_GROUP14.prime.clone(),
+                generator: DhGroupUInt::new(&[1]),
+            },
+            DhGroup {
+                prime: DH_GROUP14.prime.clone(),
+                generator: DH_GROUP14.prime.clone(),
+            },
+        ] {
+            assert!(Dh::generate(&bad_group, false).is_err());
+        }
+
+        let p = DH_GROUP14.prime.to_vec();
+        let mut p_minus_1 = p.clone();
+        *p_minus_1.last_mut().unwrap() -= 1;
+        let mut p_minus_2 = p.clone();
+        *p_minus_2.last_mut().unwrap() -= 2;
+        let mut p_plus_1 = vec![0x01];
+        p_plus_1.resize(p.len() + 1, 0x00);
+        *p_plus_1.last_mut().unwrap() = 1;
+
+        // `p - 2` satisfies `1 < p - 2 < p - 1`, so it passes `in_range`, but
+        // since `p == 7 (mod 8)` for RFC 3526 Group 14, `((-2)/p) = -1` and
+        // `(p - 2)^q == p - 1 != 1 (mod p)`. SymCrypt's SP 800-56A full
+        // public-key validation on named safe-prime groups must reject it.
+        let (alice, _) = Dh::generate(&DH_GROUP14, false).unwrap();
+        for bad_peer in [
+            &[][..],
+            &[0][..],
+            &[0, 0, 0][..],
+            &[1][..],
+            &[0, 1][..],
+            &p_minus_1,
+            &p,
+            &p_plus_1,
+            &p_minus_2,
+        ] {
+            assert!(
+                alice.agree(bad_peer).is_err(),
+                "accepted invalid peer key of len {}",
+                bad_peer.len()
+            );
+        }
     }
 
     #[test]
@@ -590,6 +1202,12 @@ mod tests {
             kex::ECDH_SHA2_NISTP256,
             kex::ECDH_SHA2_NISTP384,
             kex::ECDH_SHA2_NISTP521,
+            kex::DH_GEX_SHA256,
+            kex::DH_G18_SHA512,
+            kex::DH_G17_SHA512,
+            kex::DH_G16_SHA512,
+            kex::DH_G15_SHA512,
+            kex::DH_G14_SHA256,
         ];
         assert_eq!(DEFAULT_ORDER, expected);
         assert!(ALGORITHMS.iter().map(|(name, _)| **name).eq(expected));
@@ -821,6 +1439,12 @@ mod tests {
             let kex_type = kex::KEXES.get(name).unwrap();
             let (mut client, mut server) = (kex_type.make(), kex_type.make());
             let mut exchange = Exchange::new(b"SSH-2.0-client", b"SSH-2.0-server");
+            if client.is_dh_gex() {
+                let params = GexParams::new(2048, 2048, 8192).unwrap();
+                client.dh_gex_set_group(DH_GROUP14.clone()).unwrap();
+                server.dh_gex_set_group(DH_GROUP14.clone()).unwrap();
+                exchange.gex = Some((params, DH_GROUP14.clone()));
+            }
             let mut init = Vec::new();
             client
                 .client_dh(&mut exchange.client_ephemeral, &mut init)
