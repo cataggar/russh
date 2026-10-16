@@ -66,7 +66,7 @@ pub(crate) trait Cipher {
 /// `clear`
 pub const CLEAR: Name = Name("clear");
 /// `3des-cbc`
-#[cfg(feature = "des")]
+#[cfg(feature = "3des-cbc")]
 pub const TRIPLE_DES_CBC: Name = Name("3des-cbc");
 /// `aes128-ctr`
 pub const AES_128_CTR: Name = Name("aes128-ctr");
@@ -96,7 +96,7 @@ pub(crate) static _CLEAR: Clear = Clear {};
 pub static ALL_CIPHERS: &[&Name] = &[
     &CLEAR,
     &NONE,
-    #[cfg(feature = "des")]
+    #[cfg(feature = "3des-cbc")]
     &TRIPLE_DES_CBC,
     &AES_128_CTR,
     &AES_192_CTR,
@@ -117,6 +117,28 @@ pub(crate) static CIPHERS: LazyLock<HashMap<&'static Name, &(dyn Cipher + Send +
         h.extend(provider::cipher::ALGORITHMS.iter().copied());
         h
     });
+
+/// For each cipher: its name, whether its crate feature is enabled, and
+/// whether it is legacy.
+const FEATURES: &[(&str, bool, bool)] = &[
+    (AES_256_GCM.0, cfg!(feature = "aes256-gcm"), false),
+    (AES_128_GCM.0, cfg!(feature = "aes128-gcm"), false),
+    (
+        CHACHA20_POLY1305.0,
+        cfg!(feature = "chacha20-poly1305"),
+        false,
+    ),
+    (AES_256_CTR.0, cfg!(feature = "aes256-ctr"), false),
+    (AES_192_CTR.0, cfg!(feature = "aes192-ctr"), false),
+    (AES_128_CTR.0, cfg!(feature = "aes128-ctr"), false),
+    (AES_256_CBC.0, cfg!(feature = "aes256-cbc"), true),
+    (AES_192_CBC.0, cfg!(feature = "aes192-cbc"), true),
+    (AES_128_CBC.0, cfg!(feature = "aes128-cbc"), true),
+    #[cfg(feature = "3des-cbc")]
+    (TRIPLE_DES_CBC.0, true, true),
+    (NONE.0, cfg!(feature = "none"), true),
+    (CLEAR.0, cfg!(feature = "none"), true),
+];
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 pub struct Name(&'static str);
@@ -143,6 +165,28 @@ impl TryFrom<&str> for Name {
     type Error = ();
     fn try_from(s: &str) -> Result<Name, ()> {
         CIPHERS.keys().find(|x| x.0 == s).map(|x| **x).ok_or(())
+    }
+}
+
+impl Name {
+    /// Whether the crate feature of this cipher is enabled, so that russh
+    /// negotiates it if the crypto backend implements it. Each cipher has a
+    /// feature of the same name, without `@openssh.com`; `none` (and `clear`)
+    /// have the `none` feature. See [`crate::kex::Name::is_enabled`].
+    pub const fn is_enabled(&self) -> bool {
+        matches!(
+            crate::helpers::algorithm_flags(FEATURES, self.0),
+            Some((true, _))
+        )
+    }
+
+    /// Whether this is a legacy cipher (CBC, 3DES, or `none`), which
+    /// `Preferred::default()` doesn't offer even when it is enabled.
+    pub(crate) const fn is_legacy(&self) -> bool {
+        matches!(
+            crate::helpers::algorithm_flags(FEATURES, self.0),
+            Some((_, true))
+        )
     }
 }
 
@@ -360,3 +404,23 @@ pub(crate) const MAXIMUM_DECOMPRESSED_PACKET_LEN: usize = MAXIMUM_PACKET_LEN;
 
 #[cfg(feature = "_bench")]
 pub mod benchmark;
+
+#[cfg(test)]
+mod tests {
+    /// Every cipher has exactly one entry in `FEATURES`.
+    #[test]
+    fn every_cipher_has_a_feature() {
+        let mut names: Vec<&str> = super::FEATURES.iter().map(|(name, ..)| *name).collect();
+        names.sort_unstable();
+        let mut all: Vec<&str> = super::ALL_CIPHERS.iter().map(|n| n.0).collect();
+        all.sort_unstable();
+        assert_eq!(names, all);
+        assert_eq!(
+            super::AES_256_GCM.is_enabled(),
+            cfg!(feature = "aes256-gcm")
+        );
+        assert_eq!(super::NONE.is_enabled(), cfg!(feature = "none"));
+        assert!(super::AES_128_CBC.is_legacy());
+        assert!(!super::CHACHA20_POLY1305.is_legacy());
+    }
+}

@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Checks AES-256-GCM, so only builds that can negotiate it.
+#![cfg(feature = "aes256-gcm")]
 
 mod common;
 

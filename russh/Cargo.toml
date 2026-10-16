@@ -13,18 +13,111 @@ version = "0.64.1"
 rust-version = "1.89"
 
 [features]
-default = ["flate2", "aws-lc-rs", "rsa"]
+default = ["flate2", "aws-lc-rs", "rsa", "secure-algorithms"]
 # Crypto backends: enable at least one of `aws-lc-rs`, `ring` or `symcrypt`.
 # If several are enabled, the first of `aws-lc-rs`, `ring`, `symcrypt` is used.
 aws-lc-rs = ["dep:aws-lc-rs", "_rustcrypto"] # Default crypto backend.
 async-trait = ["dep:async-trait"]
-# Danger: 3DES cipher is insecure.
-des = ["dep:des"]
+# Danger: 3DES cipher is insecure. The old name of the `3des-cbc` feature.
+des = ["3des-cbc"]
 # Danger: DSA algorithm is insecure.
 dsa = ["ssh-key/dsa"]
 ring = ["dep:ring", "_rustcrypto"] # Alternative crypto backend.
 rsa = ["dep:rsa", "dep:pkcs1", "ssh-key/rsa"]
 serde = ["ssh-key/serde"]
+
+# Key exchange methods, ciphers and MACs: one feature per algorithm (for
+# `curve25519-sha256`, both of its names). Russh negotiates only the ones whose
+# features are enabled, and that the crypto backend implements (README.md
+# lists them), whatever `Preferred` lists. `Preferred::default()` offers the
+# enabled ones except the legacy ones (SHA-1, CBC, 3DES and `none`), which are
+# negotiated only when configured in `Preferred`. A build needs at least one
+# key exchange method and one cipher, and a MAC unless one of its ciphers is
+# an AEAD.
+#
+# The algorithms that are enabled by default: all but the legacy ones.
+secure-algorithms = [
+  "mlkem1024nistp384-sha384",
+  "mlkem768nistp256-sha256",
+  "mlkem768x25519-sha256",
+  "curve25519-sha256",
+  "ecdh-sha2-nistp256",
+  "ecdh-sha2-nistp384",
+  "ecdh-sha2-nistp521",
+  "diffie-hellman-group-exchange-sha256",
+  "diffie-hellman-group14-sha256",
+  "diffie-hellman-group15-sha512",
+  "diffie-hellman-group16-sha512",
+  "diffie-hellman-group17-sha512",
+  "diffie-hellman-group18-sha512",
+  "aes256-gcm",
+  "aes128-gcm",
+  "chacha20-poly1305",
+  "aes256-ctr",
+  "aes192-ctr",
+  "aes128-ctr",
+  "hmac-sha2-512-etm",
+  "hmac-sha2-256-etm",
+  "hmac-sha2-512",
+  "hmac-sha2-256",
+]
+# Every algorithm, including the legacy ones.
+all-algorithms = [
+  "secure-algorithms",
+  "diffie-hellman-group-exchange-sha1",
+  "diffie-hellman-group14-sha1",
+  "diffie-hellman-group1-sha1",
+  "aes256-cbc",
+  "aes192-cbc",
+  "aes128-cbc",
+  "3des-cbc",
+  "hmac-sha1-etm",
+  "hmac-sha1",
+  "none",
+]
+# Key exchange methods.
+mlkem1024nistp384-sha384 = []
+mlkem768nistp256-sha256 = []
+mlkem768x25519-sha256 = []
+# `curve25519-sha256` and `curve25519-sha256@libssh.org`.
+curve25519-sha256 = []
+ecdh-sha2-nistp256 = []
+ecdh-sha2-nistp384 = []
+ecdh-sha2-nistp521 = []
+diffie-hellman-group-exchange-sha256 = []
+diffie-hellman-group14-sha256 = []
+diffie-hellman-group15-sha512 = []
+diffie-hellman-group16-sha512 = []
+diffie-hellman-group17-sha512 = []
+diffie-hellman-group18-sha512 = []
+# Legacy (SHA-1) key exchange methods.
+diffie-hellman-group-exchange-sha1 = []
+diffie-hellman-group14-sha1 = []
+diffie-hellman-group1-sha1 = []
+# Ciphers (`aes256-gcm`, `aes128-gcm` and `chacha20-poly1305` for their
+# `@openssh.com` names).
+aes256-gcm = []
+aes128-gcm = []
+chacha20-poly1305 = []
+aes256-ctr = []
+aes192-ctr = []
+aes128-ctr = []
+# Legacy ciphers. Danger: 3DES is insecure.
+aes256-cbc = []
+aes192-cbc = []
+aes128-cbc = []
+3des-cbc = ["dep:des"]
+# MACs (`-etm` for the `-etm@openssh.com` names).
+hmac-sha2-512-etm = []
+hmac-sha2-256-etm = []
+hmac-sha2-512 = []
+hmac-sha2-256 = []
+# Legacy (SHA-1) MACs.
+hmac-sha1-etm = []
+hmac-sha1 = []
+# The `none` key exchange, cipher and MAC: no encryption nor integrity.
+none = []
+
 # Alternative crypto backend; links the native SymCrypt library (see the
 # `symcrypt-sys` crate for how it is found, e.g. `SYMCRYPT_LIB_PATH`).
 # It does not enable `_rustcrypto`, nor therefore `ssh-key/sha2` (README.md
@@ -218,6 +311,7 @@ features = [
   "ring",
   "rsa",
   "serde",
+  "all-algorithms",
 ]
 
 [[bench]]

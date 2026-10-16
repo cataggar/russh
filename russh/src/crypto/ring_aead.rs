@@ -131,13 +131,15 @@ pub(crate) mod cipher {
         (&cipher::AES_128_CBC, &rustcrypto::AES_128_CBC),
         (&cipher::AES_192_CBC, &rustcrypto::AES_192_CBC),
         (&cipher::AES_256_CBC, &rustcrypto::AES_256_CBC),
-        #[cfg(feature = "des")]
+        #[cfg(feature = "3des-cbc")]
         (&cipher::TRIPLE_DES_CBC, &rustcrypto::TRIPLE_DES_CBC),
     ];
 
+    /// Every cipher that isn't legacy, as OpenSSH prefers them.
     pub(crate) const DEFAULT_ORDER: &[cipher::Name] = &[
         cipher::CHACHA20_POLY1305,
         cipher::AES_256_GCM,
+        cipher::AES_128_GCM,
         cipher::AES_256_CTR,
         cipher::AES_192_CTR,
         cipher::AES_128_CTR,
@@ -153,8 +155,11 @@ pub(crate) mod tests {
     use crate::crypto::provider;
     use crate::{cipher, kex, mac};
 
-    /// The algorithm lists of the `aws_lc` and `ring` providers are exactly
-    /// the ones russh had before the crypto abstraction.
+    /// The algorithm lists of the `aws_lc` and `ring` providers are the ones
+    /// russh had before the crypto abstraction, plus the ML-KEM hybrids with
+    /// the NIST curves. Their default preferences also have the ECDH methods
+    /// on the NIST curves and `aes128-gcm@openssh.com`, which were opt-in:
+    /// every algorithm that isn't legacy, like the SymCrypt backend's.
     pub(crate) fn assert_algorithm_lists_are_unchanged() {
         crate::crypto::testing::check_provider_lists();
 
@@ -177,13 +182,18 @@ pub(crate) mod tests {
                 &["none"]
             )
         );
-        assert_eq!(provider::kex::ALGORITHMS.len(), 15);
+        assert_eq!(provider::kex::ALGORITHMS.len(), 17);
         assert_eq!(
             provider::kex::DEFAULT_ORDER,
             [
                 kex::MLKEM768X25519_SHA256,
+                kex::MLKEM1024NISTP384_SHA384,
+                kex::MLKEM768NISTP256_SHA256,
                 kex::CURVE25519,
                 kex::CURVE25519_PRE_RFC_8731,
+                kex::ECDH_SHA2_NISTP256,
+                kex::ECDH_SHA2_NISTP384,
+                kex::ECDH_SHA2_NISTP521,
                 kex::DH_GEX_SHA256,
                 kex::DH_G18_SHA512,
                 kex::DH_G17_SHA512,
@@ -231,6 +241,7 @@ pub(crate) mod tests {
             [
                 cipher::CHACHA20_POLY1305,
                 cipher::AES_256_GCM,
+                cipher::AES_128_GCM,
                 cipher::AES_256_CTR,
                 cipher::AES_192_CTR,
                 cipher::AES_128_CTR,

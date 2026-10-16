@@ -1,9 +1,11 @@
 //! The ciphers and MACs of the SymCrypt backend against OpenSSH:
-//! `cargo test -p russh --no-default-features --features symcrypt --test
-//! symcrypt_ciphers_macs`. The ciphers and MACs SymCrypt lacks are refused,
-//! and the default preferences pick AES-GCM and SHA-256-EtM, also against a
-//! russh server. The OpenSSH cases are skipped when OpenSSH is missing,
-//! unless `RUSSH_REQUIRE_SSHD=1`.
+//! `cargo test -p russh --no-default-features --features
+//! symcrypt,secure-algorithms --test symcrypt_ciphers_macs`. The ciphers and
+//! MACs SymCrypt lacks are refused. Those whose features are disabled are
+//! skipped (`algorithm_features.rs` checks that they are refused). The
+//! default preferences pick AES-GCM, and SHA-256-EtM (or the first enabled
+//! MAC), also against a russh server. The OpenSSH cases are skipped when
+//! OpenSSH is missing, unless `RUSSH_REQUIRE_SSHD=1`.
 #![cfg(all(
     feature = "symcrypt",
     not(feature = "aws-lc-rs"),
@@ -73,7 +75,7 @@ async fn unsupported_ciphers_are_refused() {
 }
 
 /// `3des-cbc` isn't even a cipher name russh knows, with or without the
-/// `des` feature, and a server offering only it is refused.
+/// `3des-cbc` feature, and a server offering only it is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn triple_des_cbc_is_refused() {
     const TRIPLE_DES_CBC: &str = "3des-cbc";
@@ -102,15 +104,19 @@ async fn triple_des_cbc_is_refused() {
 }
 
 /// The SHA-1 MACs, which OpenSSH implements and the backend doesn't, are
-/// neither offered nor accepted.
+/// neither offered nor accepted, even with their features.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsupported_macs_are_refused() {
+    // Without AES-CTR, the cipher would be refused before the MAC.
+    if !cipher::AES_256_CTR.is_enabled() {
+        return;
+    }
     openssh::check_refused(
         "unsupported MACs",
         Refused::Mac,
         [mac::HMAC_SHA1, mac::HMAC_SHA1_ETM].map(|mac| {
             Case::default()
-                .with_cipher(cipher::AES_128_CTR)
+                .with_cipher(cipher::AES_256_CTR)
                 .with_mac(mac)
         }),
     )
@@ -135,21 +141,39 @@ fn ctr_only() -> Preferred {
     }
 }
 
+/// Whether this build can negotiate what [`check_default_preferences`]
+/// expects: AES-256-GCM, AES-256-CTR and one of [`SERVER_MACS`].
+fn default_preferences_are_checkable() -> bool {
+    cipher::AES_256_GCM.is_enabled()
+        && cipher::AES_256_CTR.is_enabled()
+        && SERVER_MACS.iter().any(|mac| mac.is_enabled())
+}
+
 /// Checks the algorithms a client negotiated with a server offering
 /// [`SERVER_CIPHERS`] and [`SERVER_MACS`]: `default` with the default
 /// preferences, `ctr` with [`ctr_only`]. The client's order decides, so it
 /// gets AES-GCM and SHA-256-EtM, which SymCrypt runs faster
-/// (<https://github.com/cataggar/russh/issues/23>).
+/// (<https://github.com/cataggar/russh/issues/23>), or the first enabled one
+/// of the server's MACs.
 fn check_default_preferences(default: &Names, ctr: &Names) {
+    let mac = Preferred::default()
+        .mac
+        .iter()
+        .copied()
+        .find(|mac| SERVER_MACS.contains(mac))
+        .expect("no MAC in common with the server");
     assert_eq!(default.cipher, cipher::AES_256_GCM);
     assert_eq!(ctr.cipher, cipher::AES_256_CTR);
-    assert_eq!(ctr.client_mac, mac::HMAC_SHA256_ETM);
-    assert_eq!(ctr.server_mac, mac::HMAC_SHA256_ETM);
+    assert_eq!(ctr.client_mac, mac);
+    assert_eq!(ctr.server_mac, mac);
 }
 
 /// [`check_default_preferences`] against OpenSSH.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openssh_default_preferences() {
+    if !default_preferences_are_checkable() {
+        return;
+    }
     let Some(openssh) = openssh::available() else {
         return;
     };
@@ -199,6 +223,9 @@ async fn negotiate_with_sshd(sshd: &Sshd, preferred: Preferred) -> Names {
 /// [`check_default_preferences`] against a russh server.
 #[tokio::test]
 async fn russh_default_preferences() {
+    if !default_preferences_are_checkable() {
+        return;
+    }
     let default = negotiate_with_russh(Preferred::default()).await;
     let ctr = negotiate_with_russh(ctr_only()).await;
     check_default_preferences(&default, &ctr);

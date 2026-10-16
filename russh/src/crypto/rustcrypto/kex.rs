@@ -1,6 +1,6 @@
 //! Key agreement: X25519 (`curve25519-dalek`), ECDH on the NIST curves
-//! (`p256`, `p384`, `p521`), ML-KEM-768 (`ml-kem`) and finite-field
-//! Diffie-Hellman (`num-bigint`).
+//! (`p256`, `p384`, `p521`), ML-KEM-768 and ML-KEM-1024 (`ml-kem`) and
+//! finite-field Diffie-Hellman (`num-bigint`).
 
 use std::marker::PhantomData;
 
@@ -68,39 +68,47 @@ where
     }
 }
 
-pub(crate) struct MlKem768;
+/// ML-KEM with the `ml-kem` parameter set `$params`.
+macro_rules! ml_kem {
+    ($name:ident, $params:ty) => {
+        pub(crate) struct $name;
 
-impl Kem for MlKem768 {
-    type DecapsulationKey = Box<DecapsulationKey<ml_kem::MlKem768>>;
+        impl Kem for $name {
+            type DecapsulationKey = Box<DecapsulationKey<$params>>;
 
-    fn generate() -> Result<(Self::DecapsulationKey, Vec<u8>)> {
-        let (decapsulation_key, encapsulation_key) =
-            <ml_kem::MlKem768 as ml_kem::Kem>::generate_keypair_from_rng(&mut ProviderRng);
-        Ok((
-            Box::new(decapsulation_key),
-            encapsulation_key.to_bytes().to_vec(),
-        ))
-    }
+            fn generate() -> Result<(Self::DecapsulationKey, Vec<u8>)> {
+                let (decapsulation_key, encapsulation_key) =
+                    <$params as ml_kem::Kem>::generate_keypair_from_rng(&mut ProviderRng);
+                Ok((
+                    Box::new(decapsulation_key),
+                    encapsulation_key.to_bytes().to_vec(),
+                ))
+            }
 
-    fn encapsulate(encapsulation_key: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
-        let encapsulation_key =
-            EncapsulationKey::<ml_kem::MlKem768>::new_from_slice(encapsulation_key)
-                .map_err(|_| CryptoError)?;
-        let (ciphertext, shared) = encapsulation_key.encapsulate_with_rng(&mut ProviderRng);
-        Ok((ciphertext.to_vec(), Zeroizing::new(shared.to_vec())))
-    }
+            fn encapsulate(encapsulation_key: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
+                let encapsulation_key =
+                    EncapsulationKey::<$params>::new_from_slice(encapsulation_key)
+                        .map_err(|_| CryptoError)?;
+                let (ciphertext, shared) = encapsulation_key.encapsulate_with_rng(&mut ProviderRng);
+                Ok((ciphertext.to_vec(), Zeroizing::new(shared.to_vec())))
+            }
 
-    fn decapsulate(
-        decapsulation_key: &Self::DecapsulationKey,
-        ciphertext: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>> {
-        let ciphertext = ml_kem::Ciphertext::<ml_kem::MlKem768>::try_from(ciphertext)
-            .map_err(|_| CryptoError)?;
-        Ok(Zeroizing::new(
-            decapsulation_key.decapsulate(&ciphertext).to_vec(),
-        ))
-    }
+            fn decapsulate(
+                decapsulation_key: &Self::DecapsulationKey,
+                ciphertext: &[u8],
+            ) -> Result<Zeroizing<Vec<u8>>> {
+                let ciphertext =
+                    ml_kem::Ciphertext::<$params>::try_from(ciphertext).map_err(|_| CryptoError)?;
+                Ok(Zeroizing::new(
+                    decapsulation_key.decapsulate(&ciphertext).to_vec(),
+                ))
+            }
+        }
+    };
 }
+
+ml_kem!(MlKem768, ml_kem::MlKem768);
+ml_kem!(MlKem1024, ml_kem::MlKem1024);
 
 /// Finite-field Diffie-Hellman in a safe-prime group.
 pub(crate) struct Dh {
@@ -153,6 +161,14 @@ fn in_range(x: &BigUint, prime: &BigUint) -> bool {
 /// Every key exchange of this provider (`none` is shared by all providers).
 pub(crate) static ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))] = &[
     (&kex::MLKEM768X25519_SHA256, &kex::_MLKEM768X25519_SHA256),
+    (
+        &kex::MLKEM1024NISTP384_SHA384,
+        &kex::_MLKEM1024NISTP384_SHA384,
+    ),
+    (
+        &kex::MLKEM768NISTP256_SHA256,
+        &kex::_MLKEM768NISTP256_SHA256,
+    ),
     (&kex::CURVE25519, &kex::_CURVE25519),
     (&kex::CURVE25519_PRE_RFC_8731, &kex::_CURVE25519),
     (&kex::DH_GEX_SHA1, &kex::_DH_GEX_SHA1),
@@ -169,12 +185,18 @@ pub(crate) static ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))] = &[
     (&kex::ECDH_SHA2_NISTP521, &kex::_ECDH_SHA2_NISTP521),
 ];
 
-/// Default key exchange preference (the RFC 8308 / strict-kex extension
-/// pseudo-algorithms are appended by `Preferred`).
+/// Default key exchange preference: every method of this provider that isn't
+/// legacy, in the order of the SymCrypt backend (the RFC 8308 / strict-kex
+/// extension pseudo-algorithms are appended by `Preferred`).
 pub(crate) const DEFAULT_ORDER: &[kex::Name] = &[
     kex::MLKEM768X25519_SHA256,
+    kex::MLKEM1024NISTP384_SHA384,
+    kex::MLKEM768NISTP256_SHA256,
     kex::CURVE25519,
     kex::CURVE25519_PRE_RFC_8731,
+    kex::ECDH_SHA2_NISTP256,
+    kex::ECDH_SHA2_NISTP384,
+    kex::ECDH_SHA2_NISTP521,
     kex::DH_GEX_SHA256,
     kex::DH_G18_SHA512,
     kex::DH_G17_SHA512,
@@ -214,12 +236,18 @@ mod tests {
 
     #[test]
     fn ml_kem_round_trips() {
-        let (dk, ek) = MlKem768::generate().unwrap();
-        assert_eq!(ek.len(), 1184);
-        let (ciphertext, shared) = MlKem768::encapsulate(&ek).unwrap();
-        assert_eq!(ciphertext.len(), 1088);
-        assert_eq!(MlKem768::decapsulate(&dk, &ciphertext).unwrap(), shared);
-        assert!(MlKem768::encapsulate(&ek[1..]).is_err());
+        fn round_trip<K: Kem>(encapsulation_key_len: usize, ciphertext_len: usize) {
+            let (dk, ek) = K::generate().unwrap();
+            assert_eq!(ek.len(), encapsulation_key_len);
+            let (ciphertext, shared) = K::encapsulate(&ek).unwrap();
+            assert_eq!(ciphertext.len(), ciphertext_len);
+            assert_eq!(shared.len(), 32);
+            assert_eq!(K::decapsulate(&dk, &ciphertext).unwrap(), shared);
+            assert!(K::encapsulate(&ek[1..]).is_err());
+            assert!(K::decapsulate(&dk, &ciphertext[1..]).is_err());
+        }
+        round_trip::<MlKem768>(1184, 1088);
+        round_trip::<MlKem1024>(1568, 1568);
     }
 
     #[test]

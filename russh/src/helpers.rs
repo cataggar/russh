@@ -2,6 +2,33 @@ use std::fmt::Debug;
 
 use ssh_encoding::{Decode, Encode};
 
+/// The `(enabled, legacy)` flags of the algorithm `name` in `table`, which
+/// has an `(algorithm name, crate feature enabled, legacy)` entry for each
+/// algorithm of a kind, if it has one. Usable in const contexts.
+#[allow(clippy::indexing_slicing)] // indices are below the lengths
+pub(crate) const fn algorithm_flags(
+    table: &[(&str, bool, bool)],
+    name: &str,
+) -> Option<(bool, bool)> {
+    let name = name.as_bytes();
+    let mut i = 0;
+    while i < table.len() {
+        let (entry, enabled, legacy) = table[i];
+        let entry = entry.as_bytes();
+        if entry.len() == name.len() {
+            let mut j = 0;
+            while j < entry.len() && entry[j] == name[j] {
+                j += 1;
+            }
+            if j == entry.len() {
+                return Some((enabled, legacy));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 #[doc(hidden)]
 pub trait EncodedExt {
     fn encoded(&self) -> ssh_key::Result<Vec<u8>>;

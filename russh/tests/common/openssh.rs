@@ -56,10 +56,11 @@
 //! * [`check_cases`] runs any list of cases and panics on failure, after
 //!   printing a summary. [`run_cases`] and [`run_case`] return [`Outcome`]s
 //!   instead, and [`report`] prints and checks them.
-//! * [`check_refused`] is the opposite check, for algorithms the crypto
-//!   backend lacks: sshd offers the case's algorithm of one kind, and the
-//!   key exchange must fail with no common algorithm of that kind, both with
-//!   a client restricted to the case and with the default algorithms.
+//! * [`check_refused`] is the opposite check, for algorithms that russh
+//!   doesn't negotiate (the crypto backend lacks them, or their crate
+//!   features are disabled): sshd offers the case's algorithm of one kind, and
+//!   the key exchange must fail with no common algorithm of that kind, both
+//!   with a client restricted to the case and with the default algorithms.
 //!   [`check_no_common`] does that check for one client and any sshd.
 //! * [`Case`] is one combination of host key, user key, and (optionally)
 //!   kex, cipher and MAC. [`Case::sshd`] returns the matching server
@@ -100,7 +101,7 @@
 //!
 //! After authentication the algorithms passed to `Handler::kex_done` are
 //! compared with the forced ones. A MAC is only used with a non-AEAD
-//! cipher. So [`check_macs`] forces `aes128-ctr` unless the base case sets a
+//! cipher. So [`check_macs`] forces `aes256-ctr` unless the base case sets a
 //! cipher, and a case that forces a MAC but negotiates an AEAD cipher fails.
 //!
 //! # Skips and environment variables
@@ -117,6 +118,9 @@
 //!   `ssh -Q kex|cipher|mac|key|sig`. If `ssh` is missing, everything counts
 //!   as supported. Likewise, `rsa-sha2-256` user certificate cases need
 //!   OpenSSH 9.6 (see [`Case::with_user_certificate`]).
+//! * So are the key exchange methods, ciphers and MACs whose russh features
+//!   are disabled (see [`Case::disabled_in_russh`]), so test files list
+//!   every algorithm of their backend.
 //! * `RUSSH_SSHD=/abs/path/sshd` selects another sshd. The path must be
 //!   absolute because sshd re-executes itself.
 //! * `RUSSH_INTEROP_JOBS=<n>` caps how many cases a runner runs at once.
@@ -1648,6 +1652,28 @@ impl Case {
         sshd
     }
 
+    /// Why russh can't run this case, if it can't: it forces a key exchange
+    /// method, cipher or MAC whose crate feature is disabled (see
+    /// `algorithm_features.rs` for those).
+    pub fn disabled_in_russh(&self) -> Option<String> {
+        let mut disabled = Vec::new();
+        if let Some(kex) = self.kex.filter(|kex| !kex.is_enabled()) {
+            disabled.push(format!("kex {}", kex.as_ref()));
+        }
+        if let Some(cipher) = self.cipher.filter(|cipher| !cipher.is_enabled()) {
+            disabled.push(format!("cipher {}", cipher.as_ref()));
+        }
+        if let Some(mac) = self.mac.filter(|mac| !mac.is_enabled()) {
+            disabled.push(format!("MAC {}", mac.as_ref()));
+        }
+        (!disabled.is_empty()).then(|| {
+            format!(
+                "russh was built without the features of {}",
+                disabled.join(", ")
+            )
+        })
+    }
+
     /// Why `openssh` can't run this case, if it can't.
     pub fn unsupported_by(&self, openssh: &OpenSsh) -> Option<String> {
         let mut missing = Vec::new();
@@ -1809,9 +1835,13 @@ pub enum Outcome {
 /// Runs one case: starts an sshd restricted to the case's algorithms,
 /// connects with a matching client, authenticates, checks the negotiated
 /// algorithms, runs `echo <nonce>` and the `cat` round trip, and
-/// disconnects. Never panics, except through [`available`] when OpenSSH is
+/// disconnects. Skips the case if it forces an algorithm whose russh feature
+/// is disabled. Never panics, except through [`available`] when OpenSSH is
 /// missing and [`REQUIRE_ENV`] is set.
 pub async fn run_case(case: &Case) -> Outcome {
+    if let Some(reason) = case.disabled_in_russh() {
+        return Outcome::Skipped(reason);
+    }
     run_with_sshd(case, async |sshd| case.run_client(sshd).await).await
 }
 
@@ -1974,12 +2004,12 @@ pub async fn check_ciphers(base: Case, algorithms: &[cipher::Name]) {
     check_cases("ciphers", cases).await;
 }
 
-/// Checks each MAC on top of `base`, with `aes128-ctr` unless `base` sets a
+/// Checks each MAC on top of `base`, with `aes256-ctr` unless `base` sets a
 /// (non-AEAD) cipher.
 pub async fn check_macs(base: Case, algorithms: &[mac::Name]) {
     let base = match base.cipher {
         Some(_) => base,
-        None => base.with_cipher(cipher::AES_128_CTR),
+        None => base.with_cipher(cipher::AES_256_CTR),
     };
     let cases = algorithms.iter().map(|&mac| base.clone().with_mac(mac));
     check_cases("MACs", cases).await;
@@ -2038,8 +2068,9 @@ impl Refused {
     }
 }
 
-/// Checks that the client refuses algorithms the crypto backend does not
-/// implement, and [`report`]s the results under `name`. For each case, an
+/// Checks that the client refuses algorithms it doesn't negotiate (the crypto
+/// backend does not implement them, or the algorithm policy does not allow
+/// them), and [`report`]s the results under `name`. For each case, an
 /// sshd restricted to the case's algorithms offers the case's `refused`
 /// algorithm, and the key exchange must fail for lack of a common algorithm
 /// of that kind (see [`check_no_common`]) both for a client restricted to

@@ -4,7 +4,9 @@
 //!
 //! This file covers the algorithms of the aws-lc-rs and ring backends. A
 //! backend with a different set of algorithms gets its own test file that
-//! calls the same runners with its own lists.
+//! calls the same runners with its own lists. The cases of algorithms whose
+//! russh features are disabled are skipped (`algorithm_features.rs` checks
+//! that they are refused).
 #![cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 
 mod common;
@@ -34,12 +36,15 @@ const KEY_ALGORITHMS: &[KeyAlg] = &[
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kex() {
-    // russh also implements diffie-hellman-group15-sha512 and
+    // OpenSSH has no ML-KEM hybrid with the NIST curves, so those cases are
+    // skipped. russh also implements diffie-hellman-group15-sha512 and
     // diffie-hellman-group17-sha512, which OpenSSH lacks.
     openssh::check_kex(
         Case::default(),
         &[
             kex::MLKEM768X25519_SHA256,
+            kex::MLKEM1024NISTP384_SHA384,
+            kex::MLKEM768NISTP256_SHA256,
             kex::CURVE25519,
             kex::CURVE25519_PRE_RFC_8731,
             kex::ECDH_SHA2_NISTP256,
@@ -72,7 +77,7 @@ async fn ciphers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn macs() {
-    // Paired with aes128-ctr: AEAD ciphers don't use a MAC.
+    // Paired with aes256-ctr: AEAD ciphers don't use a MAC.
     openssh::check_macs(
         Case::default(),
         &[
@@ -149,6 +154,11 @@ async fn combinations() {
             Case::default()
                 .with_kex(kex::ECDH_SHA2_NISTP256)
                 .with_cipher(cipher::AES_256_GCM),
+            Case::default()
+                .with_kex(kex::ECDH_SHA2_NISTP384)
+                .with_cipher(cipher::AES_256_GCM)
+                .with_host_key(KeyAlg::ECDSA_P384)
+                .with_user_key(KeyAlg::ECDSA_P384),
             #[cfg(feature = "rsa")]
             Case::default()
                 .with_kex(kex::ECDH_SHA2_NISTP384)
@@ -167,7 +177,8 @@ async fn combinations() {
 }
 
 /// Older SHA-1 and CBC algorithms. OpenSSH still implements them, but no
-/// longer enables most of them by default.
+/// longer enables most of them by default, and russh only with their
+/// features (`all-algorithms`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy() {
     #[allow(unused_mut)]
@@ -192,7 +203,7 @@ async fn legacy() {
         cases.push(Case::default().with_user_key(ssh_rsa));
     }
     // With EtM MACs in `triple_des_etm`.
-    #[cfg(feature = "des")]
+    #[cfg(feature = "3des-cbc")]
     cases.push(
         Case::default()
             .with_cipher(cipher::TRIPLE_DES_CBC)
@@ -205,7 +216,7 @@ async fn legacy() {
 /// only the rest is padded to whole blocks, so with 3des-cbc's 8-byte
 /// blocks OpenSSH sends packets of only 4 + 8 bytes, such as
 /// `SSH_MSG_USERAUTH_SUCCESS`.
-#[cfg(feature = "des")]
+#[cfg(feature = "3des-cbc")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn triple_des_etm() {
     openssh::check_macs(

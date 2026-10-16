@@ -8,7 +8,7 @@ A low-level, `async` SSH 2.0 client and server library for Rust / Tokio.
 Russh gives you direct access to the SSH protocol: channels, authentication, key exchange, port and socket forwarding.  It is written in safe Rust, uses async traits, and supports a broad range of algorithms for wide scale interoperability with real-world servers and clients.
 
 - **Async-native** - integrates directly with Tokio,  `AsyncRead`/`AsyncWrite` channels
-- **Broad interoperability** - safe algorithms by default, with opt-in support for legacy ones
+- **Broad interoperability** - modern algorithms by default, with opt-in support for legacy ones, and a [crate feature for each algorithm](#algorithm-features)
 - **Safety-focused** - panics, `unwrap`/`expect` and unchecked indexing are denied by default
 
 ## Getting started
@@ -43,11 +43,11 @@ Russh needs a crypto backend, selected with a crate feature:
 # aws-lc-rs (default in most setups)
 russh = { version = "0.64", features = ["aws-lc-rs"] }
 
-# or ring (keep `flate2` and `rsa` when disabling default features)
-russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
+# or ring (keep `flate2`, `rsa` and `secure-algorithms` when disabling default features)
+russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa", "secure-algorithms"] }
 
-# or symcrypt, which is not in a crates.io release (keep `flate2`; RSA works without `rsa`)
-russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "flate2"] }
+# or symcrypt, which is not in a crates.io release (keep `flate2` and `secure-algorithms`; RSA works without `rsa`)
+russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "flate2", "secure-algorithms"] }
 ```
 
 If several backend features are enabled, russh uses the first of `aws-lc-rs`, `ring` and `symcrypt`. `aws-lc-rs` is a default feature, so `ring` and `symcrypt` need `default-features = false`. Builds with `--all-features` use aws-lc-rs, but they also compile the `symcrypt` crate, so they need the native SymCrypt library too.
@@ -77,12 +77,12 @@ This backend is for deployments that must do their cryptography in SymCrypt and 
 - Only algorithms that this backend implements are negotiated. Russh removes the others from `Preferred`, so they are neither advertised nor accepted.
 - Dependencies: the dependency graph has no `ring`, `aws-lc-rs`, `rand`, `getrandom` or RustCrypto primitive crates (such as `aes`, `ctr`, `cbc`, `hmac`, `sha1`, `sha2`, `p256`, `curve25519-dalek`, `ed25519-dalek`, `rsa`, `ml-kem` or `bcrypt-pbkdf`), which CI enforces with a `cargo tree` ban check (`ci/symcrypt-ban-check.sh`). Helpers outside the SSH transport use SymCrypt too, such as matching hashed `known_hosts` entries (HMAC-SHA1).
 
-Don't enable `rsa`, `des` or `dsa` with `symcrypt`: they add no algorithms to this backend, only RustCrypto crates.
+Don't enable `rsa`, `3des-cbc` (or its old name `des`) or `dsa` with `symcrypt`: they add no algorithms to this backend, only RustCrypto crates. Nor `all-algorithms`, which enables `3des-cbc`: this backend implements no legacy algorithm but `none`, so use `secure-algorithms` (and `none`, if you need it).
 
 **Ed25519 from aws-lc-rs (`ed25519-aws-lc`).** SymCrypt has no EdDSA ([microsoft/SymCrypt#43](https://github.com/microsoft/SymCrypt/issues/43); its maintainers don't plan to add it), so with `symcrypt` alone russh can't use Ed25519 keys. If you must use them, for example to reach hosts whose only key is Ed25519, add the opt-in `ed25519-aws-lc` feature:
 
 ```toml
-russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "ed25519-aws-lc", "flate2"] }
+russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "ed25519-aws-lc", "flate2", "secure-algorithms"] }
 ```
 
 With it, [aws-lc-rs](https://github.com/aws/aws-lc-rs) signs with Ed25519 keys, verifies `ssh-ed25519` signatures (host keys, user keys and certificate CAs), and computes Ed25519 public keys, to generate keys and to load PKCS#8 v1 keys. SymCrypt still does everything else, including the randomness of new Ed25519 keys. `ssh-ed25519` is the last host key and user key algorithm in `Preferred::default()`, so a peer that supports any other algorithm of this backend uses that one. It adds `aws-lc-rs` and `aws-lc-sys` to the dependency graph, and no RustCrypto crates: CI checks this with `ci/symcrypt-ban-check.sh --allow-aws-lc-ed25519`. [#62](https://github.com/cataggar/russh/issues/62) tracks moving Ed25519 to SymCrypt if it ever implements EdDSA.
@@ -123,14 +123,48 @@ To create a key, use `keys::generate_secret_key`, which makes an ECDSA P-256 key
 
 **Releases.** The backend depends on `symcrypt` 0.6, for ML-KEM, and on `symcrypt-sys` 0.5. Neither version is on crates.io yet, so russh pins both to a commit of [microsoft/rust-symcrypt](https://github.com/microsoft/rust-symcrypt). crates.io doesn't accept git dependencies, even optional ones, so russh can't be published there with the `symcrypt` feature until these versions are. Until then, use russh as a git dependency, as shown above.
 
+## Algorithm features
+
+Each key exchange method, cipher and MAC has a crate feature, named after the algorithm without `@openssh.com` (`curve25519-sha256` covers `curve25519-sha256@libssh.org` too), and russh negotiates only the ones whose features are enabled: it neither offers nor accepts the others, even if `Preferred` lists them. Two features enable several at once:
+
+- `secure-algorithms`, a default feature, enables every algorithm in the [tables below](#supported-algorithms) but the legacy ones;
+- `all-algorithms` enables them all, including the legacy ones: the SHA-1 key exchanges and MACs, the CBC modes, `3des-cbc` (formerly the `des` feature, which still enables it) and `none`.
+
+`Preferred::default()` offers the enabled algorithms that the crypto backend implements, in its order of preference, except the legacy ones, which russh negotiates only if you add them to `Preferred`. Host key and signature algorithms don't depend on these features.
+
+With `default-features = false`, enable `secure-algorithms` or the features of the algorithms you want. A build needs a key exchange method and a cipher, and a MAC unless one of its ciphers is an AEAD (`aes256-gcm`, `aes128-gcm` or `chacha20-poly1305`). For example, to negotiate only the post-quantum hybrids of ML-KEM and ECDH on the NIST curves ([RFC 10042](https://www.rfc-editor.org/rfc/rfc10042)) or ECDH on P-384, with AES-256 and HMAC-SHA-512:
+
+```toml
+russh = { git = "https://github.com/cataggar/russh", default-features = false, features = [
+    "symcrypt",
+    "mlkem1024nistp384-sha384",
+    "mlkem768nistp256-sha256",
+    "ecdh-sha2-nistp384",
+    "aes256-gcm",
+    "aes256-ctr",
+    "hmac-sha2-512-etm",
+] }
+```
+
+OpenSSH implements no ML-KEM hybrid with the NIST curves, but enables `ecdh-sha2-nistp384`, `aes256-gcm@openssh.com`, `aes256-ctr` and `hmac-sha2-512-etm@openssh.com` by default, so russh and OpenSSH still agree on algorithms. A peer that implements none of the enabled algorithms of a kind fails the key exchange with `Error::NoCommonAlgo`.
+
+Because Cargo unifies features across the dependency graph, any crate in your build (including a dev-dependency during `cargo test`) can enable more of them, for example with russh's default features. To make sure that russh doesn't negotiate an algorithm, assert in your crate that its feature is disabled, with `kex::Name::is_enabled`, `cipher::Name::is_enabled` or `mac::Name::is_enabled`:
+
+```rust
+const _: () = assert!(
+    !russh::kex::CURVE25519.is_enabled() && !russh::kex::MLKEM768X25519_SHA256.is_enabled(),
+    "russh must not negotiate the X25519 key exchanges; `cargo tree -e features -i russh` shows what enables their features",
+);
+```
+
 ## Supported algorithms
 
 Russh aims for broad interoperability, so it supports both algorithms currently considered safe and a set of older ones that allow connections to older switches etc. Legacy algorithms are opt in.
 
-The available algorithms depend on the [crypto backend](#crypto-backends); `aws-lc-rs` and `ring` offer the same ones. In the tables below:
+The available algorithms depend on the [crypto backend](#crypto-backends); `aws-lc-rs` and `ring` offer the same ones. Russh negotiates a key exchange method, cipher or MAC only if its [feature](#algorithm-features) is enabled. In the tables below, which are for builds with the features enabled:
 
 - **default**: in `Preferred::default()`, so offered unless you change `Preferred`;
-- **opt-in**: supported, but not in `Preferred::default()`; add it to `Preferred` in the client or server `Config` to offer it;
+- **opt-in**: a legacy algorithm, not in `Preferred::default()`; add it to `Preferred` in the client or server `Config` to offer it;
 - **—**: not available with that backend.
 
 ### Key exchange
@@ -138,11 +172,12 @@ The available algorithms depend on the [crypto backend](#crypto-backends); `aws-
 | Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
 |---|---|---|
 | `mlkem768x25519-sha256` (post-quantum hybrid) | default | default |
+| `mlkem1024nistp384-sha384`, `mlkem768nistp256-sha256` (post-quantum hybrids, [RFC 10042](https://www.rfc-editor.org/rfc/rfc10042)) | default | default |
 | `curve25519-sha256`, `curve25519-sha256@libssh.org` | default | default |
+| `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` | default | default |
 | `diffie-hellman-group-exchange-sha256` (GEX) | default | default |
 | `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512` | default | default |
 | `diffie-hellman-group14-sha256` | default | default |
-| `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` | opt-in | default |
 | `diffie-hellman-group14-sha1` | opt-in | — |
 | `diffie-hellman-group1-sha1` | opt-in | — |
 | `diffie-hellman-group-exchange-sha1` (GEX) | opt-in | — |
@@ -155,10 +190,10 @@ All backends support OpenSSH strict key exchange (Terrapin mitigation) and progr
 |---|---|---|
 | `chacha20-poly1305@openssh.com` | default | default |
 | `aes256-gcm@openssh.com` | default | default |
-| `aes128-gcm@openssh.com` | opt-in | opt-in |
+| `aes128-gcm@openssh.com` | default | default |
 | `aes256-ctr`, `aes192-ctr`, `aes128-ctr` | default | default |
 | `aes256-cbc`, `aes192-cbc`, `aes128-cbc` | opt-in | — |
-| `3des-cbc` (requires the `des` crate feature) | opt-in | — |
+| `3des-cbc` | opt-in | — |
 
 `symcrypt` prefers `aes256-gcm@openssh.com` to `chacha20-poly1305@openssh.com` by default: SymCrypt's AES-GCM is 3.5–5× as fast as its ChaCha20-Poly1305 on x86-64 and ARM64 CPUs with AES instructions ([#23](https://github.com/cataggar/russh/issues/23)). `aws-lc-rs` and `ring` prefer ChaCha20-Poly1305, as OpenSSH does, partly because it is also fast on CPUs without AES instructions. The client's preference decides, so this applies to russh clients: OpenSSH clients of a russh server with `symcrypt` still choose ChaCha20-Poly1305.
 
@@ -166,8 +201,9 @@ All backends support OpenSSH strict key exchange (Terrapin mitigation) and progr
 
 | Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
 |---|---|---|
-| `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com` | default | default |
-| `hmac-sha2-256`, `hmac-sha2-512` | default | default |
+| `hmac-sha2-512-etm@openssh.com` | default | default |
+| `hmac-sha2-256-etm@openssh.com` | default | default |
+| `hmac-sha2-512`, `hmac-sha2-256` | default | default |
 | `hmac-sha1-etm@openssh.com`, `hmac-sha1` | opt-in | — |
 
 MACs are only used with the AES-CTR ciphers. `symcrypt` prefers `hmac-sha2-256-etm@openssh.com` to `hmac-sha2-512-etm@openssh.com` by default, as OpenSSH does: with SymCrypt it is 1.7–2× as fast ([#23](https://github.com/cataggar/russh/issues/23)). `aws-lc-rs` and `ring` prefer `hmac-sha2-512-etm@openssh.com`.

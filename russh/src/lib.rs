@@ -48,11 +48,12 @@
 //!
 //! If several backend features are enabled, the first of `aws-lc-rs`, `ring`
 //! and `symcrypt` is used, so selecting `ring` or `symcrypt` needs
-//! `default-features = false`. `symcrypt` is not in a crates.io release:
+//! `default-features = false` (keep `secure-algorithms`, see below).
+//! `symcrypt` is not in a crates.io release:
 //!
 //! ```toml
 //! [dependencies]
-//! russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "flate2"] }
+//! russh = { git = "https://github.com/cataggar/russh", default-features = false, features = ["symcrypt", "secure-algorithms", "flate2"] }
 //! ```
 //!
 //! [`CRYPTO_BACKEND`] (a [`CryptoBackend`]) reports which backend this build of
@@ -76,6 +77,25 @@
 //! The [README](https://github.com/cataggar/russh/blob/main/README.md#crypto-backends)
 //! lists the algorithms of each backend, and how to install SymCrypt on Linux
 //! and Windows.
+//!
+//! # Algorithm features
+//!
+//! Each key exchange method, cipher and MAC has a crate feature of the same
+//! name (without `@openssh.com`, and `curve25519-sha256` for both names of
+//! that method), and russh negotiates only the ones whose features are
+//! enabled, even if [`Preferred`] lists others. `secure-algorithms`, a default
+//! feature, enables all but the legacy ones (SHA-1, CBC, 3DES and `none`);
+//! `all-algorithms` enables them all. [`Preferred::default()`] offers the
+//! enabled ones but the legacy ones, which russh negotiates only when you list
+//! them. A build needs at least one key exchange method and one cipher, and a
+//! MAC unless one of its ciphers is an AEAD. Host key and signature algorithms
+//! don't depend on these features.
+//!
+//! Any dependency can enable algorithm features through Cargo's feature
+//! unification, so an application that must not negotiate an algorithm can
+//! assert at compile time that it is disabled, with
+//! [`kex::Name::is_enabled`], [`cipher::Name::is_enabled`] or
+//! [`mac::Name::is_enabled`].
 //!
 //! # Using non-socket IO / writing tunnels
 //!
@@ -141,6 +161,61 @@
 )))]
 compile_error!(
     "`russh` requires enabling one of the `aws-lc-rs`, `ring` or `symcrypt` features as a crypto backend."
+);
+
+// The algorithm features (see Cargo.toml): a build needs a key exchange
+// method and a cipher, and a MAC unless it has an AEAD cipher.
+#[cfg(not(any(
+    feature = "mlkem1024nistp384-sha384",
+    feature = "mlkem768nistp256-sha256",
+    feature = "mlkem768x25519-sha256",
+    feature = "curve25519-sha256",
+    feature = "ecdh-sha2-nistp256",
+    feature = "ecdh-sha2-nistp384",
+    feature = "ecdh-sha2-nistp521",
+    feature = "diffie-hellman-group-exchange-sha256",
+    feature = "diffie-hellman-group14-sha256",
+    feature = "diffie-hellman-group15-sha512",
+    feature = "diffie-hellman-group16-sha512",
+    feature = "diffie-hellman-group17-sha512",
+    feature = "diffie-hellman-group18-sha512",
+    feature = "diffie-hellman-group-exchange-sha1",
+    feature = "diffie-hellman-group14-sha1",
+    feature = "diffie-hellman-group1-sha1",
+)))]
+compile_error!(
+    "`russh` requires enabling the feature of at least one key exchange method, or `secure-algorithms` (a default feature) for all but the legacy ones."
+);
+
+#[cfg(not(any(
+    feature = "aes256-gcm",
+    feature = "aes128-gcm",
+    feature = "chacha20-poly1305",
+    feature = "aes256-ctr",
+    feature = "aes192-ctr",
+    feature = "aes128-ctr",
+    feature = "aes256-cbc",
+    feature = "aes192-cbc",
+    feature = "aes128-cbc",
+    feature = "3des-cbc",
+)))]
+compile_error!(
+    "`russh` requires enabling the feature of at least one cipher, or `secure-algorithms` (a default feature) for all but the legacy ones."
+);
+
+#[cfg(not(any(
+    feature = "aes256-gcm",
+    feature = "aes128-gcm",
+    feature = "chacha20-poly1305",
+    feature = "hmac-sha2-512-etm",
+    feature = "hmac-sha2-256-etm",
+    feature = "hmac-sha2-512",
+    feature = "hmac-sha2-256",
+    feature = "hmac-sha1-etm",
+    feature = "hmac-sha1",
+)))]
+compile_error!(
+    "`russh` requires enabling the feature of at least one MAC, for the ciphers that need one, or of an AEAD cipher (`aes256-gcm`, `aes128-gcm` or `chacha20-poly1305`)."
 );
 
 #[cfg(any(

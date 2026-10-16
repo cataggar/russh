@@ -13,11 +13,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # symcrypt with each opt-in feature, and ring alone, must compile for every target. The opt-ins may
-  # pull their own crates (`rsa` does), but the symcrypt backend never uses them for protocol crypto,
-  # except `ed25519-aws-lc`, which takes Ed25519 from aws-lc-rs. Clippy then lints symcrypt with all
-  # the opt-ins (and the benchmarks) at once. rust.yml's Test-features job runs the tests with
-  # symcrypt and all the opt-ins, and with ring.
+  # symcrypt with each opt-in feature (and the default algorithms), and ring alone, must compile for
+  # every target. The opt-ins may pull their own crates (`rsa` does), but the symcrypt backend never
+  # uses them for protocol crypto, except `ed25519-aws-lc`, which takes Ed25519 from aws-lc-rs
+  # (`all-algorithms` only lets russh negotiate more of the algorithms SymCrypt implements). Clippy
+  # then lints symcrypt with all the opt-ins (and the benchmarks) at once. rust.yml's Test-features
+  # job runs the tests with symcrypt and all the opt-ins, and with ring.
   russh-symcrypt-features:
     name: russh (symcrypt feature combinations)
     runs-on: ubuntu-24.04
@@ -31,9 +32,9 @@ jobs:
       - name: Check symcrypt with each opt-in feature
         shell: bash
         run: |
-          for feature in async-trait des dsa ed25519-aws-lc flate2 rsa serde; do
+          for feature in async-trait des dsa ed25519-aws-lc flate2 rsa serde all-algorithms; do
             echo "::group::symcrypt,$feature"
-            cargo check -p russh --all-targets --no-default-features --features "symcrypt,$feature"
+            cargo check -p russh --all-targets --no-default-features --features "symcrypt,secure-algorithms,$feature"
             echo "::endgroup::"
           done
 
@@ -41,10 +42,10 @@ jobs:
         run: rustup component add clippy
 
       - name: Clippy (symcrypt with all the opt-ins)
-        run: cargo clippy -p russh --all-targets --no-default-features --features symcrypt,rsa,des,dsa,ed25519-aws-lc,flate2,serde,async-trait,_bench -- -D warnings
+        run: cargo clippy -p russh --all-targets --no-default-features --features symcrypt,rsa,des,dsa,ed25519-aws-lc,flate2,serde,async-trait,all-algorithms,_bench -- -D warnings
 
       - name: Check ring alone
-        run: cargo check -p russh --all-targets --no-default-features --features ring
+        run: cargo check -p russh --all-targets --no-default-features --features ring,secure-algorithms
 
   smoke:
     name: SymCrypt smoke (${{ matrix.os }})
@@ -117,12 +118,12 @@ jobs:
           # copy next to the executable rather than C:\Windows\System32\symcrypt.dll.
           SYMCRYPT_SMOKE_EXPECTED_LIBRARY: ${{ runner.os == 'Windows' && format('{0}\ci\symcrypt-smoke\target\debug\symcrypt.dll', github.workspace) || format('{0}/libsymcrypt.so.{1}', steps.symcrypt.outputs.lib-dir, steps.symcrypt.outputs.version) }}
 
-  # russh with SymCrypt as its only crypto backend, through its whole test suite. With this
-  # backend, tests that use keys only incidentally load the ECDSA and RSA keys of
-  # russh/tests/data/test-keys instead of generating Ed25519 keys, and checks of what SymCrypt
-  # does not implement (Ed25519 signatures, DH group exchange, private key decryption) are
-  # skipped. On Linux, the sftp_server example also serves OpenSSH's sftp client. The
-  # `symcrypt,ed25519-aws-lc` jobs do the same with Ed25519 from aws-lc-rs: the Ed25519 checks run,
+  # russh with SymCrypt as its only crypto backend, through its whole test suite, with the default
+  # algorithms (`secure-algorithms`). With this backend, tests that use keys only incidentally load
+  # the ECDSA and RSA keys of russh/tests/data/test-keys instead of generating Ed25519 keys, and
+  # checks of what SymCrypt does not implement (Ed25519 signatures, DH group exchange, private key
+  # decryption) are skipped. On Linux, the sftp_server example also serves OpenSSH's sftp client.
+  # The `ed25519-aws-lc` jobs do the same with Ed25519 from aws-lc-rs: the Ed25519 checks run,
   # including the OpenSSH interop of symcrypt_signatures.rs, and the ban check allows aws-lc-rs for
   # russh only.
   russh-symcrypt-only:
@@ -131,13 +132,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
-        features: [symcrypt, "symcrypt,ed25519-aws-lc"]
+        features: ["symcrypt,secure-algorithms", "symcrypt,ed25519-aws-lc,secure-algorithms"]
         include:
           - os: ubuntu-24.04
             container: ubuntu:24.04
           - os: ubuntu-24.04-arm
             container: ubuntu:24.04
-          - features: "symcrypt,ed25519-aws-lc"
+          - features: "symcrypt,ed25519-aws-lc,secure-algorithms"
             ban-check: --allow-aws-lc-ed25519
     runs-on: ${{ (startsWith(matrix.os, 'ubuntu-') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(format('["self-hosted","Linux","{0}","ubuntu2604"]', matrix.os == 'ubuntu-24.04-arm' && 'ARM64' || 'X64'))) || matrix.os }}
     container: ${{ matrix.container }}
@@ -265,11 +266,12 @@ jobs:
           RUSSH_EXPECTED_SYMCRYPT_DLL: ${{ env.SYMCRYPT_DLL }}
 
   # A crate outside the workspace that depends on russh the way a downstream user does:
-  # `default-features = false, features = ["symcrypt"]` (with `ed25519-aws-lc` in the
-  # `ed25519-aws-lc` jobs), resolved from scratch (the lock file is not committed). Its dependency
-  # graph must pass the ban check, it prints `Preferred::default()`, and on Linux it runs a command
-  # on a stock OpenSSH server: with an ECDSA P-256 host key and an RSA 3072 user key, or, with
-  # `ed25519-aws-lc`, with an Ed25519 host key (the server's only one) and an Ed25519 user key.
+  # `default-features = false, features = ["symcrypt", ...]`, with only a few algorithm features
+  # (and `ed25519-aws-lc` in the `ed25519-aws-lc` jobs), resolved from scratch (the lock file is not
+  # committed). Its dependency graph must pass the ban check, it prints `Preferred::default()`, and
+  # on Linux it runs a command on a stock OpenSSH server: with an ECDSA P-256 host key and an RSA
+  # 3072 user key, or, with `ed25519-aws-lc`, with an Ed25519 host key (the server's only one) and
+  # an Ed25519 user key.
   consumer:
     name: SymCrypt consumer (${{ matrix.variant }}, ${{ matrix.os }})
     strategy:

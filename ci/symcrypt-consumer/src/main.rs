@@ -1,8 +1,11 @@
-//! A downstream crate that depends on russh with only the `symcrypt` feature
-//! (`default-features = false, features = ["symcrypt"]`), and, with its own `ed25519-aws-lc`
-//! feature, russh's `ed25519-aws-lc` too. It is its own workspace, so no other
-//! package can add russh features through feature unification. `.github/workflows/symcrypt.yml`
-//! builds it, checks its dependency graph with `ci/symcrypt-ban-check.sh` and runs it.
+//! A downstream crate that depends on russh with the `symcrypt` backend and only a few algorithm
+//! features (`default-features = false`): the ML-KEM hybrids with the NIST curves and ECDH on
+//! P-384, AES-256 (GCM and CTR) and HMAC-SHA-512-EtM. With its own `ed25519-aws-lc` feature, it
+//! enables russh's `ed25519-aws-lc` too. It is its own workspace, so no other package can add
+//! russh features through feature unification. `.github/workflows/symcrypt.yml` builds it, checks
+//! its dependency graph with `ci/symcrypt-ban-check.sh` and runs it. It asserts at compile time
+//! that russh uses the symcrypt backend and won't negotiate the X25519 key exchanges, as such a
+//! downstream crate can.
 //!
 //! - `symcrypt-consumer` prints the algorithms `Preferred::default()` offers, and fails if a list
 //!   other than `host_key_certificates` is empty.
@@ -20,11 +23,16 @@ use std::time::Duration;
 use russh::keys::{
     load_public_key, load_secret_key, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate,
 };
-use russh::{client, ChannelMsg, Disconnect, Names, Preferred};
+use russh::{client, kex, ChannelMsg, Disconnect, Names, Preferred};
 
 const _: () = assert!(
     matches!(russh::CRYPTO_BACKEND, russh::CryptoBackend::SymCrypt),
     "russh must use the symcrypt backend; `cargo tree -e features -i russh` shows what enables another one",
+);
+
+const _: () = assert!(
+    !kex::CURVE25519.is_enabled() && !kex::MLKEM768X25519_SHA256.is_enabled(),
+    "russh must not negotiate the X25519 key exchanges; `cargo tree -e features -i russh` shows what enables their features",
 );
 
 const USAGE: &str =

@@ -97,7 +97,7 @@ impl<C: BlockCipherEncrypt + BlockCipherDecrypt + Clone> InnerIvInit for CbcWrap
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aes::Aes128;
-    #[cfg(feature = "des")]
+    #[cfg(feature = "3des-cbc")]
     use des::TdesEde3;
 
     use super::CbcWrapper;
@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
-    #[cfg(feature = "des")]
+    #[cfg(feature = "3des-cbc")]
     #[test]
     fn packet_length_probe_respects_3des_block_size() {
         let plaintext = *b"0123456789ABCDEF";

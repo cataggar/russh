@@ -10,7 +10,7 @@
 //! | Category | Trait(s) | Used for |
 //! |---|---|---|
 //! | `hash` | [`Hash`] | exchange hashes and key derivation |
-//! | `kex` | [`KeyAgreement`], [`Kem`], [`FfDh`] | X25519, NIST P-256/384/521 ECDH, ML-KEM-768 (hybrid with X25519), finite-field DH groups |
+//! | `kex` | [`KeyAgreement`], [`Kem`], [`FfDh`] | X25519, NIST P-256/384/521 ECDH, ML-KEM-768 and ML-KEM-1024 (hybrids with ECDH), finite-field DH groups |
 //! | `sign` | [`Signer`], [`Verifier`] | host-key, certificate and user-auth signatures |
 //! | `cipher` | [`Aead`], [`ChaCha20Poly1305`], [`BlockStream`] | AES-GCM, `chacha20-poly1305@openssh.com`, AES-CTR (and CBC/3DES) |
 //! | `mac` | [`Mac`] | HMAC-SHA1/SHA2 (plain and encrypt-then-MAC); [`hmac_sha1`] for hashed `known_hosts` host names |
@@ -46,13 +46,14 @@
 //!
 //! - `hash`: `Sha1`, `Sha256`, `Sha384`, `Sha512` implementing [`Hash`].
 //! - `kex`: `X25519`, `NistP256`, `NistP384`, `NistP521` ([`KeyAgreement`]),
-//!   `MlKem768` ([`Kem`]) and `Dh` ([`FfDh`]); a primitive the backend lacks
-//!   is set to [`Unsupported`] and left out of `ALGORITHMS`.
+//!   `MlKem768` and `MlKem1024` ([`Kem`]) and `Dh` ([`FfDh`]); a primitive
+//!   the backend lacks is set to [`Unsupported`] and left out of
+//!   `ALGORITHMS`.
 //!   `ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))]` lists the
 //!   implemented kex methods (the values are the shared `crate::kex::_*`
 //!   constants), and `DEFAULT_ORDER: &[kex::Name]` the default preference
-//!   order, without the `ext-info-*`/`kex-strict-*` pseudo-algorithms that
-//!   negotiation appends.
+//!   order: every implemented method that isn't legacy, without the
+//!   `ext-info-*`/`kex-strict-*` pseudo-algorithms that negotiation appends.
 //! - `sign`: a `Signatures` type implementing [`Signer`] and [`Verifier`],
 //!   and `DEFAULT_ORDER: &[ssh_key::Algorithm]`. `Verifier::is_supported`
 //!   decides what negotiation offers; `Signer::can_sign` and
@@ -79,11 +80,14 @@
 //!
 //! The `ALGORITHMS` lists fill the registries (`kex::KEXES`,
 //! `cipher::CIPHERS` and `mac::MACS`, which add the shared `none`/`clear`
-//! entries), and the `DEFAULT_ORDER` lists make up `Preferred::DEFAULT` and
-//! `Preferred::COMPRESSED`. Negotiation drops whatever the backend does not
-//! implement from the preferences (`Preferred::supported`), so a backend
-//! never advertises or accepts an algorithm it cannot run. The public
-//! algorithm-name constants (`kex::*`, `cipher::*`, `mac::*`) exist for
+//! entries). The `cipher` and `mac` `DEFAULT_ORDER` lists, like the `kex`
+//! one, hold every implemented algorithm that isn't legacy (SHA-1, CBC, 3DES),
+//! in order of preference; without the algorithms whose crate features are
+//! disabled, they make up `Preferred::DEFAULT` and `Preferred::COMPRESSED`.
+//! Negotiation drops from the preferences whatever the backend does not
+//! implement, and whatever has its feature disabled (`Preferred::supported`),
+//! so a backend never advertises or accepts an algorithm it cannot run. The
+//! public algorithm-name constants (`kex::*`, `cipher::*`, `mac::*`) exist for
 //! every backend.
 //!
 //! # Swapping a category
@@ -169,8 +173,8 @@ pub(crate) trait KeyAgreement {
     fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
 }
 
-/// Key encapsulation (ML-KEM-768, FIPS 203), with keys and ciphertexts in
-/// their standard encodings.
+/// Key encapsulation (ML-KEM-768 and ML-KEM-1024, FIPS 203), with keys and
+/// ciphertexts in their standard encodings.
 pub(crate) trait Kem {
     type DecapsulationKey: Send;
     /// Returns the decapsulation key and the encoded encapsulation key.
@@ -577,7 +581,13 @@ pub(crate) mod testing {
     use super::{is_supported_signature_algorithm, provider};
     use crate::{cipher, kex, mac};
 
-    fn check<N: AsRef<str>>(category: &str, all: &[&N], algorithms: &[&N], default: &[N]) {
+    fn check<N: AsRef<str>>(
+        category: &str,
+        all: &[&N],
+        algorithms: &[&N],
+        default: &[N],
+        is_legacy: impl Fn(&N) -> bool,
+    ) {
         let all: HashSet<&str> = all.iter().map(|n| n.as_ref()).collect();
         let implemented: HashSet<&str> = algorithms.iter().map(|n| n.as_ref()).collect();
         assert_eq!(
@@ -604,10 +614,22 @@ pub(crate) mod testing {
             default.len(),
             "duplicate in {category} DEFAULT_ORDER"
         );
+        // Every implemented algorithm that isn't legacy is preferred, so that
+        // `Preferred::DEFAULT` offers it when its feature is enabled.
+        let secure: HashSet<&str> = algorithms
+            .iter()
+            .filter(|&&n| !is_legacy(n))
+            .map(|n| n.as_ref())
+            .collect();
+        assert_eq!(
+            unique, secure,
+            "{category} DEFAULT_ORDER must list exactly the implemented algorithms that aren't legacy"
+        );
     }
 
     /// The selected provider's lists are consistent: no duplicates, only
-    /// known names, and every default is implemented.
+    /// known names, and the defaults are the implemented algorithms that
+    /// aren't legacy.
     pub(crate) fn check_provider_lists() {
         let kex: Vec<&kex::Name> = provider::kex::ALGORITHMS.iter().map(|(n, _)| *n).collect();
         check(
@@ -615,6 +637,7 @@ pub(crate) mod testing {
             kex::ALL_KEX_ALGORITHMS,
             &kex,
             provider::kex::DEFAULT_ORDER,
+            kex::Name::is_legacy,
         );
         let ciphers: Vec<&cipher::Name> = provider::cipher::ALGORITHMS
             .iter()
@@ -625,6 +648,7 @@ pub(crate) mod testing {
             cipher::ALL_CIPHERS,
             &ciphers,
             provider::cipher::DEFAULT_ORDER,
+            cipher::Name::is_legacy,
         );
         let macs: Vec<&mac::Name> = provider::mac::ALGORITHMS.iter().map(|(n, _)| *n).collect();
         check(
@@ -632,6 +656,7 @@ pub(crate) mod testing {
             mac::ALL_MAC_ALGORITHMS,
             &macs,
             provider::mac::DEFAULT_ORDER,
+            mac::Name::is_legacy,
         );
         const { assert!(!provider::sign::DEFAULT_ORDER.is_empty()) };
         for (i, algorithm) in provider::sign::DEFAULT_ORDER.iter().enumerate() {
