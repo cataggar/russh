@@ -40,6 +40,14 @@ pub fn decode_openssh(secret: &[u8], _password: Option<&str>) -> Result<PrivateK
     if key.is_encrypted() {
         return Err(super::encrypted("OpenSSH"));
     }
+    if let ssh_key::private::KeypairData::Mldsa87P384(kp) = key.key_data() {
+        crate::crypto::symcrypt::keys::mldsa87_p384_keypair(
+            kp.mldsa_seed(),
+            kp.ecdsa_private().as_slice(),
+            Some(kp.public().mldsa()),
+            Some(kp.public().ecdsa_sec1_bytes()),
+        )?;
+    }
     Ok(key)
 }
 
@@ -100,15 +108,58 @@ fn decode_keypair_as(
     use ssh_key::private::KeypairData;
     use zeroize::Zeroizing;
 
-    let Algorithm::Ecdsa { curve } = algorithm else {
-        return Ok(KeypairData::decode_as(reader, algorithm)?);
-    };
-    // The curve, the public point and the private scalar, which ssh-key
-    // reads again, with the scalar padded if it is short.
-    let curve_name = Vec::<u8>::decode(reader)?;
-    let point = Vec::<u8>::decode(reader)?;
-    let scalar = Zeroizing::new(Vec::<u8>::decode(reader)?);
-    decode_ecdsa_keypair(curve, &curve_name, &point, scalar)
+    match algorithm {
+        Algorithm::Ecdsa { curve } => {
+            // The curve, the public point and the private scalar, which ssh-key
+            // reads again, with the scalar padded if it is short.
+            let curve_name = Vec::<u8>::decode(reader)?;
+            let point = Vec::<u8>::decode(reader)?;
+            let scalar = Zeroizing::new(Vec::<u8>::decode(reader)?);
+            decode_ecdsa_keypair(curve, &curve_name, &point, scalar)
+        }
+        Algorithm::Mldsa87P384 => {
+            let public = ssh_key::public::Mldsa87P384PublicKey::decode(reader)?;
+            let composite_private = Zeroizing::new(Vec::<u8>::decode(reader)?);
+            decode_mldsa87_p384_keypair(&public, composite_private)
+        }
+        algorithm => Ok(KeypairData::decode_as(reader, algorithm)?),
+    }
+}
+
+#[cfg(not(russh_backend = "symcrypt"))]
+fn decode_mldsa87_p384_keypair(
+    public: &ssh_key::public::Mldsa87P384PublicKey,
+    mut composite_private: zeroize::Zeroizing<Vec<u8>>,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Encode;
+    use ssh_key::Algorithm;
+    use ssh_key::private::KeypairData;
+    use zeroize::Zeroizing;
+
+    let mut priv_fields = raw::Fields(&composite_private);
+    if let (Some(seed), Some(scalar)) = (priv_fields.take(32), priv_fields.string())
+        && priv_fields.0.is_empty()
+        && raw::is_short_scalar(scalar)
+    {
+        let padded_scalar = raw::padded_scalar(
+            ssh_key::EcdsaCurve::NistP384,
+            scalar,
+            public.ecdsa_sec1_bytes(),
+        )?;
+        let mut new_priv = Zeroizing::new(Vec::with_capacity(32 + 4 + padded_scalar.len()));
+        new_priv.extend_from_slice(seed);
+        padded_scalar.as_slice().encode(&mut *new_priv)?;
+        composite_private = new_priv;
+    }
+    let mut fields = Zeroizing::new(Vec::with_capacity(
+        public.encoded_len()? + 4 + composite_private.len(),
+    ));
+    public.encode(&mut *fields)?;
+    composite_private.as_slice().encode(&mut *fields)?;
+    Ok(KeypairData::decode_as(
+        &mut fields.as_slice(),
+        Algorithm::Mldsa87P384,
+    )?)
 }
 
 #[cfg(not(russh_backend = "symcrypt"))]
@@ -163,6 +214,10 @@ fn decode_cert_keypair(
                 pk.as_sec1_bytes(),
                 scalar,
             )
+        }
+        KeyData::Mldsa87P384(pk) => {
+            let composite_private = Zeroizing::new(Vec::<u8>::decode(reader)?);
+            decode_mldsa87_p384_keypair(pk, composite_private)
         }
         KeyData::Ed25519(pk) => {
             let keypair = Ed25519Keypair::decode(reader)?;
@@ -224,8 +279,41 @@ fn decode_keypair_as(
             let e = Mpint::decode(reader)?;
             decode_symcrypt_rsa_private(&n, &e, reader)
         }
+        Algorithm::Mldsa87P384 => {
+            let public = ssh_key::public::Mldsa87P384PublicKey::decode(reader)?;
+            decode_symcrypt_mldsa87_p384_private(&public, reader)
+        }
         algorithm => Ok(KeypairData::decode_as(reader, algorithm)?),
     }
+}
+
+#[cfg(russh_backend = "symcrypt")]
+fn decode_symcrypt_mldsa87_p384_private(
+    public: &ssh_key::public::Mldsa87P384PublicKey,
+    reader: &mut impl ssh_encoding::Reader,
+) -> Result<ssh_key::private::KeypairData, Error> {
+    use ssh_encoding::Decode;
+    use ssh_key::private::KeypairData;
+    use zeroize::Zeroizing;
+
+    use crate::crypto::symcrypt::keys;
+
+    let composite_private = Zeroizing::new(Vec::<u8>::decode(reader)?);
+    let mut fields = raw::Fields(&composite_private);
+    let (Some(seed), Some(scalar)) = (fields.take(32), fields.string()) else {
+        return Err(Error::KeyIsCorrupt);
+    };
+    if !fields.0.is_empty() || scalar.first().is_some_and(|b| b & 0x80 != 0) {
+        return Err(Error::KeyIsCorrupt);
+    }
+    let seed: &[u8; 32] = seed.try_into().map_err(|_| Error::KeyIsCorrupt)?;
+    let keypair = keys::mldsa87_p384_keypair(
+        seed,
+        scalar,
+        Some(public.mldsa()),
+        Some(public.ecdsa_sec1_bytes()),
+    )?;
+    Ok(KeypairData::Mldsa87P384(keypair))
 }
 
 #[cfg(russh_backend = "symcrypt")]
@@ -292,6 +380,7 @@ fn decode_cert_keypair(
             }
             Ok(KeypairData::Ed25519(keypair))
         }
+        KeyData::Mldsa87P384(pk) => decode_symcrypt_mldsa87_p384_private(pk, reader),
         KeyData::Rsa(pk) => decode_symcrypt_rsa_private(pk.n(), pk.e(), reader),
         _ => Err(ssh_key::Error::AlgorithmUnsupported {
             algorithm: public.algorithm(),
@@ -480,21 +569,55 @@ mod raw {
         section: &[u8],
         max_padding: usize,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
-        // Check integers, key type, curve, public point, private scalar,
-        // comment and padding.
+        // Check integers, key type, curve/composite public key, private
+        // scalar/composite private key, comment and padding.
         let mut fields = Fields(section);
-        let curve = match (fields.take(8), fields.string()) {
-            (Some(_), Some(b"ecdsa-sha2-nistp256")) => EcdsaCurve::NistP256,
-            (Some(_), Some(b"ecdsa-sha2-nistp384")) => EcdsaCurve::NistP384,
-            (Some(_), Some(b"ecdsa-sha2-nistp521")) => EcdsaCurve::NistP521,
+        let (_, Some(key_type)) = (fields.take(8), fields.string()) else {
+            return Ok(None);
+        };
+        let (curve, point, replace_start, seed_prefix, scalar) = match key_type {
+            b"ecdsa-sha2-nistp256" | b"ecdsa-sha2-nistp384" | b"ecdsa-sha2-nistp521" => {
+                let curve = match key_type {
+                    b"ecdsa-sha2-nistp256" => EcdsaCurve::NistP256,
+                    b"ecdsa-sha2-nistp384" => EcdsaCurve::NistP384,
+                    _ => EcdsaCurve::NistP521,
+                };
+                let (Some(_), Some(point)) = (fields.string(), fields.string()) else {
+                    return Ok(None);
+                };
+                let scalar_start = section.len() - fields.0.len();
+                let Some(scalar) = fields.string() else {
+                    return Ok(None);
+                };
+                (curve, point, scalar_start, None, scalar)
+            }
+            b"ssh-mldsa87-p384" => {
+                let Some(composite_public) = fields.string() else {
+                    return Ok(None);
+                };
+                let mut pub_fields = Fields(composite_public);
+                let (Some(_mldsa_pub), Some(point)) = (pub_fields.take(2592), pub_fields.string())
+                else {
+                    return Ok(None);
+                };
+                if !pub_fields.0.is_empty() {
+                    return Ok(None);
+                }
+                let priv_start = section.len() - fields.0.len();
+                let Some(composite_private) = fields.string() else {
+                    return Ok(None);
+                };
+                let mut priv_fields = Fields(composite_private);
+                let (Some(seed), Some(scalar)) = (priv_fields.take(32), priv_fields.string())
+                else {
+                    return Ok(None);
+                };
+                if !priv_fields.0.is_empty() {
+                    return Ok(None);
+                }
+                (EcdsaCurve::NistP384, point, priv_start, Some(seed), scalar)
+            }
             _ => return Ok(None),
-        };
-        let (Some(_), Some(point)) = (fields.string(), fields.string()) else {
-            return Ok(None);
-        };
-        let scalar_start = section.len() - fields.0.len();
-        let Some(scalar) = fields.string() else {
-            return Ok(None);
         };
         if !is_short_scalar(scalar) {
             return Ok(None);
@@ -513,9 +636,21 @@ mod raw {
 
         let scalar = padded_scalar(curve, scalar, point)?;
         let scalar_len = u32::try_from(scalar.len()).map_err(|_| Error::CouldNotReadKey)?;
+        let replacement = match seed_prefix {
+            Some(seed) => {
+                let mut comp_priv = Zeroizing::new(Vec::with_capacity(32 + 4 + scalar.len()));
+                comp_priv.extend_from_slice(seed);
+                comp_priv.extend_from_slice(&scalar_len.to_be_bytes());
+                comp_priv.extend_from_slice(&scalar);
+                comp_priv
+            }
+            None => scalar,
+        };
+        let replacement_len =
+            u32::try_from(replacement.len()).map_err(|_| Error::CouldNotReadKey)?;
         let public_key_len = u32::try_from(public_key.len()).map_err(|_| Error::CouldNotReadKey)?;
 
-        let unpadded_len = scalar_start + 4 + scalar.len() + comment.len();
+        let unpadded_len = replace_start + 4 + replacement.len() + comment.len();
         let padding_len = (8 - unpadded_len % 8) % 8;
         let section_len =
             u32::try_from(unpadded_len + padding_len).map_err(|_| Error::CouldNotReadKey)?;
@@ -529,9 +664,9 @@ mod raw {
         padded.extend_from_slice(&public_key_len.to_be_bytes());
         padded.extend_from_slice(public_key);
         padded.extend_from_slice(&section_len.to_be_bytes());
-        padded.extend_from_slice(section.get(..scalar_start).ok_or(Error::CouldNotReadKey)?);
-        padded.extend_from_slice(&scalar_len.to_be_bytes());
-        padded.extend_from_slice(&scalar);
+        padded.extend_from_slice(section.get(..replace_start).ok_or(Error::CouldNotReadKey)?);
+        padded.extend_from_slice(&replacement_len.to_be_bytes());
+        padded.extend_from_slice(&replacement);
         padded.extend_from_slice(comment);
         padded.extend((1..).take(padding_len));
         Ok(Some(padded))

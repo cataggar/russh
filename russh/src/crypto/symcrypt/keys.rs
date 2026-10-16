@@ -60,20 +60,24 @@
 //! key aws-lc-rs computes: `ssh-key`'s `PrivateKey::random` needs the
 //! RustCrypto algorithm crates.
 
-use ssh_key::private::{EcdsaKeypair, KeypairData, RsaKeypair, RsaPrivateKey};
-use ssh_key::public::RsaPublicKey;
+use ssh_key::private::{
+    EcdsaKeypair, EcdsaPrivateKey, KeypairData, Mldsa87P384Keypair, RsaKeypair, RsaPrivateKey,
+};
+use ssh_key::public::{Mldsa87P384PublicKey, RsaPublicKey};
 use ssh_key::{Algorithm, EcdsaCurve, Mpint, PrivateKey};
 use symcrypt::ecc::{CurveType, EcKey, EcKeyUsage};
 use symcrypt::errors::SymCryptError;
 use symcrypt::rsa::{RsaKey, RsaKeyPairExportBlob, RsaKeyUsage};
 use zeroize::{Zeroize, Zeroizing};
 
+use super::sign::{MLDSA87_PUBLIC_KEY_LEN, MLDSA87_SEED_LEN, MlDsa87Key};
 use crate::keys::Error;
 
 /// The size of the RSA keys [`generate`] makes, as `ssh-key` does.
 const RSA_GENERATED_BITS: u32 = 4096;
 
-/// Generates a key pair with SymCrypt, with an empty comment: ECDSA on any
+/// Generates a key pair with SymCrypt, with an empty comment: composite
+/// `ssh-mldsa87-p384` (with `ssh-mldsa87-p384`), ECDSA on any
 /// curve, or a 4096-bit RSA key with `e = 65537` (the hash of `algorithm`
 /// doesn't matter); with `ed25519-aws-lc`, also Ed25519 (see
 /// `super::ed25519::generate`).
@@ -82,6 +86,23 @@ const RSA_GENERATED_BITS: u32 = 4096;
 /// and with `ssh_key::Error::Crypto` if SymCrypt fails.
 pub(crate) fn generate(algorithm: &Algorithm) -> Result<PrivateKey, Error> {
     let keypair = match algorithm {
+        #[cfg(feature = "ssh-mldsa87-p384")]
+        Algorithm::Mldsa87P384 => {
+            let (mldsa_seed, mldsa_public) = MlDsa87Key::generate_keypair().map_err(|error| {
+                log::error!("SymCrypt failed to generate an ML-DSA-87 key: {error}");
+                Error::SshKey(ssh_key::Error::Crypto)
+            })?;
+            let ec_key = EcKey::generate_key_pair(CurveType::NistP384, EcKeyUsage::EcDsa)
+                .map_err(generation_error)?;
+            let scalar = Zeroizing::new(ec_key.export_private_key().map_err(generation_error)?);
+            let (private, point) = ec_derive::<48>(CurveType::NistP384, &scalar, None)?;
+            let public = Mldsa87P384PublicKey::new(mldsa_public, point.as_slice().try_into()?)?;
+            KeypairData::Mldsa87P384(Mldsa87P384Keypair::new(
+                public,
+                *mldsa_seed,
+                EcdsaPrivateKey::from(*private),
+            )?)
+        }
         Algorithm::Ecdsa { curve } => {
             let curve_type = match curve {
                 EcdsaCurve::NistP256 => CurveType::NistP256,
@@ -128,6 +149,35 @@ pub(crate) fn generate(algorithm: &Algorithm) -> Result<PrivateKey, Error> {
 fn generation_error(error: SymCryptError) -> Error {
     log::error!("SymCrypt failed to generate a key: {error}");
     ssh_key::Error::Crypto.into()
+}
+
+/// Builds an `ssh-mldsa87-p384` composite key pair from a 32-byte ML-DSA-87
+/// seed and a big-endian P-384 private `scalar` (leading zeros allowed),
+/// checking both against their public key components with SymCrypt.
+///
+/// Fails with [`Error::KeyIsCorrupt`] if either private key is invalid or
+/// does not match its public key.
+pub(crate) fn mldsa87_p384_keypair(
+    mldsa_seed: &[u8; MLDSA87_SEED_LEN],
+    ecdsa_scalar: &[u8],
+    expected_mldsa_public: Option<&[u8; MLDSA87_PUBLIC_KEY_LEN]>,
+    expected_ecdsa_public: Option<&[u8]>,
+) -> Result<Mldsa87P384Keypair, Error> {
+    if let Some(point) = expected_ecdsa_public
+        && point.first() != Some(&0x04)
+    {
+        return Err(Error::KeyIsCorrupt);
+    }
+    let (_, mldsa_public) = MlDsa87Key::from_private_seed(mldsa_seed, expected_mldsa_public)
+        .map_err(|_| Error::KeyIsCorrupt)?;
+    let (private, point) =
+        ec_derive::<48>(CurveType::NistP384, ecdsa_scalar, expected_ecdsa_public)?;
+    let public = Mldsa87P384PublicKey::new(mldsa_public, point.as_slice().try_into()?)?;
+    Ok(Mldsa87P384Keypair::new(
+        public,
+        *mldsa_seed,
+        EcdsaPrivateKey::from(*private),
+    )?)
 }
 
 /// Builds an ECDSA key pair from a big-endian private `scalar` (leading

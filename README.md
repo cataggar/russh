@@ -96,10 +96,10 @@ With it, [aws-lc-rs](https://github.com/aws/aws-lc-rs) signs with Ed25519 keys, 
 If you need them, for example for fingerprints, add `ssh-key` with its `sha2` feature to your dependencies; this brings `sha2` back. Copy the `git` and `rev` from russh's workspace `Cargo.toml`: from another source, Cargo would build a second `ssh-key`, and russh's would still lack the feature.
 
 ```toml
-ssh-key = { git = "https://github.com/cataggar/RustCrypto-SSH", rev = "6a7e2a86860054a961a379ca6656373ef9b057a3", default-features = false, features = ["sha2"] }
+ssh-key = { git = "https://github.com/cataggar/RustCrypto-SSH", rev = "3c91f4bc8dfcf5820afd105bb166adf1e04a974e", default-features = false, features = ["sha2"] }
 ```
 
-**Requirements.** The `symcrypt` crate links the native SymCrypt library dynamically, so the library must be present both when you build and when you run your program. It needs SymCrypt 103.8.0 or newer, and supports Windows, Ubuntu and Azure Linux 3, on x86-64 and ARM64. Russh's CI tests this backend on Ubuntu 24.04 (x86-64 and ARM64) and Windows (x86-64). The `symcrypt` crate's [install guide](https://github.com/microsoft/rust-symcrypt/blob/7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb/rust-symcrypt/INSTALL.md) has the details.
+**Requirements.** The `symcrypt` crate links the native SymCrypt library dynamically, so the library must be present both when you build and when you run your program. It needs SymCrypt 103.11.0 or newer, and supports Windows, Ubuntu and Azure Linux 3, on x86-64 and ARM64. Russh's CI tests this backend on Ubuntu 24.04 (x86-64 and ARM64) and Windows (x86-64). The `symcrypt` crate's [install guide](https://github.com/microsoft/rust-symcrypt/blob/7143e4c3bfe4e305b2518681c7752ae3d7b7ddbb/rust-symcrypt/INSTALL.md) has the details.
 
 - **Linux:** install the `symcrypt` package from [packages.microsoft.com](https://learn.microsoft.com/en-us/linux/packages); it is normally preinstalled on Azure Linux 3. The package puts the library in the standard paths, so no environment variables are needed. Otherwise, extract a Linux archive from the [SymCrypt releases](https://github.com/microsoft/SymCrypt/releases), set `SYMCRYPT_LIB_PATH` to its `lib` directory when building, and let the loader find `libsymcrypt.so` at run time (`LD_LIBRARY_PATH`, `ldconfig` or an rpath).
 - **Windows:** download the Windows archive from the [SymCrypt releases](https://github.com/microsoft/SymCrypt/releases), and set `SYMCRYPT_LIB_PATH` to its `dll` directory, which has `symcrypt.lib` and `symcrypt.dll`; the build fails without it. Ship `symcrypt.dll` in the same directory as your executable: Windows may have its own `C:\Windows\System32\symcrypt.dll`, whose version need not match the `symcrypt.lib` you linked against, and the loader searches the system directory before `PATH` (but after the executable's directory). For `cargo test`, copy the DLL into `target/debug/deps`; doctests run from temporary directories, so they load the System32 copy if there is one, unless a Cargo runner copies the DLL next to them first, as CI does with `ci/symcrypt-doctest-runner.ps1`.
@@ -130,7 +130,7 @@ Each key exchange method, cipher and MAC has a crate feature, named after the al
 - `secure-algorithms`, a default feature, enables every algorithm in the [tables below](#supported-algorithms) but the legacy ones;
 - `all-algorithms` enables them all, including the legacy ones: the SHA-1 key exchanges and MACs, the CBC modes, `3des-cbc` (formerly the `des` feature, which still enables it) and `none`.
 
-`Preferred::default()` offers the enabled algorithms that the crypto backend implements, in its order of preference, except the legacy ones, which russh negotiates only if you add them to `Preferred`. Host key and signature algorithms don't depend on these features.
+`Preferred::default()` offers the enabled algorithms that the crypto backend implements, in its order of preference, except the legacy ones, which russh negotiates only if you add them to `Preferred`. Among host key and signature algorithms, `ssh-mldsa87-p384` has its own feature (included in `secure-algorithms` and `all-algorithms`); the others don't depend on algorithm features.
 
 With `default-features = false`, enable `secure-algorithms` or the features of the algorithms you want. A build needs a key exchange method and a cipher, and a MAC unless one of its ciphers is an AEAD (`aes256-gcm`, `aes128-gcm` or `chacha20-poly1305`). For example, to negotiate only the post-quantum hybrids of ML-KEM and ECDH on the NIST curves ([RFC 10042](https://www.rfc-editor.org/rfc/rfc10042)) or ECDH on P-384, with AES-256 and HMAC-SHA-512:
 
@@ -217,6 +217,7 @@ MACs are only used with the AES-CTR ciphers. `symcrypt` prefers `hmac-sha2-256-e
 
 | Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
 |---|---|---|
+| `ssh-mldsa87-p384` (composite ML-DSA-87 and ECDSA P-384, [`draft-ietf-sshm-composite-sigs-00`](https://datatracker.ietf.org/doc/html/draft-ietf-sshm-composite-sigs-00)) | default | default |
 | `ssh-ed25519` | default | default (last) with `ed25519-aws-lc`, from aws-lc-rs; otherwise — |
 | `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521` | default | default |
 | `rsa-sha2-256`, `rsa-sha2-512` | default | default |

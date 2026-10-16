@@ -9,10 +9,10 @@ use crate::crypto::{Signer, Verifier};
 pub(crate) struct Signatures;
 
 impl Verifier for Signatures {
-    fn is_supported(_: &Algorithm) -> bool {
+    fn is_supported(algorithm: &Algorithm) -> bool {
         // Whatever `ssh-key` was built with. Without the `rsa` feature, RSA
         // stays advertised: verification then fails at use, as before.
-        true
+        cfg!(feature = "ssh-mldsa87-p384") || *algorithm != Algorithm::Mldsa87P384
     }
 
     fn can_verify(algorithm: &Algorithm) -> bool {
@@ -25,6 +25,9 @@ impl Verifier for Signatures {
     }
 
     fn verify(key: &KeyData, message: &[u8], signature: &Signature) -> signature::Result<()> {
+        if !Self::is_supported(&key.algorithm()) || !Self::is_supported(&signature.algorithm()) {
+            return Err(signature::Error::new());
+        }
         signature::Verifier::verify(key, message, signature)
     }
 }
@@ -32,6 +35,7 @@ impl Verifier for Signatures {
 impl Signer for Signatures {
     fn can_sign(algorithm: &Algorithm) -> bool {
         matches!(algorithm, Algorithm::Ed25519 | Algorithm::Ecdsa { .. })
+            || (cfg!(feature = "ssh-mldsa87-p384") && *algorithm == Algorithm::Mldsa87P384)
             || (cfg!(feature = "rsa") && matches!(algorithm, Algorithm::Rsa { .. }))
             || (cfg!(feature = "dsa") && matches!(algorithm, Algorithm::Dsa))
     }
@@ -42,6 +46,12 @@ impl Signer for Signatures {
         message: &[u8],
     ) -> ssh_key::Result<Signature> {
         match key.key_data() {
+            #[cfg(not(feature = "ssh-mldsa87-p384"))]
+            ssh_key::private::KeypairData::Mldsa87P384(_) => {
+                Err(ssh_key::Error::AlgorithmUnsupported {
+                    algorithm: Algorithm::Mldsa87P384,
+                })
+            }
             #[cfg(feature = "rsa")]
             ssh_key::private::KeypairData::Rsa(rsa_keypair) => Ok(signature::Signer::try_sign(
                 &(rsa_keypair, hash_alg),
@@ -71,6 +81,8 @@ impl Signer for Signatures {
 
 /// Default host-key and public-key algorithm preference.
 pub(crate) const DEFAULT_ORDER: &[Algorithm] = &[
+    #[cfg(feature = "ssh-mldsa87-p384")]
+    Algorithm::Mldsa87P384,
     Algorithm::Ed25519,
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP256,

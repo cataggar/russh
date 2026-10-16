@@ -105,6 +105,8 @@ pub use private_key_with_hash_alg::PrivateKeyWithHashAlg;
 
 #[cfg(not(russh_backend = "symcrypt"))]
 pub const ALL_KEY_TYPES: &[Algorithm] = &[
+    #[cfg(feature = "ssh-mldsa87-p384")]
+    Algorithm::Mldsa87P384,
     Algorithm::Dsa,
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP256,
@@ -135,6 +137,8 @@ pub const ALL_KEY_TYPES: &[Algorithm] = &[
 /// feature); RSA does not need the `rsa` feature.
 #[cfg(russh_backend = "symcrypt")]
 pub const ALL_KEY_TYPES: &[Algorithm] = &[
+    #[cfg(feature = "ssh-mldsa87-p384")]
+    Algorithm::Mldsa87P384,
     Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP256,
     },

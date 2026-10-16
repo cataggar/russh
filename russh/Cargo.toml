@@ -37,6 +37,7 @@ serde = ["ssh-key/serde"]
 #
 # The algorithms that are enabled by default: all but the legacy ones.
 secure-algorithms = [
+  "ssh-mldsa87-p384",
   "mlkem1024nistp384-sha384",
   "mlkem768nistp256-sha256",
   "mlkem768x25519-sha256",
@@ -64,6 +65,7 @@ secure-algorithms = [
 # Every algorithm, including the legacy ones.
 all-algorithms = [
   "secure-algorithms",
+  "ssh-mldsa87-p384",
   "diffie-hellman-group-exchange-sha1",
   "diffie-hellman-group14-sha1",
   "diffie-hellman-group1-sha1",
@@ -75,6 +77,8 @@ all-algorithms = [
   "hmac-sha1",
   "none",
 ]
+# Signature algorithms.
+ssh-mldsa87-p384 = []
 # Key exchange methods.
 mlkem1024nistp384-sha384 = []
 mlkem768nistp256-sha256 = []
@@ -172,6 +176,7 @@ _rustcrypto = [
   "pkcs8/encryption",
   "ssh-key/ed25519",
   "ssh-key/encryption",
+  "ssh-key/mldsa",
   "ssh-key/p256",
   "ssh-key/p384",
   "ssh-key/p521",

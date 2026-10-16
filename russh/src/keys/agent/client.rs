@@ -235,6 +235,14 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
                 ssh_key::Mpint::from_positive_bytes(pair.private_key_bytes())
                     .encode(&mut self.buf)?;
             }
+            ssh_key::private::KeypairData::Mldsa87P384(pair) => {
+                let mut composite_private = zeroize::Zeroizing::new(Vec::with_capacity(
+                    32 + 4 + pair.ecdsa_private().as_slice().len() + 1,
+                ));
+                composite_private.extend_from_slice(pair.mldsa_seed());
+                pair.ecdsa_private().encode(&mut *composite_private)?;
+                composite_private.as_slice().encode(&mut self.buf)?;
+            }
             ssh_key::private::KeypairData::Ed25519(pair) => {
                 pair.encode(&mut self.buf)?;
             }

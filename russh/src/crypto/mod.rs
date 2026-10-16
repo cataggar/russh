@@ -478,6 +478,7 @@ pub(crate) fn cannot_sign_reason(algorithm: &Algorithm) -> String {
     // `aws-lc-rs` and `ring` sign with RSA and DSA keys only with the
     // matching cargo feature.
     let missing_feature = match algorithm {
+        Algorithm::Mldsa87P384 if !cfg!(feature = "ssh-mldsa87-p384") => Some("ssh-mldsa87-p384"),
         _ if cfg!(russh_backend = "symcrypt") => None,
         Algorithm::Rsa { .. } if !cfg!(feature = "rsa") => Some("rsa"),
         Algorithm::Dsa if !cfg!(feature = "dsa") => Some("dsa"),
