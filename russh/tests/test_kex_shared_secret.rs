@@ -14,12 +14,14 @@ use common::test_keys;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::*;
 
-/// Test that kex_done callback is invoked with shared secret
-#[tokio::test]
-async fn test_kex_done_callback_receives_shared_secret() {
+/// Connects a client to a server, both offering only `kex_alg` (with `gex`
+/// for the client, if set), authenticates, and returns the shared secret and
+/// the algorithms that the client's `kex_done` received.
+async fn kex_done_with(kex_alg: kex::Name, gex: Option<client::GexParams>) -> (Vec<u8>, Names) {
     let _ = env_logger::try_init();
 
     let client_key = test_keys::key(1);
+    let kex_list: Cow<'static, [kex::Name]> = Cow::Owned(vec![kex_alg]);
 
     // Set up server
     let server_config = server::Config {
@@ -27,7 +29,7 @@ async fn test_kex_done_callback_receives_shared_secret() {
         auth_rejection_time: std::time::Duration::from_secs(3),
         keys: vec![test_keys::key(0)],
         preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::CURVE25519]),
+            kex: kex_list.clone(),
             ..Default::default()
         },
         ..Default::default()
@@ -48,13 +50,16 @@ async fn test_kex_done_callback_receives_shared_secret() {
     let captured_secret: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
     let captured_names: Arc<Mutex<Option<Names>>> = Arc::new(Mutex::new(None));
 
-    let client_config = client::Config {
+    let mut client_config = client::Config {
         preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::CURVE25519]),
+            kex: kex_list,
             ..Default::default()
         },
         ..Default::default()
     };
+    if let Some(gex) = gex {
+        client_config.gex = gex;
+    }
     let client_config = Arc::new(client_config);
 
     let client = TestClientWithKexCapture {
@@ -75,190 +80,88 @@ async fn test_kex_done_callback_receives_shared_secret() {
         .success();
     assert!(authenticated, "Authentication should succeed");
 
+    session
+        .disconnect(Disconnect::ByApplication, "", "")
+        .await
+        .unwrap();
+
     // Verify the shared secret was captured
     let secret = captured_secret.lock().unwrap().clone();
-    assert!(secret.is_some(), "Shared secret should be captured");
-    let secret_bytes = secret.as_ref().unwrap();
-    assert!(
-        !secret_bytes.is_empty(),
-        "Shared secret should not be empty"
-    );
+    let secret = secret.expect("Shared secret should be captured");
+    assert!(!secret.is_empty(), "Shared secret should not be empty");
+
+    // Verify negotiated algorithms were captured
+    let names = captured_names.lock().unwrap().clone();
+    let names = names.expect("Negotiated algorithms should be captured");
+    assert_eq!(names.kex, kex_alg);
+
+    (secret, names)
+}
+
+/// Test that kex_done callback is invoked with shared secret
+// `curve25519-sha256` is not approved.
+#[cfg(feature = "unapproved-algorithms")]
+#[tokio::test]
+async fn test_kex_done_callback_receives_shared_secret() {
+    let (secret, names) = kex_done_with(kex::CURVE25519, None).await;
     assert_eq!(
-        secret_bytes.len(),
+        secret.len(),
         32,
         "Curve25519 shared secret should be 32 bytes"
     );
-
-    // Verify negotiated cipher was captured
-    let cipher = captured_names.lock().unwrap().clone();
-    assert!(cipher.is_some(), "Negotiated cipher should be captured");
-
     assert!(
-        cipher.as_ref().unwrap().kex.as_ref().contains("curve25519"),
+        names.kex.as_ref().contains("curve25519"),
         "KEX algorithm should be curve25519"
     );
-
-    session
-        .disconnect(Disconnect::ByApplication, "", "")
-        .await
-        .unwrap();
 }
 
 /// Test kex_done with different KEX algorithms
+// `ecdh-sha2-nistp256` is not approved.
+#[cfg(feature = "unapproved-algorithms")]
 #[tokio::test]
 async fn test_kex_done_with_ecdh_nistp256() {
-    let _ = env_logger::try_init();
-
-    let client_key = test_keys::key(1);
-
-    let server_config = server::Config {
-        inactivity_timeout: None,
-        auth_rejection_time: std::time::Duration::from_secs(3),
-        keys: vec![test_keys::key(0)],
-        preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::ECDH_SHA2_NISTP256]),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let server_config = Arc::new(server_config);
-
-    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = socket.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        let (socket, _) = socket.accept().await.unwrap();
-        server::run_stream(server_config, socket, TestServer {})
-            .await
-            .unwrap();
-    });
-
-    let captured_secret: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-    let captured_names: Arc<Mutex<Option<Names>>> = Arc::new(Mutex::new(None));
-
-    let client_config = client::Config {
-        preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::ECDH_SHA2_NISTP256]),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let client_config = Arc::new(client_config);
-
-    let client = TestClientWithKexCapture {
-        shared_secret: captured_secret.clone(),
-        negotiated_cipher: captured_names.clone(),
-    };
-
-    let mut session = client::connect(client_config, addr, client).await.unwrap();
-
-    let authenticated = session
-        .authenticate_publickey(
-            std::env::var("USER").unwrap_or("user".to_owned()),
-            PrivateKeyWithHashAlg::new(Arc::new(client_key), None),
-        )
-        .await
-        .unwrap()
-        .success();
-    assert!(authenticated);
-
-    let secret = captured_secret.lock().unwrap().clone();
-    assert!(secret.is_some(), "Shared secret should be captured");
-    let secret_bytes = secret.as_ref().unwrap();
-    assert!(
-        !secret_bytes.is_empty(),
-        "Shared secret should not be empty"
-    );
+    let (secret, _) = kex_done_with(kex::ECDH_SHA2_NISTP256, None).await;
     // NIST P-256 shared secret is 32 bytes
     assert_eq!(
-        secret_bytes.len(),
+        secret.len(),
         32,
         "ECDH-NISTP256 shared secret should be 32 bytes"
     );
-
-    let kex_alg = captured_names.lock().unwrap().clone();
-    assert!(
-        kex_alg.as_ref().unwrap().kex.as_ref().contains("nistp256"),
-        "KEX algorithm should be nistp256"
-    );
-
-    session
-        .disconnect(Disconnect::ByApplication, "", "")
-        .await
-        .unwrap();
 }
 
-// The SymCrypt backend has no Diffie-Hellman group exchange.
-#[cfg(not(russh_backend = "symcrypt"))]
+#[tokio::test]
+async fn test_kex_done_with_ecdh_nistp384() {
+    let (secret, _) = kex_done_with(kex::ECDH_SHA2_NISTP384, None).await;
+    // NIST P-384 shared secret is 48 bytes
+    assert_eq!(
+        secret.len(),
+        48,
+        "ECDH-NISTP384 shared secret should be 48 bytes"
+    );
+}
+
+/// The hybrid key exchanges pass the ECDH part of the shared secret.
+#[tokio::test]
+async fn test_kex_done_with_mlkem_nistp_hybrids() {
+    for (kex_alg, len) in [
+        (kex::MLKEM768NISTP256_SHA256, 32),
+        (kex::MLKEM1024NISTP384_SHA384, 48),
+    ] {
+        let (secret, _) = kex_done_with(kex_alg, None).await;
+        assert_eq!(secret.len(), len, "{kex_alg:?}");
+    }
+}
+
+// The SymCrypt backend has no Diffie-Hellman group exchange, and it is not
+// approved.
+#[cfg(all(not(russh_backend = "symcrypt"), feature = "unapproved-algorithms"))]
 #[tokio::test]
 async fn test_kex_done_with_dh_gex_sha256_and_rfc4419_minimum() {
-    let _ = env_logger::try_init();
-
-    let client_key = test_keys::key(1);
-
-    let server_config = server::Config {
-        inactivity_timeout: None,
-        auth_rejection_time: std::time::Duration::from_secs(3),
-        keys: vec![test_keys::key(0)],
-        preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::DH_GEX_SHA256]),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let server_config = Arc::new(server_config);
-
-    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = socket.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        let (socket, _) = socket.accept().await.unwrap();
-        server::run_stream(server_config, socket, TestServer {})
-            .await
-            .unwrap();
-    });
-
-    let captured_secret: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-    let captured_names: Arc<Mutex<Option<Names>>> = Arc::new(Mutex::new(None));
-
-    let client_config = client::Config {
-        preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::DH_GEX_SHA256]),
-            ..Default::default()
-        },
-        gex: client::GexParams::for_client_config(2048, 4097, 8192).unwrap(),
-        ..Default::default()
-    };
-    let client_config = Arc::new(client_config);
-
-    let client = TestClientWithKexCapture {
-        shared_secret: captured_secret.clone(),
-        negotiated_cipher: captured_names.clone(),
-    };
-
-    let mut session = client::connect(client_config, addr, client).await.unwrap();
-
-    let authenticated = session
-        .authenticate_publickey(
-            std::env::var("USER").unwrap_or("user".to_owned()),
-            PrivateKeyWithHashAlg::new(Arc::new(client_key), None),
-        )
-        .await
-        .unwrap()
-        .success();
-    assert!(authenticated);
-
-    let secret = captured_secret.lock().unwrap().clone();
-    assert!(secret.is_some(), "Shared secret should be captured");
-    assert!(!secret.as_ref().unwrap().is_empty());
-
-    let kex_alg = captured_names.lock().unwrap().clone();
-    assert_eq!(kex_alg.as_ref().unwrap().kex, kex::DH_GEX_SHA256);
-
-    session
-        .disconnect(Disconnect::ByApplication, "", "")
-        .await
-        .unwrap();
+    kex_done_with(
+        kex::DH_GEX_SHA256,
+        Some(client::GexParams::for_client_config(2048, 4097, 8192).unwrap()),
+    )
+    .await;
 }
 
 /// Test that kex_done is called on rekey
@@ -273,7 +176,7 @@ async fn test_kex_done_on_rekey() {
         auth_rejection_time: std::time::Duration::from_secs(3),
         keys: vec![test_keys::key(0)],
         preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::CURVE25519]),
+            kex: Cow::Borrowed(&[kex::ECDH_SHA2_NISTP384]),
             ..Default::default()
         },
         ..Default::default()
@@ -296,7 +199,7 @@ async fn test_kex_done_on_rekey() {
 
     let client_config = client::Config {
         preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::CURVE25519]),
+            kex: Cow::Borrowed(&[kex::ECDH_SHA2_NISTP384]),
             ..Default::default()
         },
         // Set rekey limits very low to trigger rekey quickly

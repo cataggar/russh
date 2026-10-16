@@ -115,6 +115,40 @@ pub const CRYPTO_BACKEND: CryptoBackend = CryptoBackend::Ring;
 #[cfg(russh_backend = "symcrypt")]
 pub const CRYPTO_BACKEND: CryptoBackend = CryptoBackend::SymCrypt;
 
+/// Which key exchange methods, ciphers and MACs a build of `russh`
+/// negotiates: selected at compile time by the `unapproved-algorithms`
+/// feature; see [`ALGORITHM_POLICY`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AlgorithmPolicy {
+    /// Only the approved ones, those of [`Preferred::APPROVED`], whatever
+    /// [`Preferred`] lists (without the `unapproved-algorithms` feature).
+    Approved,
+    /// Every one the crypto backend implements (the `unapproved-algorithms`
+    /// feature).
+    All,
+}
+
+/// The [`AlgorithmPolicy`] of this build of `russh`: [`AlgorithmPolicy::Approved`]
+/// unless the `unapproved-algorithms` feature is enabled.
+///
+/// Cargo unifies features across the dependency graph, so if any crate in a
+/// build enables `unapproved-algorithms`, russh negotiates the other
+/// algorithms too, for every crate in that build. An application that must
+/// use only the approved algorithms can check it at compile time:
+///
+/// ```
+/// # #[cfg(not(feature = "unapproved-algorithms"))]
+/// const _: () = assert!(
+///     matches!(russh::ALGORITHM_POLICY, russh::AlgorithmPolicy::Approved),
+///     "russh must negotiate only approved algorithms; `cargo tree -e features -i russh` shows what enables `unapproved-algorithms`",
+/// );
+/// ```
+pub const ALGORITHM_POLICY: AlgorithmPolicy = if cfg!(feature = "unapproved-algorithms") {
+    AlgorithmPolicy::All
+} else {
+    AlgorithmPolicy::Approved
+};
+
 #[derive(Debug)]
 pub enum AlgorithmKind {
     Kex,

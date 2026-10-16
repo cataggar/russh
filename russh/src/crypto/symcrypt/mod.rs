@@ -13,7 +13,7 @@
 //! | Category | File |
 //! |---|---|
 //! | `hash`: SHA-1, SHA-2 | `hash.rs` |
-//! | `kex`: X25519, ECDH P-256/P-384/P-521, ML-KEM-768 hybrid, finite-field DH Groups 14–18 and DH-GEX SHA-256 (no SHA-1 finite-field DH) | `kex.rs` |
+//! | `kex`: X25519, ECDH P-256/P-384/P-521, ML-KEM-768 and ML-KEM-1024 hybrids, finite-field DH Groups 14–18 and DH-GEX SHA-256 (no SHA-1 finite-field DH) | `kex.rs` |
 //! | `sign`: ECDSA P-256/P-384/P-521, RSA SHA-2 host key, certificate and user signatures (no SHA-1 RSA; no Ed25519 without `ed25519-aws-lc`) | `sign.rs` |
 //! | `cipher`: AES-GCM, ChaCha20-Poly1305, AES-CTR | `cipher.rs` |
 //! | `mac`: HMAC-SHA2; HMAC-SHA1 only for hashed `known_hosts` host names | `mac.rs` |
@@ -48,9 +48,9 @@
 //! 1. Implement the category's traits from [`crate::crypto`] with SymCrypt,
 //!    keeping the names of the provider contract (see the `crate::crypto`
 //!    docs): `hash`: `Sha1`..`Sha512`; `kex`: `X25519`,
-//!    `NistP256`/`384`/`521`, `MlKem768`, `Dh` (`Unsupported` if SymCrypt
-//!    lacks the primitive); `mac`: also `hmac_sha1`; `sign`: `Signatures`;
-//!    `rng`: `SystemRng`.
+//!    `NistP256`/`384`/`521`, `MlKem768`, `MlKem1024`, `Dh` (`Unsupported`
+//!    if SymCrypt lacks the primitive); `mac`: also `hmac_sha1`; `sign`:
+//!    `Signatures`; `rng`: `SystemRng`.
 //! 2. Define the category's `ALGORITHMS` (what the backend implements, with
 //!    entries such as `GcmCipher::<SymCryptAes256Gcm>::new()`,
 //!    `SshBlockCipher::<SymCryptAes256Ctr>::new()`,
@@ -137,7 +137,7 @@ mod tests {
 
     use ssh_key::{Algorithm, EcdsaCurve, HashAlg};
 
-    use crate::{Preferred, cipher, compression, kex, mac};
+    use crate::{Preferred, cipher, kex, mac};
 
     const P256: Algorithm = Algorithm::Ecdsa {
         curve: EcdsaCurve::NistP256,
@@ -160,13 +160,15 @@ mod tests {
         crate::crypto::testing::check_provider_lists();
     }
 
-    /// What russh offers by default with this backend, in order: only
-    /// algorithms SymCrypt implements, so `supported()` removes nothing.
-    /// The ciphers and MACs are the other backends' defaults, but with
-    /// `aes256-gcm@openssh.com` and the SHA-256 MACs first
-    /// (see `cipher::DEFAULT_ORDER` and `mac::DEFAULT_ORDER`).
-    /// `aes128-gcm@openssh.com` is implemented, but only offered when
-    /// configured.
+    /// What russh offers by default with this backend and the
+    /// `unapproved-algorithms` feature, in order: only algorithms SymCrypt
+    /// implements, so `supported()` removes nothing. The ciphers and MACs are
+    /// the other backends' defaults, but with `aes256-gcm@openssh.com` and
+    /// the SHA-256 MACs first (see `cipher::DEFAULT_ORDER` and
+    /// `mac::DEFAULT_ORDER`). `aes128-gcm@openssh.com` is implemented, but
+    /// only offered when configured. Without the feature, the defaults are
+    /// the approved algorithms (see `negotiation::tests`).
+    #[cfg(feature = "unapproved-algorithms")]
     #[test]
     fn default_preferences_are_the_symcrypt_algorithms() {
         for pref in [
@@ -178,6 +180,8 @@ mod tests {
                 pref.kex[..],
                 [
                     kex::MLKEM768X25519_SHA256,
+                    kex::MLKEM1024NISTP384_SHA384,
+                    kex::MLKEM768NISTP256_SHA256,
                     kex::CURVE25519,
                     kex::CURVE25519_PRE_RFC_8731,
                     kex::ECDH_SHA2_NISTP256,
@@ -230,11 +234,11 @@ mod tests {
             assert_eq!(
                 pref.compression[..],
                 [
-                    compression::NONE,
+                    crate::compression::NONE,
                     #[cfg(feature = "flate2")]
-                    compression::ZLIB,
+                    crate::compression::ZLIB,
                     #[cfg(feature = "flate2")]
-                    compression::ZLIB_LEGACY,
+                    crate::compression::ZLIB_LEGACY,
                 ]
             );
             assert!(matches!(pref.supported(), Cow::Borrowed(_)));
@@ -242,9 +246,10 @@ mod tests {
     }
 
     /// Configured algorithms the backend does not implement are neither
-    /// offered nor accepted; the others keep their order. Here every
-    /// algorithm russh has a name for is configured (3des-cbc only with the
-    /// `des` feature), with the signature algorithms SymCrypt lacks.
+    /// offered nor accepted, and without the `unapproved-algorithms` feature,
+    /// neither are those that are not approved; the others keep their order.
+    /// Here every algorithm russh has a name for is configured (3des-cbc only
+    /// with the `des` feature), with the signature algorithms SymCrypt lacks.
     #[test]
     fn unsupported_algorithms_are_not_negotiated() {
         let keys = [
@@ -269,25 +274,40 @@ mod tests {
         };
         let supported = pref.supported();
         // `none` and `clear` are not cryptography: russh offers them only
-        // when they are configured, as here.
-        assert_eq!(
-            supported.kex[..],
-            [
-                kex::MLKEM768X25519_SHA256,
-                kex::CURVE25519,
-                kex::CURVE25519_PRE_RFC_8731,
-                kex::DH_GEX_SHA256,
-                kex::DH_G14_SHA256,
-                kex::DH_G15_SHA512,
-                kex::DH_G16_SHA512,
-                kex::DH_G17_SHA512,
-                kex::DH_G18_SHA512,
-                kex::ECDH_SHA2_NISTP256,
-                kex::ECDH_SHA2_NISTP384,
-                kex::ECDH_SHA2_NISTP521,
-                kex::NONE,
-            ]
-        );
+        // when they are configured, as here (and without
+        // `unapproved-algorithms`, only `none` in its own unit tests).
+        if crate::ALGORITHM_POLICY == crate::AlgorithmPolicy::Approved {
+            assert_eq!(
+                supported.kex[..],
+                [
+                    kex::MLKEM1024NISTP384_SHA384,
+                    kex::MLKEM768NISTP256_SHA256,
+                    kex::ECDH_SHA2_NISTP384,
+                    kex::NONE,
+                ]
+            );
+        } else {
+            assert_eq!(
+                supported.kex[..],
+                [
+                    kex::MLKEM768X25519_SHA256,
+                    kex::MLKEM1024NISTP384_SHA384,
+                    kex::MLKEM768NISTP256_SHA256,
+                    kex::CURVE25519,
+                    kex::CURVE25519_PRE_RFC_8731,
+                    kex::DH_GEX_SHA256,
+                    kex::DH_G14_SHA256,
+                    kex::DH_G15_SHA512,
+                    kex::DH_G16_SHA512,
+                    kex::DH_G17_SHA512,
+                    kex::DH_G18_SHA512,
+                    kex::ECDH_SHA2_NISTP256,
+                    kex::ECDH_SHA2_NISTP384,
+                    kex::ECDH_SHA2_NISTP521,
+                    kex::NONE,
+                ]
+            );
+        }
         let signers = [
             #[cfg(russh_ed25519_aws_lc)]
             Algorithm::Ed25519,
@@ -299,28 +319,36 @@ mod tests {
         ];
         assert_eq!(supported.key[..], signers);
         assert_eq!(supported.host_key_certificates[..], signers);
-        assert_eq!(
-            supported.cipher[..],
-            [
-                cipher::CLEAR,
-                cipher::NONE,
-                cipher::AES_128_CTR,
-                cipher::AES_192_CTR,
-                cipher::AES_256_CTR,
-                cipher::AES_128_GCM,
-                cipher::AES_256_GCM,
-                cipher::CHACHA20_POLY1305,
-            ]
-        );
-        assert_eq!(
-            supported.mac[..],
-            [
-                mac::NONE,
-                mac::HMAC_SHA256,
-                mac::HMAC_SHA512,
-                mac::HMAC_SHA256_ETM,
-                mac::HMAC_SHA512_ETM,
-            ]
-        );
+        if crate::ALGORITHM_POLICY == crate::AlgorithmPolicy::Approved {
+            assert_eq!(
+                supported.cipher[..],
+                [cipher::NONE, cipher::AES_256_CTR, cipher::AES_256_GCM]
+            );
+            assert_eq!(supported.mac[..], [mac::NONE, mac::HMAC_SHA512_ETM]);
+        } else {
+            assert_eq!(
+                supported.cipher[..],
+                [
+                    cipher::CLEAR,
+                    cipher::NONE,
+                    cipher::AES_128_CTR,
+                    cipher::AES_192_CTR,
+                    cipher::AES_256_CTR,
+                    cipher::AES_128_GCM,
+                    cipher::AES_256_GCM,
+                    cipher::CHACHA20_POLY1305,
+                ]
+            );
+            assert_eq!(
+                supported.mac[..],
+                [
+                    mac::NONE,
+                    mac::HMAC_SHA256,
+                    mac::HMAC_SHA512,
+                    mac::HMAC_SHA256_ETM,
+                    mac::HMAC_SHA512_ETM,
+                ]
+            );
+        }
     }
 }

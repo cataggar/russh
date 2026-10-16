@@ -25,6 +25,15 @@ dsa = ["ssh-key/dsa"]
 ring = ["dep:ring", "_rustcrypto"] # Alternative crypto backend.
 rsa = ["dep:rsa", "dep:pkcs1", "ssh-key/rsa"]
 serde = ["ssh-key/serde"]
+# Without this feature, russh offers and accepts only the approved key
+# exchange methods (mlkem1024nistp384-sha384, mlkem768nistp256-sha256,
+# ecdh-sha2-nistp384), ciphers (aes256-gcm@openssh.com, aes256-ctr) and MACs
+# (hmac-sha2-512-etm@openssh.com), whatever `Preferred` lists: see
+# `Preferred::APPROVED` and `ALGORITHM_POLICY`. This feature lets russh
+# negotiate the others it implements too, as upstream russh does
+# (`3des-cbc` also needs `des`). Host key and signature algorithms don't
+# depend on it.
+unapproved-algorithms = []
 # Alternative crypto backend; links the native SymCrypt library (see the
 # `symcrypt-sys` crate for how it is found, e.g. `SYMCRYPT_LIB_PATH`).
 # It does not enable `_rustcrypto`, nor therefore `ssh-key/sha2` (README.md
@@ -218,6 +227,7 @@ features = [
   "ring",
   "rsa",
   "serde",
+  "unapproved-algorithms",
 ]
 
 [[bench]]

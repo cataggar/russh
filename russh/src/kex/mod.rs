@@ -36,7 +36,7 @@ use dh::{
 };
 use ecdh_nistp::{EcdhNistP256KexType, EcdhNistP384KexType, EcdhNistP521KexType};
 use enum_dispatch::enum_dispatch;
-use hybrid_mlkem::MlKem768X25519KexType;
+use hybrid_mlkem::{HybridMlKemKexType, MlKem768NistP256, MlKem768X25519, MlKem1024NistP384};
 use ssh_encoding::{Encode, Writer};
 use ssh_key::{Certificate, PublicKey};
 
@@ -139,7 +139,9 @@ pub(crate) enum KexAlgorithm {
     EcdhNistP256Kex(ecdh_nistp::EcdhNistPKex<NistP256, Sha256>),
     EcdhNistP384Kex(ecdh_nistp::EcdhNistPKex<NistP384, Sha384>),
     EcdhNistP521Kex(ecdh_nistp::EcdhNistPKex<NistP521, Sha512>),
-    MlKem768X25519Kex(hybrid_mlkem::MlKem768X25519Kex),
+    MlKem768X25519Kex(hybrid_mlkem::HybridMlKemKex<MlKem768X25519>),
+    MlKem768NistP256Kex(hybrid_mlkem::HybridMlKemKex<MlKem768NistP256>),
+    MlKem1024NistP384Kex(hybrid_mlkem::HybridMlKemKex<MlKem1024NistP384>),
     None(none::NoneKexAlgorithm),
 }
 
@@ -239,6 +241,10 @@ pub const CURVE25519: Name = Name("curve25519-sha256");
 pub const CURVE25519_PRE_RFC_8731: Name = Name("curve25519-sha256@libssh.org");
 /// `mlkem768x25519-sha256`
 pub const MLKEM768X25519_SHA256: Name = Name("mlkem768x25519-sha256");
+/// `mlkem768nistp256-sha256`
+pub const MLKEM768NISTP256_SHA256: Name = Name("mlkem768nistp256-sha256");
+/// `mlkem1024nistp384-sha384`
+pub const MLKEM1024NISTP384_SHA384: Name = Name("mlkem1024nistp384-sha384");
 /// `diffie-hellman-group-exchange-sha1`.
 pub const DH_GEX_SHA1: Name = Name("diffie-hellman-group-exchange-sha1");
 /// `diffie-hellman-group-exchange-sha256`.
@@ -293,13 +299,20 @@ pub(crate) const _DH_G18_SHA512: DhGroup18Sha512KexType = DhGroup18Sha512KexType
 pub(crate) const _ECDH_SHA2_NISTP256: EcdhNistP256KexType = EcdhNistP256KexType {};
 pub(crate) const _ECDH_SHA2_NISTP384: EcdhNistP384KexType = EcdhNistP384KexType {};
 pub(crate) const _ECDH_SHA2_NISTP521: EcdhNistP521KexType = EcdhNistP521KexType {};
-pub(crate) const _MLKEM768X25519_SHA256: MlKem768X25519KexType = MlKem768X25519KexType {};
+pub(crate) const _MLKEM768X25519_SHA256: HybridMlKemKexType<MlKem768X25519> =
+    HybridMlKemKexType::new();
+pub(crate) const _MLKEM768NISTP256_SHA256: HybridMlKemKexType<MlKem768NistP256> =
+    HybridMlKemKexType::new();
+pub(crate) const _MLKEM1024NISTP384_SHA384: HybridMlKemKexType<MlKem1024NistP384> =
+    HybridMlKemKexType::new();
 const _NONE: none::NoneKexType = none::NoneKexType {};
 
 /// Every key exchange name russh knows. The ones the crypto backend
 /// implements are the keys of `KEXES`.
 pub const ALL_KEX_ALGORITHMS: &[&Name] = &[
     &MLKEM768X25519_SHA256,
+    &MLKEM1024NISTP384_SHA384,
+    &MLKEM768NISTP256_SHA256,
     &CURVE25519,
     &CURVE25519_PRE_RFC_8731,
     &DH_GEX_SHA1,

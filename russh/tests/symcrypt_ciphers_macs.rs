@@ -1,9 +1,11 @@
 //! The ciphers and MACs of the SymCrypt backend against OpenSSH:
 //! `cargo test -p russh --no-default-features --features symcrypt --test
-//! symcrypt_ciphers_macs`. The ciphers and MACs SymCrypt lacks are refused,
-//! and the default preferences pick AES-GCM and SHA-256-EtM, also against a
-//! russh server. The OpenSSH cases are skipped when OpenSSH is missing,
-//! unless `RUSSH_REQUIRE_SSHD=1`.
+//! symcrypt_ciphers_macs`. The ciphers and MACs SymCrypt lacks are refused.
+//! Only the approved ones are tested without the `unapproved-algorithms`
+//! feature (`approved_algorithms.rs` checks that the others are refused).
+//! The default preferences pick AES-GCM, and SHA-256-EtM (or SHA-512-EtM,
+//! the only approved MAC), also against a russh server. The OpenSSH cases
+//! are skipped when OpenSSH is missing, unless `RUSSH_REQUIRE_SSHD=1`.
 #![cfg(all(
     feature = "symcrypt",
     not(feature = "aws-lc-rs"),
@@ -22,35 +24,47 @@ use russh::keys::PublicKeyOrCertificate;
 use russh::{Disconnect, Names, Preferred, cipher, client, mac, server};
 use tokio::sync::oneshot;
 
-const CTR_CIPHERS: [cipher::Name; 3] = [
+/// The ciphers that are not approved, which only the `unapproved-algorithms`
+/// feature lets russh negotiate.
+const UNAPPROVED_CIPHERS: [cipher::Name; 4] = [
+    cipher::AES_128_GCM,
+    cipher::CHACHA20_POLY1305,
     cipher::AES_128_CTR,
     cipher::AES_192_CTR,
-    cipher::AES_256_CTR,
 ];
+
+/// The MACs that are not approved.
+const UNAPPROVED_MACS: [mac::Name; 3] = [mac::HMAC_SHA256, mac::HMAC_SHA512, mac::HMAC_SHA256_ETM];
+
+/// The AES-CTR ciphers russh negotiates.
+fn ctr_ciphers() -> Vec<cipher::Name> {
+    let mut ciphers = vec![cipher::AES_256_CTR];
+    if cfg!(feature = "unapproved-algorithms") {
+        ciphers.extend([cipher::AES_128_CTR, cipher::AES_192_CTR]);
+    }
+    ciphers
+}
 
 /// Each cipher (with the default MAC for AES-CTR).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openssh_with_each_cipher() {
-    let mut ciphers = vec![
-        cipher::AES_128_GCM,
-        cipher::AES_256_GCM,
-        cipher::CHACHA20_POLY1305,
-    ];
-    ciphers.extend(CTR_CIPHERS);
+    let mut ciphers = vec![cipher::AES_256_GCM, cipher::AES_256_CTR];
+    if cfg!(feature = "unapproved-algorithms") {
+        ciphers.extend(UNAPPROVED_CIPHERS);
+    }
     openssh::check_ciphers(Case::default(), &ciphers).await;
 }
 
 /// Each MAC with each AES-CTR cipher.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openssh_with_each_mac() {
-    let cases = CTR_CIPHERS.into_iter().flat_map(|cipher| {
-        [
-            mac::HMAC_SHA256,
-            mac::HMAC_SHA512,
-            mac::HMAC_SHA256_ETM,
-            mac::HMAC_SHA512_ETM,
-        ]
-        .map(|mac| Case::default().with_cipher(cipher).with_mac(mac))
+    let mut macs = vec![mac::HMAC_SHA512_ETM];
+    if cfg!(feature = "unapproved-algorithms") {
+        macs.extend(UNAPPROVED_MACS);
+    }
+    let cases = ctr_ciphers().into_iter().flat_map(|cipher| {
+        macs.iter()
+            .map(move |&mac| Case::default().with_cipher(cipher).with_mac(mac))
     });
     openssh::check_cases("MACs", cases).await;
 }
@@ -102,7 +116,9 @@ async fn triple_des_cbc_is_refused() {
 }
 
 /// The SHA-1 MACs, which OpenSSH implements and the backend doesn't, are
-/// neither offered nor accepted.
+/// neither offered nor accepted. (`approved_algorithms.rs` checks that,
+/// without the `unapproved-algorithms` feature, the ciphers and MACs that are
+/// not approved aren't either.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsupported_macs_are_refused() {
     openssh::check_refused(
@@ -110,7 +126,7 @@ async fn unsupported_macs_are_refused() {
         Refused::Mac,
         [mac::HMAC_SHA1, mac::HMAC_SHA1_ETM].map(|mac| {
             Case::default()
-                .with_cipher(cipher::AES_128_CTR)
+                .with_cipher(cipher::AES_256_CTR)
                 .with_mac(mac)
         }),
     )
@@ -139,12 +155,18 @@ fn ctr_only() -> Preferred {
 /// [`SERVER_CIPHERS`] and [`SERVER_MACS`]: `default` with the default
 /// preferences, `ctr` with [`ctr_only`]. The client's order decides, so it
 /// gets AES-GCM and SHA-256-EtM, which SymCrypt runs faster
-/// (<https://github.com/cataggar/russh/issues/23>).
+/// (<https://github.com/cataggar/russh/issues/23>), or without the
+/// `unapproved-algorithms` feature SHA-512-EtM, the only approved MAC.
 fn check_default_preferences(default: &Names, ctr: &Names) {
+    let mac = if russh::ALGORITHM_POLICY == russh::AlgorithmPolicy::Approved {
+        mac::HMAC_SHA512_ETM
+    } else {
+        mac::HMAC_SHA256_ETM
+    };
     assert_eq!(default.cipher, cipher::AES_256_GCM);
     assert_eq!(ctr.cipher, cipher::AES_256_CTR);
-    assert_eq!(ctr.client_mac, mac::HMAC_SHA256_ETM);
-    assert_eq!(ctr.server_mac, mac::HMAC_SHA256_ETM);
+    assert_eq!(ctr.client_mac, mac);
+    assert_eq!(ctr.server_mac, mac);
 }
 
 /// [`check_default_preferences`] against OpenSSH.

@@ -8,7 +8,7 @@ A low-level, `async` SSH 2.0 client and server library for Rust / Tokio.
 Russh gives you direct access to the SSH protocol: channels, authentication, key exchange, port and socket forwarding.  It is written in safe Rust, uses async traits, and supports a broad range of algorithms for wide scale interoperability with real-world servers and clients.
 
 - **Async-native** - integrates directly with Tokio,  `AsyncRead`/`AsyncWrite` channels
-- **Broad interoperability** - safe algorithms by default, with opt-in support for legacy ones
+- **Broad interoperability** - only [approved algorithms](#approved-algorithms) by default, with opt-in support for the others, including legacy ones
 - **Safety-focused** - panics, `unwrap`/`expect` and unchecked indexing are denied by default
 
 ## Getting started
@@ -123,11 +123,34 @@ To create a key, use `keys::generate_secret_key`, which makes an ECDSA P-256 key
 
 **Releases.** The backend depends on `symcrypt` 0.6, for ML-KEM, and on `symcrypt-sys` 0.5. Neither version is on crates.io yet, so russh pins both to a commit of [microsoft/rust-symcrypt](https://github.com/microsoft/rust-symcrypt). crates.io doesn't accept git dependencies, even optional ones, so russh can't be published there with the `symcrypt` feature until these versions are. Until then, use russh as a git dependency, as shown above.
 
+## Approved algorithms
+
+Unlike upstream russh, this fork negotiates only an approved set of key exchange methods, ciphers and MACs by default, with every crypto backend:
+
+| Kind | Approved algorithms, most preferred first |
+|---|---|
+| Key exchange | `mlkem1024nistp384-sha384`, `mlkem768nistp256-sha256` (post-quantum hybrids of ML-KEM and ECDH on the NIST curves, [RFC 10042](https://www.rfc-editor.org/rfc/rfc10042)), `ecdh-sha2-nistp384` |
+| Ciphers | `aes256-gcm@openssh.com`, `aes256-ctr` |
+| MACs | `hmac-sha2-512-etm@openssh.com` (only `aes256-ctr` uses a MAC) |
+
+These are `Preferred::APPROVED`, which is then also `Preferred::default()`. Russh neither offers nor accepts any other key exchange method, cipher or MAC, even if `Preferred` lists it: not `none`, nor the methods with X25519 (`mlkem768x25519-sha256`, `curve25519-sha256`), nor anything else in the tables below. A peer that implements none of the approved algorithms of a kind fails the key exchange with `Error::NoCommonAlgo`. OpenSSH enables `ecdh-sha2-nistp384`, `aes256-gcm@openssh.com`, `aes256-ctr` and `hmac-sha2-512-etm@openssh.com` by default, but implements no ML-KEM hybrid with the NIST curves, so russh and OpenSSH agree on `ecdh-sha2-nistp384`. Host key and signature algorithms don't depend on this.
+
+The `unapproved-algorithms` feature lets russh negotiate every algorithm it implements, as upstream russh does, with the defaults of the tables below. `--all-features` builds enable it. With the feature, configure `Preferred::APPROVED` to restrict a connection to the approved algorithms.
+
+`russh::ALGORITHM_POLICY` (a `russh::AlgorithmPolicy`) tells whether russh was built with the feature. Because Cargo unifies features across the dependency graph, any crate in your build (including a dev-dependency during `cargo test`) that enables `unapproved-algorithms` enables it for all. To make sure that russh negotiates only the approved algorithms, assert it in your crate:
+
+```rust
+const _: () = assert!(
+    matches!(russh::ALGORITHM_POLICY, russh::AlgorithmPolicy::Approved),
+    "russh must negotiate only approved algorithms; `cargo tree -e features -i russh` shows what enables `unapproved-algorithms`",
+);
+```
+
 ## Supported algorithms
 
 Russh aims for broad interoperability, so it supports both algorithms currently considered safe and a set of older ones that allow connections to older switches etc. Legacy algorithms are opt in.
 
-The available algorithms depend on the [crypto backend](#crypto-backends); `aws-lc-rs` and `ring` offer the same ones. In the tables below:
+The available algorithms depend on the [crypto backend](#crypto-backends); `aws-lc-rs` and `ring` offer the same ones. Only the ones marked **approved** are negotiated without the `unapproved-algorithms` feature (see [Approved algorithms](#approved-algorithms)). In the tables below, which are for builds with that feature:
 
 - **default**: in `Preferred::default()`, so offered unless you change `Preferred`;
 - **opt-in**: supported, but not in `Preferred::default()`; add it to `Preferred` in the client or server `Config` to offer it;
@@ -135,40 +158,44 @@ The available algorithms depend on the [crypto backend](#crypto-backends); `aws-
 
 ### Key exchange
 
-| Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
-|---|---|---|
-| `mlkem768x25519-sha256` (post-quantum hybrid) | default | default |
-| `curve25519-sha256`, `curve25519-sha256@libssh.org` | default | default |
-| `diffie-hellman-group-exchange-sha256` (GEX) | default | default |
-| `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512` | default | default |
-| `diffie-hellman-group14-sha256` | default | default |
-| `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` | opt-in | default |
-| `diffie-hellman-group14-sha1` | opt-in | — |
-| `diffie-hellman-group1-sha1` | opt-in | — |
-| `diffie-hellman-group-exchange-sha1` (GEX) | opt-in | — |
+| Algorithm | Approved | `aws-lc-rs`, `ring` | `symcrypt` |
+|---|---|---|---|
+| `mlkem768x25519-sha256` (post-quantum hybrid) | | default | default |
+| `mlkem1024nistp384-sha384`, `mlkem768nistp256-sha256` (post-quantum hybrids) | approved | opt-in | default |
+| `curve25519-sha256`, `curve25519-sha256@libssh.org` | | default | default |
+| `diffie-hellman-group-exchange-sha256` (GEX) | | default | default |
+| `diffie-hellman-group18-sha512`, `diffie-hellman-group17-sha512`, `diffie-hellman-group16-sha512`, `diffie-hellman-group15-sha512` | | default | default |
+| `diffie-hellman-group14-sha256` | | default | default |
+| `ecdh-sha2-nistp384` | approved | opt-in | default |
+| `ecdh-sha2-nistp256`, `ecdh-sha2-nistp521` | | opt-in | default |
+| `diffie-hellman-group14-sha1` | | opt-in | — |
+| `diffie-hellman-group1-sha1` | | opt-in | — |
+| `diffie-hellman-group-exchange-sha1` (GEX) | | opt-in | — |
 
 All backends support OpenSSH strict key exchange (Terrapin mitigation) and programmatic group choice for DH-GEX.
 
 ### Ciphers
 
-| Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
-|---|---|---|
-| `chacha20-poly1305@openssh.com` | default | default |
-| `aes256-gcm@openssh.com` | default | default |
-| `aes128-gcm@openssh.com` | opt-in | opt-in |
-| `aes256-ctr`, `aes192-ctr`, `aes128-ctr` | default | default |
-| `aes256-cbc`, `aes192-cbc`, `aes128-cbc` | opt-in | — |
-| `3des-cbc` (requires the `des` crate feature) | opt-in | — |
+| Algorithm | Approved | `aws-lc-rs`, `ring` | `symcrypt` |
+|---|---|---|---|
+| `chacha20-poly1305@openssh.com` | | default | default |
+| `aes256-gcm@openssh.com` | approved | default | default |
+| `aes128-gcm@openssh.com` | | opt-in | opt-in |
+| `aes256-ctr` | approved | default | default |
+| `aes192-ctr`, `aes128-ctr` | | default | default |
+| `aes256-cbc`, `aes192-cbc`, `aes128-cbc` | | opt-in | — |
+| `3des-cbc` (requires the `des` crate feature) | | opt-in | — |
 
 `symcrypt` prefers `aes256-gcm@openssh.com` to `chacha20-poly1305@openssh.com` by default: SymCrypt's AES-GCM is 3.5–5× as fast as its ChaCha20-Poly1305 on x86-64 and ARM64 CPUs with AES instructions ([#23](https://github.com/cataggar/russh/issues/23)). `aws-lc-rs` and `ring` prefer ChaCha20-Poly1305, as OpenSSH does, partly because it is also fast on CPUs without AES instructions. The client's preference decides, so this applies to russh clients: OpenSSH clients of a russh server with `symcrypt` still choose ChaCha20-Poly1305.
 
 ### MACs
 
-| Algorithm | `aws-lc-rs`, `ring` | `symcrypt` |
-|---|---|---|
-| `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com` | default | default |
-| `hmac-sha2-256`, `hmac-sha2-512` | default | default |
-| `hmac-sha1-etm@openssh.com`, `hmac-sha1` | opt-in | — |
+| Algorithm | Approved | `aws-lc-rs`, `ring` | `symcrypt` |
+|---|---|---|---|
+| `hmac-sha2-512-etm@openssh.com` | approved | default | default |
+| `hmac-sha2-256-etm@openssh.com` | | default | default |
+| `hmac-sha2-256`, `hmac-sha2-512` | | default | default |
+| `hmac-sha1-etm@openssh.com`, `hmac-sha1` | | opt-in | — |
 
 MACs are only used with the AES-CTR ciphers. `symcrypt` prefers `hmac-sha2-256-etm@openssh.com` to `hmac-sha2-512-etm@openssh.com` by default, as OpenSSH does: with SymCrypt it is 1.7–2× as fast ([#23](https://github.com/cataggar/russh/issues/23)). `aws-lc-rs` and `ring` prefer `hmac-sha2-512-etm@openssh.com`.
 

@@ -3,7 +3,9 @@
 //! - X25519 and ECDH on NIST P-256, P-384 and P-521 (`symcrypt::ecc`), for
 //!   `curve25519-sha256` (and `@libssh.org`), `ecdh-sha2-nistp256`,
 //!   `ecdh-sha2-nistp384` and `ecdh-sha2-nistp521`;
-//! - ML-KEM-768 (`symcrypt::mlkem`), for `mlkem768x25519-sha256`;
+//! - ML-KEM-768 and ML-KEM-1024 (`symcrypt::mlkem`), for the hybrids with
+//!   ECDH `mlkem768x25519-sha256`, `mlkem768nistp256-sha256` and
+//!   `mlkem1024nistp384-sha384`;
 //! - finite-field Diffie-Hellman over RFC 3526 Groups 14–18 and custom DH-GEX
 //!   groups (SymCrypt's `SymCryptDlgroup*` / `SymCryptDlkey*` /
 //!   `SymCryptDhSecretAgreement` C API), for
@@ -541,14 +543,34 @@ impl<C: NistCurve> KeyAgreement for Ecdh<C> {
     }
 }
 
-pub(crate) struct MlKem768;
+/// An ML-KEM parameter set.
+pub(crate) trait MlKemParamSet {
+    const PARAMS: MlKemParams;
+}
 
-impl Kem for MlKem768 {
+pub(crate) struct MlKem768Params;
+
+impl MlKemParamSet for MlKem768Params {
+    const PARAMS: MlKemParams = MlKemParams::MlKem768;
+}
+
+pub(crate) struct MlKem1024Params;
+
+impl MlKemParamSet for MlKem1024Params {
+    const PARAMS: MlKemParams = MlKemParams::MlKem1024;
+}
+
+/// ML-KEM with parameter set `P`.
+pub(crate) struct MlKem<P>(PhantomData<P>);
+
+pub(crate) type MlKem768 = MlKem<MlKem768Params>;
+pub(crate) type MlKem1024 = MlKem<MlKem1024Params>;
+
+impl<P: MlKemParamSet> Kem for MlKem<P> {
     type DecapsulationKey = MlKemKey;
 
     fn generate() -> Result<(Self::DecapsulationKey, Vec<u8>)> {
-        let decapsulation_key =
-            MlKemKey::generate_key_pair(MlKemParams::MlKem768).map_err(|_| CryptoError)?;
+        let decapsulation_key = MlKemKey::generate_key_pair(P::PARAMS).map_err(|_| CryptoError)?;
         let encapsulation_key = decapsulation_key
             .export_encapsulation_key()
             .map_err(|_| CryptoError)?;
@@ -556,9 +578,8 @@ impl Kem for MlKem768 {
     }
 
     fn encapsulate(encapsulation_key: &[u8]) -> Result<(Vec<u8>, Zeroizing<Vec<u8>>)> {
-        let encapsulation_key =
-            MlKemKey::from_encapsulation_key(MlKemParams::MlKem768, encapsulation_key)
-                .map_err(|_| CryptoError)?;
+        let encapsulation_key = MlKemKey::from_encapsulation_key(P::PARAMS, encapsulation_key)
+            .map_err(|_| CryptoError)?;
         let encapsulation = encapsulation_key.encapsulate().map_err(|_| CryptoError)?;
         let shared_secret = Zeroizing::new(encapsulation.shared_secret.as_bytes().to_vec());
         Ok((encapsulation.ciphertext, shared_secret))
@@ -578,6 +599,14 @@ impl Kem for MlKem768 {
 /// Every key exchange of this backend (`none` is shared by all backends).
 pub(crate) static ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))] = &[
     (&kex::MLKEM768X25519_SHA256, &kex::_MLKEM768X25519_SHA256),
+    (
+        &kex::MLKEM1024NISTP384_SHA384,
+        &kex::_MLKEM1024NISTP384_SHA384,
+    ),
+    (
+        &kex::MLKEM768NISTP256_SHA256,
+        &kex::_MLKEM768NISTP256_SHA256,
+    ),
     (&kex::CURVE25519, &kex::_CURVE25519),
     (&kex::CURVE25519_PRE_RFC_8731, &kex::_CURVE25519),
     (&kex::ECDH_SHA2_NISTP256, &kex::_ECDH_SHA2_NISTP256),
@@ -596,6 +625,8 @@ pub(crate) static ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))] = &[
 /// appended by `Preferred`).
 pub(crate) const DEFAULT_ORDER: &[kex::Name] = &[
     kex::MLKEM768X25519_SHA256,
+    kex::MLKEM1024NISTP384_SHA384,
+    kex::MLKEM768NISTP256_SHA256,
     kex::CURVE25519,
     kex::CURVE25519_PRE_RFC_8731,
     kex::ECDH_SHA2_NISTP256,
@@ -1001,22 +1032,68 @@ mod tests {
 
     #[test]
     fn ml_kem_768_round_trips_and_validates() {
-        let (key, encapsulation_key) = MlKem768::generate().unwrap();
-        assert_eq!(encapsulation_key.len(), 1184);
-        let (ciphertext, shared) = MlKem768::encapsulate(&encapsulation_key).unwrap();
-        assert_eq!(ciphertext.len(), 1088);
-        assert_eq!(shared.len(), 32);
-        assert_eq!(MlKem768::decapsulate(&key, &ciphertext).unwrap(), shared);
+        ml_kem_round_trips_and_validates::<MlKem768>(1184, 1088);
+    }
 
-        assert!(MlKem768::encapsulate(&encapsulation_key[1..]).is_err());
-        assert!(MlKem768::encapsulate(&[encapsulation_key.as_slice(), &[0]].concat()).is_err());
-        assert!(MlKem768::decapsulate(&key, &ciphertext[1..]).is_err());
-        assert!(MlKem768::decapsulate(&key, &[ciphertext.as_slice(), &[0]].concat()).is_err());
+    /// SHA-256 of the ML-KEM-1024 encapsulation key for [`MLKEM_SEED`], and
+    /// the shared secret of [`MLKEM1024_CIPHERTEXT`] for it, from RustCrypto
+    /// `ml-kem`, like the ML-KEM-768 values above.
+    const MLKEM1024_EK_SHA256: [u8; 32] =
+        hex!("07dbd290591709e2bb7f47b3d9bc66e26a0c2f6de1df03453f9cfa589d16e416");
+    const MLKEM1024_SHARED: [u8; 32] =
+        hex!("4a74fc0839c5156ac6b69e2fc3a9aa55c9878d37241c0c75d187b8b24c50546a");
+    /// The implicit rejection secret for the ciphertext with its last bit
+    /// flipped.
+    const MLKEM1024_REJECTED: [u8; 32] =
+        hex!("c6f06ce4f8ec77aadb53a3b5e9ed56c816d30ba83ad521ebc76687fac305a1fe");
+
+    #[test]
+    fn ml_kem_1024_known_answers() {
+        let key = MlKemKey::from_private_seed(MlKemParams::MlKem1024, &MLKEM_SEED).unwrap();
+        let encapsulation_key = key.export_encapsulation_key().unwrap();
+        assert_eq!(Sha256::digest(&encapsulation_key), MLKEM1024_EK_SHA256);
+        assert_eq!(
+            *MlKem1024::decapsulate(&key, &MLKEM1024_CIPHERTEXT).unwrap(),
+            MLKEM1024_SHARED
+        );
+        let mut ciphertext = MLKEM1024_CIPHERTEXT;
+        ciphertext[1567] ^= 1;
+        assert_eq!(
+            *MlKem1024::decapsulate(&key, &ciphertext).unwrap(),
+            MLKEM1024_REJECTED
+        );
+        // An ML-KEM-768 ciphertext is not one for this key.
+        assert!(MlKem1024::decapsulate(&key, &MLKEM_CIPHERTEXT).is_err());
+
+        let (ciphertext, shared) = MlKem1024::encapsulate(&encapsulation_key).unwrap();
+        assert_eq!(MlKem1024::decapsulate(&key, &ciphertext).unwrap(), shared);
+    }
+
+    #[test]
+    fn ml_kem_1024_round_trips_and_validates() {
+        ml_kem_round_trips_and_validates::<MlKem1024>(1568, 1568);
+    }
+
+    fn ml_kem_round_trips_and_validates<K: Kem<DecapsulationKey = MlKemKey>>(
+        encapsulation_key_len: usize,
+        ciphertext_len: usize,
+    ) {
+        let (key, encapsulation_key) = K::generate().unwrap();
+        assert_eq!(encapsulation_key.len(), encapsulation_key_len);
+        let (ciphertext, shared) = K::encapsulate(&encapsulation_key).unwrap();
+        assert_eq!(ciphertext.len(), ciphertext_len);
+        assert_eq!(shared.len(), 32);
+        assert_eq!(K::decapsulate(&key, &ciphertext).unwrap(), shared);
+
+        assert!(K::encapsulate(&encapsulation_key[1..]).is_err());
+        assert!(K::encapsulate(&[encapsulation_key.as_slice(), &[0]].concat()).is_err());
+        assert!(K::decapsulate(&key, &ciphertext[1..]).is_err());
+        assert!(K::decapsulate(&key, &[ciphertext.as_slice(), &[0]].concat()).is_err());
         // FIPS 203 §7.2 modulus check: a coefficient (12 bits) of 4095 >= q.
         let mut encapsulation_key = encapsulation_key;
         encapsulation_key[0] = 0xff;
         encapsulation_key[1] |= 0x0f;
-        assert!(MlKem768::encapsulate(&encapsulation_key).is_err());
+        assert!(K::encapsulate(&encapsulation_key).is_err());
     }
 
     fn dh_from_private(group: &DhGroup, private_bytes: &[u8]) -> (Dh, Vec<u8>) {
@@ -1197,6 +1274,8 @@ mod tests {
     fn offers_exactly_the_supported_key_exchanges() {
         let expected = [
             kex::MLKEM768X25519_SHA256,
+            kex::MLKEM1024NISTP384_SHA384,
+            kex::MLKEM768NISTP256_SHA256,
             kex::CURVE25519,
             kex::CURVE25519_PRE_RFC_8731,
             kex::ECDH_SHA2_NISTP256,
@@ -1211,6 +1290,9 @@ mod tests {
         ];
         assert_eq!(DEFAULT_ORDER, expected);
         assert!(ALGORITHMS.iter().map(|(name, _)| **name).eq(expected));
+        // Without `unapproved-algorithms`, the defaults are the approved
+        // algorithms instead (see `negotiation::tests`).
+        #[cfg(feature = "unapproved-algorithms")]
         for pref in [
             crate::Preferred::DEFAULT,
             crate::Preferred::COMPRESSED,
@@ -1525,5 +1607,59 @@ mod tests {
         "8d8d61bf4a6ebffcf04ecaa0bf844a139edea62e6e1b2286b0478cf4adbabc62"
         "9940dbd1e3200789c0f328df63eb6f30199e3e746c96d7d3cea7a007cd3bf4ec"
         "cb1503aed50223914f88b07b3966fa4f9b8cd9c8664a6d7697287c89f79bf1a3"
+    );
+
+    /// An ML-KEM-1024 ciphertext for the key from [`MLKEM_SEED`], from
+    /// RustCrypto `ml-kem`'s deterministic encapsulation (m = 00 01 .. 1f).
+    const MLKEM1024_CIPHERTEXT: [u8; 1568] = hex!(
+        "e0d19458d67922e3b6b3944c649cb60a1a08a28e551b603d5b3556ab09e018ed"
+        "ce34e6129b0e43d24b969bc1d521b32d97c8f916b47c9e84f75a173166810821"
+        "940eb16dcd8edb075f8af0091c2c618a6c263a5bd71c4bf8ad34600dc61d7699"
+        "5514808dc220477a16293d499f309280da1a30095219b147772dd23f43eae4a9"
+        "b79dfd233a54d5e1a668c0b9aa5edfe59c6918e7da33ae8fb83c64b10ec03ab6"
+        "6c1b24d6706501b732b29d2ba0320fc0d9fe300ee181cc1f1e966df5284250f1"
+        "75d782028d2485026810ea39605a782e9e2cef2347db5a3bd7c61b8a35c44e2e"
+        "be82323b3352ac9a4e608e8b790bbf92be33d017eeb0ee9205f4240256e304ee"
+        "014058f1a9174ab7b5c48dbc319eec52b2a493c147533b565b72a1d506938a9e"
+        "71a2e3d29ab0628f43e2c05dcf97a8cbdc0be6e3dc378395a9928ed7acb892d7"
+        "d71e491a02b6155703d1c57bfce0d82ccb921204489f61cbc6fd7faefbc9cc12"
+        "37f178ef74642f6876e75ab8897e2b714779b4692b0fcb9e7fcf6e072d179cc1"
+        "bbc667eb547438be308781c1b821116189210ac921d4c779296d008e6d827703"
+        "92cb1e67769d1057cefe3ccfed107466ee87fc40d84462e4fe689610f4b46ad8"
+        "8cecd90d38c728ab105e0f7771a6baa22792e2d56816ec2ee772ce06d49c1d24"
+        "693afb122d5b2d6d1f42e95fd8d9b34ce9915ba94b1d0d66964f487beecab587"
+        "1d761bb07822adb89b8f87e07e3e1dc96f9a71b467dd76074c0a9a0b3b565ad5"
+        "e66a56f25641924214d72e7ba5acb8b96665607a71ab136dd4d7ea20594d2686"
+        "4be1982aca78f0f6be7e04dc4a5caccc4cef766486a90a874736b5a78e53846e"
+        "40439cf9a84700e92d03a4a1f7f8cf13e8590a21804883d21a15fbfc5eb9be7e"
+        "1141dc3715e9f5f7b3f0521fa574a0ac5c4230612def9a4b39236260f7ef315f"
+        "875a0ac49bf2dbff59a8dc7b24af5b3bb2a6da5983832edab175ee408ff25757"
+        "9219eeb4e4d42214983e67511f59fc279773736ddbebe0ec08894c0ac006e27c"
+        "6a81c4e2b8d7758056952a50ef0d67b66fb59f9e1a9358bbc6c2b8ffb04b07a7"
+        "ae30f528b6d21c4e63094f5bee27a79226e62877571063b03442fe8f1f231270"
+        "6d3fb03e1d221e21c464177ea788b904354d8eddc95aba71c2419f95f12a0630"
+        "7474a39cb0ba994e5abf3c00e069ef9b25228fe1f2ec80d488fd137546184bd5"
+        "47ba963f0f73fd5a2bd337ccac80d2a481b4b6215b73ccbdf92a4eb3fdebc22f"
+        "1b784e10b786292631e1b585cc65f134b2b5a9eab0dd9f7bf561776e7a0cbe11"
+        "f049a395658ca07095496355d3584f09c57236f52c33272642b51de156111a98"
+        "1d3fb674d05a7e858d6df5da11580f3f2a459ad10e5f474b744bb8b246d04519"
+        "72245640d11a05fb2609b19c2fdf8e190817f59b0ebf6a4a0c29807394a71f86"
+        "0ec12b03aaf471862fb94bf9d491ba8ee61863a7a68c25598cf1891f3421c55b"
+        "d0c55d2a9a35e7c1c573710520841c6d487ee90ed82b836b78246bd7f6efa2a7"
+        "82ee9720b56250a7b0aafe2f8d4432272155acb6457a7f2740ffbb64f84639cf"
+        "8b3cff338aee47faa5ff2bf37b956ae2693c5aa2ecdb9a2bde1d327624f40dfc"
+        "2de11fa0ab0fb6813b6fa9e0707e9f57821b96b54c7e56738756ad06f5d14fd2"
+        "5fab8d311b749be1ed4b6409d67ae04036fbc7ffd71b99604bf08bf655bafd90"
+        "a9bb1a8b377a2f9ff3099e764d1efcc7860ed601213ac981402b7b55ac9607c5"
+        "f46b82d8454a729a3d74d002277c6d6d5014341e8348a3bd871223cdaba0b556"
+        "9daa47556d59c4dfe3a201e78db42854435480513fa16b2567f40803a8eb535d"
+        "64b1b1e40718bc6a601d8b00e45f7280adaa4d1b3b7a3c7a56d6d56b71a35515"
+        "0cdc90348aad39ffd9b62703611bed6e134dcdc7b421cdbd6b23302d39f05dd0"
+        "14060dd0376de53fab16d94429feca91d901b0a4713e700bafa64b36f70676b5"
+        "598599e22809c4bdd02a59934fe544ec129b9b2a001678688f5b9c4e97d2f577"
+        "c513d27baa1ec3d4702da8a1d190714cc8ee46689116db0d099bf1ba167ca0d3"
+        "30c495610ecfb5ee9a747971b38920123c14bbf88874ee9a64ea240abc710e44"
+        "afcfeb50b7fc4477bc3cf8a121e6e4b67b197a638721dbf238f6bf1bb277637a"
+        "78fd6c7e9de7eb5721c57f32bd7707252cd6d5be8147408bdba187b669c40d9f"
     );
 }

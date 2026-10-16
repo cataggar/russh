@@ -56,11 +56,13 @@
 //! * [`check_cases`] runs any list of cases and panics on failure, after
 //!   printing a summary. [`run_cases`] and [`run_case`] return [`Outcome`]s
 //!   instead, and [`report`] prints and checks them.
-//! * [`check_refused`] is the opposite check, for algorithms the crypto
-//!   backend lacks: sshd offers the case's algorithm of one kind, and the
-//!   key exchange must fail with no common algorithm of that kind, both with
-//!   a client restricted to the case and with the default algorithms.
-//!   [`check_no_common`] does that check for one client and any sshd.
+//! * [`check_refused`] is the opposite check, for algorithms that russh
+//!   doesn't negotiate (the crypto backend lacks them, or without the
+//!   `unapproved-algorithms` feature, they are not approved): sshd offers
+//!   the case's algorithm of one kind, and the key exchange must fail with
+//!   no common algorithm of that kind, both with a client restricted to the
+//!   case and with the default algorithms. [`check_no_common`] does that
+//!   check for one client and any sshd.
 //! * [`Case`] is one combination of host key, user key, and (optionally)
 //!   kex, cipher and MAC. [`Case::sshd`] returns the matching server
 //!   configuration and [`Case::preferred`] the matching client [`Preferred`].
@@ -100,8 +102,9 @@
 //!
 //! After authentication the algorithms passed to `Handler::kex_done` are
 //! compared with the forced ones. A MAC is only used with a non-AEAD
-//! cipher. So [`check_macs`] forces `aes128-ctr` unless the base case sets a
-//! cipher, and a case that forces a MAC but negotiates an AEAD cipher fails.
+//! cipher. So [`check_macs`] forces `aes256-ctr` (approved, so allowed by
+//! every build) unless the base case sets a cipher, and a case that forces a
+//! MAC but negotiates an AEAD cipher fails.
 //!
 //! # Skips and environment variables
 //!
@@ -1974,12 +1977,12 @@ pub async fn check_ciphers(base: Case, algorithms: &[cipher::Name]) {
     check_cases("ciphers", cases).await;
 }
 
-/// Checks each MAC on top of `base`, with `aes128-ctr` unless `base` sets a
+/// Checks each MAC on top of `base`, with `aes256-ctr` unless `base` sets a
 /// (non-AEAD) cipher.
 pub async fn check_macs(base: Case, algorithms: &[mac::Name]) {
     let base = match base.cipher {
         Some(_) => base,
-        None => base.with_cipher(cipher::AES_128_CTR),
+        None => base.with_cipher(cipher::AES_256_CTR),
     };
     let cases = algorithms.iter().map(|&mac| base.clone().with_mac(mac));
     check_cases("MACs", cases).await;
@@ -2038,8 +2041,9 @@ impl Refused {
     }
 }
 
-/// Checks that the client refuses algorithms the crypto backend does not
-/// implement, and [`report`]s the results under `name`. For each case, an
+/// Checks that the client refuses algorithms it doesn't negotiate (the crypto
+/// backend does not implement them, or the algorithm policy does not allow
+/// them), and [`report`]s the results under `name`. For each case, an
 /// sshd restricted to the case's algorithms offers the case's `refused`
 /// algorithm, and the key exchange must fail for lack of a common algorithm
 /// of that kind (see [`check_no_common`]) both for a client restricted to

@@ -202,11 +202,12 @@ jobs:
 
   # russh's tests with each crypto backend, against the OpenSSH 10.2 of Ubuntu 26.04 rather than the
   # 9.6 of the 24.04 jobs: the interop checks that need OpenSSH 9.9 or later (mlkem768x25519-sha256)
-  # run only here. `ring` without `rsa` checks that the tests that use RSA keys are gated on it, and
-  # `symcrypt` with every opt-in feature that the tests still pass with the features compiled in
-  # (the symcrypt backend never uses them for protocol crypto). `symcrypt,ed25519-aws-lc` runs the
-  # Ed25519 interop checks against this OpenSSH too. One job per feature set, in parallel, to keep
-  # the workflow's wall time down.
+  # run only here. Each backend is tested both with only the approved algorithms (without
+  # `unapproved-algorithms`, as by default) and with the others too. `ring` without `rsa` checks
+  # that the tests that use RSA keys are gated on it, and `symcrypt` with every opt-in feature that
+  # the tests still pass with the features compiled in (the symcrypt backend never uses them for
+  # protocol crypto). `symcrypt,ed25519-aws-lc` runs the Ed25519 interop checks against this OpenSSH
+  # too. One job per feature set, in parallel, to keep the workflow's wall time down.
   Test-features:
     name: Test (${{ matrix.features }}, OpenSSH 10)
     strategy:
@@ -214,11 +215,12 @@ jobs:
       matrix:
         features:
           - default
+          - default,unapproved-algorithms
           - ring
-          - ring,rsa
+          - ring,rsa,unapproved-algorithms
           - symcrypt
           - symcrypt,ed25519-aws-lc
-          - symcrypt,rsa,des,dsa,flate2,serde,async-trait
+          - symcrypt,rsa,des,dsa,flate2,serde,async-trait,unapproved-algorithms
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:26.04
     env:

@@ -1,8 +1,11 @@
 //! Interop of the SymCrypt backend's key exchanges with OpenSSH and russh,
 //! one forced method at a time: `cargo test -p russh --no-default-features
 //! --features symcrypt --test symcrypt_kex`. `mlkem768x25519-sha256` is
-//! skipped when the local OpenSSH is older than 9.9. The methods SymCrypt
-//! lacks are refused.
+//! skipped when the local OpenSSH is older than 9.9, and the ML-KEM hybrids
+//! with the NIST curves, which OpenSSH lacks, are tested against russh. The
+//! methods SymCrypt lacks are refused. Only the approved methods are tested
+//! without the `unapproved-algorithms` feature (`approved_algorithms.rs`
+//! checks that the others are refused).
 #![cfg(all(
     feature = "symcrypt",
     not(feature = "aws-lc-rs"),
@@ -20,43 +23,54 @@ use common::test_keys;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::*;
 
+/// The finite-field Diffie-Hellman methods the backend implements, which are
+/// not approved.
+const FFDH: [kex::Name; 6] = [
+    kex::DH_G14_SHA256,
+    kex::DH_G15_SHA512,
+    kex::DH_G16_SHA512,
+    kex::DH_G17_SHA512,
+    kex::DH_G18_SHA512,
+    kex::DH_GEX_SHA256,
+];
+
+/// The other methods the backend implements that are not approved.
+const UNAPPROVED_ECDH: [kex::Name; 5] = [
+    kex::MLKEM768X25519_SHA256,
+    kex::CURVE25519,
+    kex::CURVE25519_PRE_RFC_8731,
+    kex::ECDH_SHA2_NISTP256,
+    kex::ECDH_SHA2_NISTP521,
+];
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kex() {
-    openssh::check_kex(
-        Case::default(),
-        &[
-            kex::MLKEM768X25519_SHA256,
-            kex::CURVE25519,
-            kex::CURVE25519_PRE_RFC_8731,
-            kex::ECDH_SHA2_NISTP256,
-            kex::ECDH_SHA2_NISTP384,
-            kex::ECDH_SHA2_NISTP521,
-            kex::DH_GEX_SHA256,
-            kex::DH_G14_SHA256,
-            kex::DH_G15_SHA512,
-            kex::DH_G16_SHA512,
-            kex::DH_G17_SHA512,
-            kex::DH_G18_SHA512,
-        ],
-    )
-    .await;
+    let mut algorithms = vec![
+        kex::MLKEM1024NISTP384_SHA384,
+        kex::MLKEM768NISTP256_SHA256,
+        kex::ECDH_SHA2_NISTP384,
+    ];
+    if cfg!(feature = "unapproved-algorithms") {
+        algorithms.extend(UNAPPROVED_ECDH);
+        algorithms.extend(FFDH);
+    }
+    openssh::check_kex(Case::default(), &algorithms).await;
 }
 
-/// Full russh client-to-russh-server SSH handshakes for every supported FFDH
-/// algorithm (including `diffie-hellman-group15-sha512` and
-/// `diffie-hellman-group17-sha512`, which OpenSSH does not implement).
+/// Full russh client-to-russh-server SSH handshakes for the ML-KEM hybrids
+/// with the NIST curves (which OpenSSH does not implement), and with the
+/// `unapproved-algorithms` feature, every supported FFDH algorithm
+/// (including `diffie-hellman-group15-sha512` and
+/// `diffie-hellman-group17-sha512`, which OpenSSH does not implement either).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ffdh_client_server_handshake() {
+async fn russh_client_server_handshake() {
     let _ = env_logger::try_init();
 
-    for kex_alg in [
-        kex::DH_G14_SHA256,
-        kex::DH_G15_SHA512,
-        kex::DH_G16_SHA512,
-        kex::DH_G17_SHA512,
-        kex::DH_G18_SHA512,
-        kex::DH_GEX_SHA256,
-    ] {
+    let mut algorithms = vec![kex::MLKEM1024NISTP384_SHA384, kex::MLKEM768NISTP256_SHA256];
+    if cfg!(feature = "unapproved-algorithms") {
+        algorithms.extend(FFDH);
+    }
+    for kex_alg in algorithms {
         let server_config = Arc::new(server::Config {
             inactivity_timeout: None,
             auth_rejection_time: std::time::Duration::from_secs(3),
@@ -130,7 +144,9 @@ async fn ffdh_client_server_handshake() {
 }
 
 /// The SHA-1 Diffie-Hellman key exchanges, which OpenSSH implements and the
-/// backend doesn't, are neither offered nor accepted.
+/// backend doesn't, are neither offered nor accepted. (`approved_algorithms.rs`
+/// checks that, without the `unapproved-algorithms` feature, the methods that
+/// are not approved aren't either.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsupported_kex_is_refused() {
     openssh::check_refused(

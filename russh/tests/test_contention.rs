@@ -96,7 +96,15 @@ impl Server {
         let config = Arc::new(server::Config {
             keys: vec![test_keys::key(0)],
             preferred: russh::Preferred {
-                cipher: std::borrow::Cow::Borrowed(&[russh::cipher::CHACHA20_POLY1305]),
+                // `chacha20-poly1305@openssh.com` is not approved, so only
+                // the `unapproved-algorithms` feature lets russh negotiate it.
+                cipher: std::borrow::Cow::Borrowed(
+                    if russh::ALGORITHM_POLICY == russh::AlgorithmPolicy::Approved {
+                        &[russh::cipher::AES_256_GCM]
+                    } else {
+                        &[russh::cipher::CHACHA20_POLY1305]
+                    },
+                ),
                 ..Default::default()
             },
             ..Default::default()

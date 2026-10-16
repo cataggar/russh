@@ -4,7 +4,9 @@
 //!
 //! This file covers the algorithms of the aws-lc-rs and ring backends. A
 //! backend with a different set of algorithms gets its own test file that
-//! calls the same runners with its own lists.
+//! calls the same runners with its own lists. Without the
+//! `unapproved-algorithms` feature, the algorithms that are not approved
+//! must be refused instead (see `approved_algorithms.rs`).
 #![cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 
 mod common;
@@ -34,20 +36,32 @@ const KEY_ALGORITHMS: &[KeyAlg] = &[
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kex() {
-    // russh also implements diffie-hellman-group15-sha512 and
+    // OpenSSH has no ML-KEM hybrid with the NIST curves, so those cases are
+    // skipped. russh also implements diffie-hellman-group15-sha512 and
     // diffie-hellman-group17-sha512, which OpenSSH lacks.
     openssh::check_kex(
         Case::default(),
         &[
-            kex::MLKEM768X25519_SHA256,
-            kex::CURVE25519,
-            kex::CURVE25519_PRE_RFC_8731,
-            kex::ECDH_SHA2_NISTP256,
+            kex::MLKEM1024NISTP384_SHA384,
+            kex::MLKEM768NISTP256_SHA256,
             kex::ECDH_SHA2_NISTP384,
+            #[cfg(feature = "unapproved-algorithms")]
+            kex::MLKEM768X25519_SHA256,
+            #[cfg(feature = "unapproved-algorithms")]
+            kex::CURVE25519,
+            #[cfg(feature = "unapproved-algorithms")]
+            kex::CURVE25519_PRE_RFC_8731,
+            #[cfg(feature = "unapproved-algorithms")]
+            kex::ECDH_SHA2_NISTP256,
+            #[cfg(feature = "unapproved-algorithms")]
             kex::ECDH_SHA2_NISTP521,
+            #[cfg(feature = "unapproved-algorithms")]
             kex::DH_GEX_SHA256,
+            #[cfg(feature = "unapproved-algorithms")]
             kex::DH_G14_SHA256,
+            #[cfg(feature = "unapproved-algorithms")]
             kex::DH_G16_SHA512,
+            #[cfg(feature = "unapproved-algorithms")]
             kex::DH_G18_SHA512,
         ],
     )
@@ -59,11 +73,15 @@ async fn ciphers() {
     openssh::check_ciphers(
         Case::default(),
         &[
-            cipher::AES_128_GCM,
             cipher::AES_256_GCM,
-            cipher::AES_128_CTR,
-            cipher::AES_192_CTR,
             cipher::AES_256_CTR,
+            #[cfg(feature = "unapproved-algorithms")]
+            cipher::AES_128_GCM,
+            #[cfg(feature = "unapproved-algorithms")]
+            cipher::AES_128_CTR,
+            #[cfg(feature = "unapproved-algorithms")]
+            cipher::AES_192_CTR,
+            #[cfg(feature = "unapproved-algorithms")]
             cipher::CHACHA20_POLY1305,
         ],
     )
@@ -72,14 +90,17 @@ async fn ciphers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn macs() {
-    // Paired with aes128-ctr: AEAD ciphers don't use a MAC.
+    // Paired with aes256-ctr: AEAD ciphers don't use a MAC.
     openssh::check_macs(
         Case::default(),
         &[
-            mac::HMAC_SHA256,
-            mac::HMAC_SHA512,
-            mac::HMAC_SHA256_ETM,
             mac::HMAC_SHA512_ETM,
+            #[cfg(feature = "unapproved-algorithms")]
+            mac::HMAC_SHA256,
+            #[cfg(feature = "unapproved-algorithms")]
+            mac::HMAC_SHA512,
+            #[cfg(feature = "unapproved-algorithms")]
+            mac::HMAC_SHA256_ETM,
         ],
     )
     .await;
@@ -147,6 +168,12 @@ async fn combinations() {
         "combinations",
         [
             Case::default()
+                .with_kex(kex::ECDH_SHA2_NISTP384)
+                .with_cipher(cipher::AES_256_GCM)
+                .with_host_key(KeyAlg::ECDSA_P384)
+                .with_user_key(KeyAlg::ECDSA_P384),
+            #[cfg(feature = "unapproved-algorithms")]
+            Case::default()
                 .with_kex(kex::ECDH_SHA2_NISTP256)
                 .with_cipher(cipher::AES_256_GCM),
             #[cfg(feature = "rsa")]
@@ -156,6 +183,7 @@ async fn combinations() {
                 .with_mac(mac::HMAC_SHA512_ETM)
                 .with_host_key(KeyAlg::RSA_SHA2_512)
                 .with_user_key(KeyAlg::ECDSA_P384),
+            #[cfg(feature = "unapproved-algorithms")]
             Case::default()
                 .with_kex(kex::CURVE25519)
                 .with_cipher(cipher::CHACHA20_POLY1305)
@@ -167,11 +195,14 @@ async fn combinations() {
 }
 
 /// Older SHA-1 and CBC algorithms. OpenSSH still implements them, but no
-/// longer enables most of them by default.
+/// longer enables most of them by default. The key exchanges, ciphers and
+/// MACs among them are not approved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy() {
     #[allow(unused_mut)]
-    let mut cases = vec![
+    let mut cases = Vec::new();
+    #[cfg(feature = "unapproved-algorithms")]
+    cases.extend([
         Case::default().with_kex(kex::DH_G1_SHA1),
         Case::default().with_kex(kex::DH_G14_SHA1),
         Case::default().with_kex(kex::DH_GEX_SHA1),
@@ -184,7 +215,7 @@ async fn legacy() {
         Case::default()
             .with_cipher(cipher::AES_128_CTR)
             .with_mac(mac::HMAC_SHA1_ETM),
-    ];
+    ]);
     #[cfg(feature = "rsa")]
     {
         let ssh_rsa = KeyAlg::rsa(KeyType::Rsa2048, None);
@@ -192,7 +223,7 @@ async fn legacy() {
         cases.push(Case::default().with_user_key(ssh_rsa));
     }
     // With EtM MACs in `triple_des_etm`.
-    #[cfg(feature = "des")]
+    #[cfg(all(feature = "des", feature = "unapproved-algorithms"))]
     cases.push(
         Case::default()
             .with_cipher(cipher::TRIPLE_DES_CBC)
@@ -205,7 +236,7 @@ async fn legacy() {
 /// only the rest is padded to whole blocks, so with 3des-cbc's 8-byte
 /// blocks OpenSSH sends packets of only 4 + 8 bytes, such as
 /// `SSH_MSG_USERAUTH_SUCCESS`.
-#[cfg(feature = "des")]
+#[cfg(all(feature = "des", feature = "unapproved-algorithms"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn triple_des_etm() {
     openssh::check_macs(

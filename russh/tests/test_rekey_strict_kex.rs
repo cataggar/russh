@@ -28,7 +28,10 @@ async fn test_rekey_with_strict_kex() {
         // Enable strict kex by including the strict kex extension
         preferred: Preferred {
             // Include the strict kex extension marker for server
-            kex: Cow::Borrowed(&[kex::CURVE25519, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER]),
+            kex: Cow::Borrowed(&[
+                kex::ECDH_SHA2_NISTP384,
+                kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+            ]),
             ..Default::default()
         },
         ..Default::default()
@@ -51,7 +54,10 @@ async fn test_rekey_with_strict_kex() {
     let client_config = client::Config {
         preferred: Preferred {
             // Include the strict kex extension marker for client
-            kex: Cow::Borrowed(&[kex::CURVE25519, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT]),
+            kex: Cow::Borrowed(&[
+                kex::ECDH_SHA2_NISTP384,
+                kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+            ]),
             ..Default::default()
         },
         ..Default::default()

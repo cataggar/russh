@@ -154,7 +154,9 @@ pub(crate) mod tests {
     use crate::{cipher, kex, mac};
 
     /// The algorithm lists of the `aws_lc` and `ring` providers are exactly
-    /// the ones russh had before the crypto abstraction.
+    /// the ones russh had before the crypto abstraction, plus the ML-KEM
+    /// hybrids with the NIST curves, which they implement without offering
+    /// them by default.
     pub(crate) fn assert_algorithm_lists_are_unchanged() {
         crate::crypto::testing::check_provider_lists();
 
@@ -177,7 +179,7 @@ pub(crate) mod tests {
                 &["none"]
             )
         );
-        assert_eq!(provider::kex::ALGORITHMS.len(), 15);
+        assert_eq!(provider::kex::ALGORITHMS.len(), 17);
         assert_eq!(
             provider::kex::DEFAULT_ORDER,
             [

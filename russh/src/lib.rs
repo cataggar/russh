@@ -77,6 +77,22 @@
 //! lists the algorithms of each backend, and how to install SymCrypt on Linux
 //! and Windows.
 //!
+//! # Approved algorithms
+//!
+//! By default, russh negotiates only the approved key exchange methods
+//! (`mlkem1024nistp384-sha384`, `mlkem768nistp256-sha256`,
+//! `ecdh-sha2-nistp384`), ciphers (`aes256-gcm@openssh.com`, `aes256-ctr`)
+//! and MACs (`hmac-sha2-512-etm@openssh.com`) of [`Preferred::APPROVED`],
+//! which is then also [`Preferred::default()`]: it neither offers nor
+//! accepts any other, including `none`, even if [`Preferred`] lists it. Host
+//! key and signature algorithms don't depend on this.
+//!
+//! The `unapproved-algorithms` feature lets russh negotiate every algorithm it
+//! implements, with the defaults of upstream russh. Any dependency can enable
+//! it through Cargo's feature unification, so an application that must use
+//! only the approved algorithms can assert [`ALGORITHM_POLICY`] at compile
+//! time.
+//!
 //! # Using non-socket IO / writing tunnels
 //!
 //! The easy way to implement SSH tunnels, like `ProxyCommand` for

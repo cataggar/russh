@@ -10,7 +10,7 @@
 //! | Category | Trait(s) | Used for |
 //! |---|---|---|
 //! | `hash` | [`Hash`] | exchange hashes and key derivation |
-//! | `kex` | [`KeyAgreement`], [`Kem`], [`FfDh`] | X25519, NIST P-256/384/521 ECDH, ML-KEM-768 (hybrid with X25519), finite-field DH groups |
+//! | `kex` | [`KeyAgreement`], [`Kem`], [`FfDh`] | X25519, NIST P-256/384/521 ECDH, ML-KEM-768 and ML-KEM-1024 (hybrids with ECDH), finite-field DH groups |
 //! | `sign` | [`Signer`], [`Verifier`] | host-key, certificate and user-auth signatures |
 //! | `cipher` | [`Aead`], [`ChaCha20Poly1305`], [`BlockStream`] | AES-GCM, `chacha20-poly1305@openssh.com`, AES-CTR (and CBC/3DES) |
 //! | `mac` | [`Mac`] | HMAC-SHA1/SHA2 (plain and encrypt-then-MAC); [`hmac_sha1`] for hashed `known_hosts` host names |
@@ -46,8 +46,9 @@
 //!
 //! - `hash`: `Sha1`, `Sha256`, `Sha384`, `Sha512` implementing [`Hash`].
 //! - `kex`: `X25519`, `NistP256`, `NistP384`, `NistP521` ([`KeyAgreement`]),
-//!   `MlKem768` ([`Kem`]) and `Dh` ([`FfDh`]); a primitive the backend lacks
-//!   is set to [`Unsupported`] and left out of `ALGORITHMS`.
+//!   `MlKem768` and `MlKem1024` ([`Kem`]) and `Dh` ([`FfDh`]); a primitive
+//!   the backend lacks is set to [`Unsupported`] and left out of
+//!   `ALGORITHMS`.
 //!   `ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))]` lists the
 //!   implemented kex methods (the values are the shared `crate::kex::_*`
 //!   constants), and `DEFAULT_ORDER: &[kex::Name]` the default preference
@@ -79,12 +80,15 @@
 //!
 //! The `ALGORITHMS` lists fill the registries (`kex::KEXES`,
 //! `cipher::CIPHERS` and `mac::MACS`, which add the shared `none`/`clear`
-//! entries), and the `DEFAULT_ORDER` lists make up `Preferred::DEFAULT` and
-//! `Preferred::COMPRESSED`. Negotiation drops whatever the backend does not
-//! implement from the preferences (`Preferred::supported`), so a backend
-//! never advertises or accepts an algorithm it cannot run. The public
-//! algorithm-name constants (`kex::*`, `cipher::*`, `mac::*`) exist for
-//! every backend.
+//! entries), and with the `unapproved-algorithms` feature, the
+//! `DEFAULT_ORDER` lists make up `Preferred::DEFAULT` and
+//! `Preferred::COMPRESSED`; without it, those are `Preferred::APPROVED`,
+//! whose key exchange methods, ciphers and MACs every provider must
+//! implement. Negotiation drops whatever the backend does not implement from
+//! the preferences (`Preferred::supported`), so a backend never advertises or
+//! accepts an algorithm it cannot run, and without the feature, whatever is
+//! not approved. The public algorithm-name constants (`kex::*`, `cipher::*`,
+//! `mac::*`) exist for every backend.
 //!
 //! # Swapping a category
 //!
@@ -169,8 +173,8 @@ pub(crate) trait KeyAgreement {
     fn agree(private_key: Self::PrivateKey, peer_public_key: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
 }
 
-/// Key encapsulation (ML-KEM-768, FIPS 203), with keys and ciphertexts in
-/// their standard encodings.
+/// Key encapsulation (ML-KEM-768 and ML-KEM-1024, FIPS 203), with keys and
+/// ciphertexts in their standard encodings.
 pub(crate) trait Kem {
     type DecapsulationKey: Send;
     /// Returns the decapsulation key and the encoded encapsulation key.
