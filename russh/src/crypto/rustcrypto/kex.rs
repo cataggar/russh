@@ -185,12 +185,18 @@ pub(crate) static ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))] = &[
     (&kex::ECDH_SHA2_NISTP521, &kex::_ECDH_SHA2_NISTP521),
 ];
 
-/// Default key exchange preference (the RFC 8308 / strict-kex extension
-/// pseudo-algorithms are appended by `Preferred`).
+/// Default key exchange preference: every method of this provider that isn't
+/// legacy, in the order of the SymCrypt backend (the RFC 8308 / strict-kex
+/// extension pseudo-algorithms are appended by `Preferred`).
 pub(crate) const DEFAULT_ORDER: &[kex::Name] = &[
     kex::MLKEM768X25519_SHA256,
+    kex::MLKEM1024NISTP384_SHA384,
+    kex::MLKEM768NISTP256_SHA256,
     kex::CURVE25519,
     kex::CURVE25519_PRE_RFC_8731,
+    kex::ECDH_SHA2_NISTP256,
+    kex::ECDH_SHA2_NISTP384,
+    kex::ECDH_SHA2_NISTP521,
     kex::DH_GEX_SHA256,
     kex::DH_G18_SHA512,
     kex::DH_G17_SHA512,

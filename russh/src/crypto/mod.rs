@@ -52,8 +52,8 @@
 //!   `ALGORITHMS: &[(&kex::Name, &(dyn KexType + Send + Sync))]` lists the
 //!   implemented kex methods (the values are the shared `crate::kex::_*`
 //!   constants), and `DEFAULT_ORDER: &[kex::Name]` the default preference
-//!   order, without the `ext-info-*`/`kex-strict-*` pseudo-algorithms that
-//!   negotiation appends.
+//!   order: every implemented method that isn't legacy, without the
+//!   `ext-info-*`/`kex-strict-*` pseudo-algorithms that negotiation appends.
 //! - `sign`: a `Signatures` type implementing [`Signer`] and [`Verifier`],
 //!   and `DEFAULT_ORDER: &[ssh_key::Algorithm]`. `Verifier::is_supported`
 //!   decides what negotiation offers; `Signer::can_sign` and
@@ -80,15 +80,15 @@
 //!
 //! The `ALGORITHMS` lists fill the registries (`kex::KEXES`,
 //! `cipher::CIPHERS` and `mac::MACS`, which add the shared `none`/`clear`
-//! entries), and with the `unapproved-algorithms` feature, the
-//! `DEFAULT_ORDER` lists make up `Preferred::DEFAULT` and
-//! `Preferred::COMPRESSED`; without it, those are `Preferred::APPROVED`,
-//! whose key exchange methods, ciphers and MACs every provider must
-//! implement. Negotiation drops whatever the backend does not implement from
-//! the preferences (`Preferred::supported`), so a backend never advertises or
-//! accepts an algorithm it cannot run, and without the feature, whatever is
-//! not approved. The public algorithm-name constants (`kex::*`, `cipher::*`,
-//! `mac::*`) exist for every backend.
+//! entries). The `cipher` and `mac` `DEFAULT_ORDER` lists, like the `kex`
+//! one, hold every implemented algorithm that isn't legacy (SHA-1, CBC, 3DES),
+//! in order of preference; without the algorithms whose crate features are
+//! disabled, they make up `Preferred::DEFAULT` and `Preferred::COMPRESSED`.
+//! Negotiation drops from the preferences whatever the backend does not
+//! implement, and whatever has its feature disabled (`Preferred::supported`),
+//! so a backend never advertises or accepts an algorithm it cannot run. The
+//! public algorithm-name constants (`kex::*`, `cipher::*`, `mac::*`) exist for
+//! every backend.
 //!
 //! # Swapping a category
 //!
@@ -581,7 +581,13 @@ pub(crate) mod testing {
     use super::{is_supported_signature_algorithm, provider};
     use crate::{cipher, kex, mac};
 
-    fn check<N: AsRef<str>>(category: &str, all: &[&N], algorithms: &[&N], default: &[N]) {
+    fn check<N: AsRef<str>>(
+        category: &str,
+        all: &[&N],
+        algorithms: &[&N],
+        default: &[N],
+        is_legacy: impl Fn(&N) -> bool,
+    ) {
         let all: HashSet<&str> = all.iter().map(|n| n.as_ref()).collect();
         let implemented: HashSet<&str> = algorithms.iter().map(|n| n.as_ref()).collect();
         assert_eq!(
@@ -608,10 +614,22 @@ pub(crate) mod testing {
             default.len(),
             "duplicate in {category} DEFAULT_ORDER"
         );
+        // Every implemented algorithm that isn't legacy is preferred, so that
+        // `Preferred::DEFAULT` offers it when its feature is enabled.
+        let secure: HashSet<&str> = algorithms
+            .iter()
+            .filter(|&&n| !is_legacy(n))
+            .map(|n| n.as_ref())
+            .collect();
+        assert_eq!(
+            unique, secure,
+            "{category} DEFAULT_ORDER must list exactly the implemented algorithms that aren't legacy"
+        );
     }
 
     /// The selected provider's lists are consistent: no duplicates, only
-    /// known names, and every default is implemented.
+    /// known names, and the defaults are the implemented algorithms that
+    /// aren't legacy.
     pub(crate) fn check_provider_lists() {
         let kex: Vec<&kex::Name> = provider::kex::ALGORITHMS.iter().map(|(n, _)| *n).collect();
         check(
@@ -619,6 +637,7 @@ pub(crate) mod testing {
             kex::ALL_KEX_ALGORITHMS,
             &kex,
             provider::kex::DEFAULT_ORDER,
+            kex::Name::is_legacy,
         );
         let ciphers: Vec<&cipher::Name> = provider::cipher::ALGORITHMS
             .iter()
@@ -629,6 +648,7 @@ pub(crate) mod testing {
             cipher::ALL_CIPHERS,
             &ciphers,
             provider::cipher::DEFAULT_ORDER,
+            cipher::Name::is_legacy,
         );
         let macs: Vec<&mac::Name> = provider::mac::ALGORITHMS.iter().map(|(n, _)| *n).collect();
         check(
@@ -636,6 +656,7 @@ pub(crate) mod testing {
             mac::ALL_MAC_ALGORITHMS,
             &macs,
             provider::mac::DEFAULT_ORDER,
+            mac::Name::is_legacy,
         );
         const { assert!(!provider::sign::DEFAULT_ORDER.is_empty()) };
         for (i, algorithm) in provider::sign::DEFAULT_ORDER.iter().enumerate() {

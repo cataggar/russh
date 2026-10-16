@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! Integration tests for the ML-KEM hybrid key exchanges (RFC 10042):
-//! `mlkem768nistp256-sha256` and `mlkem1024nistp384-sha384`, and with the
-//! `unapproved-algorithms` feature `mlkem768x25519-sha256`.
+//! `mlkem1024nistp384-sha384`, `mlkem768nistp256-sha256` and
+//! `mlkem768x25519-sha256`, those whose features are enabled.
 
 mod common;
 
@@ -14,12 +14,25 @@ use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::*;
 
 /// The hybrid key exchanges this build negotiates.
-const HYBRIDS: &[kex::Name] = &[
-    kex::MLKEM1024NISTP384_SHA384,
-    kex::MLKEM768NISTP256_SHA256,
-    #[cfg(feature = "unapproved-algorithms")]
-    kex::MLKEM768X25519_SHA256,
-];
+fn hybrids() -> Vec<kex::Name> {
+    [
+        kex::MLKEM1024NISTP384_SHA384,
+        kex::MLKEM768NISTP256_SHA256,
+        kex::MLKEM768X25519_SHA256,
+    ]
+    .into_iter()
+    .filter(|k| k.is_enabled())
+    .collect()
+}
+
+/// An enabled key exchange method that isn't a hybrid, to fall back to.
+fn fallback() -> Option<kex::Name> {
+    Preferred::default()
+        .kex
+        .iter()
+        .copied()
+        .find(|k| k.is_enabled() && !k.as_ref().starts_with("mlkem"))
+}
 
 /// A client offering `client_kex` connected to a server offering
 /// `server_kex`, authenticated, and the key exchange method they agreed on.
@@ -102,7 +115,7 @@ async fn echo(channel: &mut Channel<client::Msg>, payload: &[u8]) {
 
 #[tokio::test]
 async fn test_mlkem_handshake() {
-    for &kex_alg in HYBRIDS {
+    for kex_alg in hybrids() {
         let (session, negotiated) = connect(&[kex_alg], &[kex_alg]).await;
         assert_eq!(negotiated, kex_alg);
 
@@ -121,23 +134,20 @@ async fn test_mlkem_handshake() {
     }
 }
 
-/// A client that prefers a hybrid falls back to ECDH with a server that
-/// offers only ECDH, and the other way around.
+/// A client that prefers a hybrid falls back to another method with a server
+/// that offers only that one, and the other way around.
 #[tokio::test]
 async fn test_mlkem_with_fallback() {
-    for &kex_alg in HYBRIDS {
+    let Some(fallback) = fallback() else {
+        return;
+    };
+    for kex_alg in hybrids() {
         for (server_kex, client_kex) in [
-            (
-                &[kex::ECDH_SHA2_NISTP384][..],
-                &[kex_alg, kex::ECDH_SHA2_NISTP384][..],
-            ),
-            (
-                &[kex_alg, kex::ECDH_SHA2_NISTP384][..],
-                &[kex::ECDH_SHA2_NISTP384][..],
-            ),
+            (&[fallback][..], &[kex_alg, fallback][..]),
+            (&[kex_alg, fallback][..], &[fallback][..]),
         ] {
             let (session, negotiated) = connect(server_kex, client_kex).await;
-            assert_eq!(negotiated, kex::ECDH_SHA2_NISTP384);
+            assert_eq!(negotiated, fallback);
 
             let mut channel = session.channel_open_session().await.unwrap();
             echo(&mut channel, b"test with fallback").await;
@@ -154,8 +164,8 @@ async fn test_mlkem_with_fallback() {
 /// The client's preference decides between the hybrids both sides offer.
 #[tokio::test]
 async fn test_mlkem_client_preference() {
-    for &kex_alg in HYBRIDS {
-        let (session, negotiated) = connect(HYBRIDS, &[kex_alg]).await;
+    for kex_alg in hybrids() {
+        let (session, negotiated) = connect(&hybrids(), &[kex_alg]).await;
         assert_eq!(negotiated, kex_alg);
         session
             .disconnect(Disconnect::ByApplication, "", "")
@@ -166,7 +176,7 @@ async fn test_mlkem_client_preference() {
 
 #[tokio::test]
 async fn test_mlkem_rekey() {
-    for &kex_alg in HYBRIDS {
+    for kex_alg in hybrids() {
         let (session, _) = connect(&[kex_alg], &[kex_alg]).await;
 
         let mut channel = session.channel_open_session().await.unwrap();
@@ -187,7 +197,7 @@ async fn test_mlkem_rekey() {
 
 #[tokio::test]
 async fn test_mlkem_multiple_channels() {
-    for &kex_alg in HYBRIDS {
+    for kex_alg in hybrids() {
         let (session, _) = connect(&[kex_alg], &[kex_alg]).await;
 
         let mut channel1 = session.channel_open_session().await.unwrap();

@@ -167,75 +167,80 @@ const KEX_EXTENSION_NAMES: &[kex::Name] = &[
     kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
 ];
 
-const SAFE_KEX_ORDER_ARRAY: [kex::Name;
-    provider::kex::DEFAULT_ORDER.len() + KEX_EXTENSION_NAMES.len()] =
-    concat_kex_names(provider::kex::DEFAULT_ORDER, KEX_EXTENSION_NAMES);
+/// Selects the algorithms of the crypto backend's preference that
+/// `Preferred::DEFAULT` offers: the ones whose crate features are enabled,
+/// except the legacy ones. Evaluated at compile time.
+macro_rules! offered_by_default {
+    ($count:ident, $select:ident, $name:ty, $fill:expr) => {
+        /// How many of `names` are offered by default.
+        #[allow(clippy::indexing_slicing)] // evaluated at compile time
+        const fn $count(names: &[$name]) -> usize {
+            let mut count = 0;
+            let mut i = 0;
+            while i < names.len() {
+                if names[i].is_enabled() && !names[i].is_legacy() {
+                    count += 1;
+                }
+                i += 1;
+            }
+            count
+        }
 
-/// Whether russh negotiates only the approved key exchange methods, ciphers
-/// and MACs: unless built with the `unapproved-algorithms` feature.
-const APPROVED_ONLY: bool = matches!(crate::ALGORITHM_POLICY, crate::AlgorithmPolicy::Approved);
-
-/// The approved key exchange methods, most preferred first: the ML-KEM
-/// hybrids with the NIST curves (RFC 10042), then ECDH on P-384. The methods
-/// with X25519 (`mlkem768x25519-sha256`, `curve25519-sha256`) are not
-/// approved.
-const APPROVED_KEX: &[kex::Name] = &[
-    kex::MLKEM1024NISTP384_SHA384,
-    kex::MLKEM768NISTP256_SHA256,
-    kex::ECDH_SHA2_NISTP384,
-];
-
-const APPROVED_KEX_ORDER_ARRAY: [kex::Name; APPROVED_KEX.len() + KEX_EXTENSION_NAMES.len()] =
-    concat_kex_names(APPROVED_KEX, KEX_EXTENSION_NAMES);
-
-/// The approved ciphers, most preferred first.
-const APPROVED_CIPHERS: &[cipher::Name] = &[cipher::AES_256_GCM, cipher::AES_256_CTR];
-
-/// The approved MACs, which only `aes256-ctr` uses.
-const APPROVED_MACS: &[mac::Name] = &[mac::HMAC_SHA512_ETM];
-
-#[allow(clippy::indexing_slicing)] // evaluated at compile time
-const fn concat_kex_names<const N: usize>(a: &[kex::Name], b: &[kex::Name]) -> [kex::Name; N] {
-    assert!(a.len() + b.len() == N);
-    let mut names = [kex::NONE; N];
-    let mut i = 0;
-    while i < a.len() {
-        names[i] = a[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < b.len() {
-        names[a.len() + j] = b[j];
-        j += 1;
-    }
-    names
+        /// The `N - extra.len()` of `names` that are offered by default, in
+        /// order, then `extra`.
+        #[allow(clippy::indexing_slicing)] // evaluated at compile time
+        const fn $select<const N: usize>(names: &[$name], extra: &[$name]) -> [$name; N] {
+            assert!($count(names) + extra.len() == N);
+            let mut selected = [$fill; N];
+            let mut j = 0;
+            let mut i = 0;
+            while i < names.len() {
+                if names[i].is_enabled() && !names[i].is_legacy() {
+                    selected[j] = names[i];
+                    j += 1;
+                }
+                i += 1;
+            }
+            i = 0;
+            while i < extra.len() {
+                selected[j] = extra[i];
+                j += 1;
+                i += 1;
+            }
+            selected
+        }
+    };
 }
 
-/// The default key exchange preference, then the extension names: the
-/// approved methods, or with the `unapproved-algorithms` feature the crypto
-/// backend's preference.
-const KEX_ORDER: &[kex::Name] = if APPROVED_ONLY {
-    &APPROVED_KEX_ORDER_ARRAY
-} else {
-    &SAFE_KEX_ORDER_ARRAY
-};
+offered_by_default!(offered_kex_count, offered_kex, kex::Name, kex::NONE);
+offered_by_default!(
+    offered_cipher_count,
+    offered_ciphers,
+    cipher::Name,
+    cipher::NONE
+);
+offered_by_default!(offered_mac_count, offered_macs, mac::Name, mac::NONE);
 
-/// The default cipher preference: the approved ciphers, or with the
-/// `unapproved-algorithms` feature the crypto backend's preference.
-const CIPHER_ORDER: &[cipher::Name] = if APPROVED_ONLY {
-    APPROVED_CIPHERS
-} else {
-    provider::cipher::DEFAULT_ORDER
-};
+/// The default key exchange preference: the crypto backend's preference,
+/// without the methods whose features are disabled and the legacy ones, then
+/// the extension names.
+const KEX_ORDER: &[kex::Name] = &KEX_ORDER_ARRAY;
 
-/// The default MAC preference: the approved MACs, or with the
-/// `unapproved-algorithms` feature the crypto backend's preference (SHA-1
-/// MAC variants are excluded from defaults).
-const MAC_ORDER: &[mac::Name] = if APPROVED_ONLY {
-    APPROVED_MACS
-} else {
-    provider::mac::DEFAULT_ORDER
-};
+const KEX_ORDER_ARRAY: [kex::Name;
+    offered_kex_count(provider::kex::DEFAULT_ORDER) + KEX_EXTENSION_NAMES.len()] =
+    offered_kex(provider::kex::DEFAULT_ORDER, KEX_EXTENSION_NAMES);
+
+/// The default cipher preference, selected like [`KEX_ORDER`].
+const CIPHER_ORDER: &[cipher::Name] = &CIPHER_ORDER_ARRAY;
+
+const CIPHER_ORDER_ARRAY: [cipher::Name; offered_cipher_count(provider::cipher::DEFAULT_ORDER)] =
+    offered_ciphers(provider::cipher::DEFAULT_ORDER, &[]);
+
+/// The default MAC preference, selected like [`KEX_ORDER`].
+const MAC_ORDER: &[mac::Name] = &MAC_ORDER_ARRAY;
+
+const MAC_ORDER_ARRAY: [mac::Name; offered_mac_count(provider::mac::DEFAULT_ORDER)] =
+    offered_macs(provider::mac::DEFAULT_ORDER, &[]);
 
 const COMPRESSION_ORDER: &[compression::Name] = &[
     compression::NONE,
@@ -246,9 +251,10 @@ const COMPRESSION_ORDER: &[compression::Name] = &[
 ];
 
 impl Preferred {
-    /// The default preferences: only approved key exchange methods, ciphers
-    /// and MACs ([`Preferred::APPROVED`]), unless russh is built with the
-    /// `unapproved-algorithms` feature.
+    /// The default preferences: the key exchange methods, ciphers and MACs
+    /// whose crate features are enabled and that the crypto backend
+    /// implements, except the legacy ones (SHA-1, CBC, 3DES and `none`),
+    /// which russh negotiates only when you list them.
     pub const DEFAULT: Preferred = Preferred {
         kex: Cow::Borrowed(KEX_ORDER),
         host_key_certificates: Cow::Borrowed(&[]),
@@ -266,29 +272,6 @@ impl Preferred {
         mac: Cow::Borrowed(MAC_ORDER),
         compression: Cow::Borrowed(COMPRESSION_ORDER),
     };
-
-    /// The approved key exchange methods, ciphers and MACs, most preferred
-    /// first, with the default host key and compression algorithms:
-    ///
-    /// - key exchange: `mlkem1024nistp384-sha384`, `mlkem768nistp256-sha256`
-    ///   and `ecdh-sha2-nistp384`;
-    /// - ciphers: `aes256-gcm@openssh.com` and `aes256-ctr`;
-    /// - MACs: `hmac-sha2-512-etm@openssh.com` (only `aes256-ctr` uses one).
-    ///
-    /// Unless russh is built with the `unapproved-algorithms` feature (see
-    /// [`ALGORITHM_POLICY`](crate::ALGORITHM_POLICY)), these are
-    /// [`Preferred::DEFAULT`], and russh negotiates no other key exchange
-    /// method, cipher or MAC, whatever the preferences list. With the
-    /// feature, configure these preferences to restrict a connection to the
-    /// approved algorithms.
-    pub const APPROVED: Preferred = Preferred {
-        kex: Cow::Borrowed(&APPROVED_KEX_ORDER_ARRAY),
-        host_key_certificates: Cow::Borrowed(&[]),
-        key: Cow::Borrowed(provider::sign::DEFAULT_ORDER),
-        cipher: Cow::Borrowed(APPROVED_CIPHERS),
-        mac: Cow::Borrowed(APPROVED_MACS),
-        compression: Cow::Borrowed(COMPRESSION_ORDER),
-    };
 }
 
 impl Default for Preferred {
@@ -297,38 +280,30 @@ impl Default for Preferred {
     }
 }
 
-/// Whether the algorithm policy lets russh negotiate `name`, of a category
-/// whose approved algorithms are `approved`: always with the
-/// `unapproved-algorithms` feature. `none` is never approved, but russh's
-/// own unit tests (`cfg(test)`) still negotiate it when they configure it, to
-/// send unencrypted packets; `tests/approved_algorithms.rs` checks that other
-/// builds refuse it.
-fn allowed<T: PartialEq>(name: &T, approved: &[T], none: &T) -> bool {
-    !APPROVED_ONLY || approved.contains(name) || (cfg!(test) && name == none)
-}
-
 /// Whether russh may negotiate the key exchange method `name`: the crypto
-/// backend implements it, and the algorithm policy allows it.
+/// backend implements it, and its crate feature is enabled. Russh's own unit
+/// tests (`cfg(test)`) also negotiate `none` when they list it, to send
+/// unencrypted packets; `tests/algorithm_features.rs` checks that other builds
+/// refuse it without the `none` feature.
 fn negotiable_kex(name: &kex::Name) -> bool {
-    kex::KEXES.contains_key(name) && allowed(name, APPROVED_KEX, &kex::NONE)
+    kex::KEXES.contains_key(name) && (name.is_enabled() || (cfg!(test) && *name == kex::NONE))
 }
 
 /// Like [`negotiable_kex`], for ciphers.
 fn negotiable_cipher(name: &cipher::Name) -> bool {
-    CIPHERS.contains_key(name) && allowed(name, APPROVED_CIPHERS, &cipher::NONE)
+    CIPHERS.contains_key(name) && (name.is_enabled() || (cfg!(test) && *name == cipher::NONE))
 }
 
 /// Like [`negotiable_kex`], for MACs.
 fn negotiable_mac(name: &mac::Name) -> bool {
-    mac::MACS.contains_key(name) && allowed(name, APPROVED_MACS, &mac::NONE)
+    mac::MACS.contains_key(name) && (name.is_enabled() || (cfg!(test) && *name == mac::NONE))
 }
 
 impl Preferred {
     /// These preferences without the algorithms that are not negotiable:
-    /// those the crypto backend does not implement, and unless russh is
-    /// built with the `unapproved-algorithms` feature, the key exchange
-    /// methods, ciphers and MACs that are not approved (including `none`).
-    /// They are neither advertised nor accepted.
+    /// those the crypto backend does not implement, and the key exchange
+    /// methods, ciphers and MACs whose crate features are disabled. They are
+    /// neither advertised nor accepted.
     pub(crate) fn supported(&self) -> Cow<'_, Preferred> {
         fn retain<T: Clone>(list: &mut Cow<'static, [T]>, keep: impl Fn(&T) -> bool) -> bool {
             if list.iter().all(&keep) {
@@ -1124,15 +1099,17 @@ mod tests {
         );
     }
 
-    /// With the `aws_lc` and `ring` backends and the `unapproved-algorithms`
-    /// feature, the default preferences are exactly the ones russh had before
-    /// the crypto abstraction.
+    /// With the `aws_lc` and `ring` backends and every algorithm that isn't
+    /// legacy (the `secure-algorithms` feature), the default preferences are
+    /// the ones russh had before the crypto abstraction, plus the ECDH and
+    /// ML-KEM hybrids on the NIST curves and `aes128-gcm@openssh.com`, which
+    /// were opt-in.
     #[cfg(all(
         any(russh_backend = "aws_lc", russh_backend = "ring"),
-        feature = "unapproved-algorithms"
+        feature = "secure-algorithms"
     ))]
     #[test]
-    fn default_preferences_are_unchanged() {
+    fn default_preferences_with_the_secure_algorithms() {
         use ssh_key::EcdsaCurve;
 
         for pref in [
@@ -1144,8 +1121,13 @@ mod tests {
                 pref.kex[..],
                 [
                     kex::MLKEM768X25519_SHA256,
+                    kex::MLKEM1024NISTP384_SHA384,
+                    kex::MLKEM768NISTP256_SHA256,
                     kex::CURVE25519,
                     kex::CURVE25519_PRE_RFC_8731,
+                    kex::ECDH_SHA2_NISTP256,
+                    kex::ECDH_SHA2_NISTP384,
+                    kex::ECDH_SHA2_NISTP521,
                     kex::DH_GEX_SHA256,
                     kex::DH_G18_SHA512,
                     kex::DH_G17_SHA512,
@@ -1186,6 +1168,7 @@ mod tests {
                 [
                     cipher::CHACHA20_POLY1305,
                     cipher::AES_256_GCM,
+                    cipher::AES_128_GCM,
                     cipher::AES_256_CTR,
                     cipher::AES_192_CTR,
                     cipher::AES_128_CTR,
@@ -1206,45 +1189,36 @@ mod tests {
         }
     }
 
-    /// The approved preferences, which every backend implements.
+    /// The default preferences are the crypto backend's, without the
+    /// algorithms whose features are disabled and the legacy ones, whatever
+    /// the features.
     #[test]
-    fn approved_preferences() {
-        let pref = Preferred::APPROVED;
-        assert_eq!(
-            pref.kex[..],
-            [
-                kex::MLKEM1024NISTP384_SHA384,
-                kex::MLKEM768NISTP256_SHA256,
-                kex::ECDH_SHA2_NISTP384,
-                kex::EXTENSION_SUPPORT_AS_CLIENT,
-                kex::EXTENSION_SUPPORT_AS_SERVER,
-                kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
-                kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
-            ]
-        );
-        assert!(pref.host_key_certificates.is_empty());
-        assert_eq!(pref.key, Preferred::DEFAULT.key);
-        assert_eq!(pref.cipher[..], [cipher::AES_256_GCM, cipher::AES_256_CTR]);
-        assert_eq!(pref.mac[..], [mac::HMAC_SHA512_ETM]);
-        assert_eq!(pref.compression[..], *COMPRESSION_ORDER);
-        assert!(matches!(pref.supported(), Cow::Borrowed(_)));
-    }
-
-    /// Without the `unapproved-algorithms` feature, the default preferences
-    /// are the approved ones, whatever the backend.
-    #[cfg(not(feature = "unapproved-algorithms"))]
-    #[test]
-    fn default_preferences_are_the_approved_ones() {
+    fn default_preferences_are_the_enabled_algorithms() {
+        fn offered<N: Copy>(order: &[N], keep: impl Fn(&N) -> bool) -> Vec<N> {
+            order.iter().copied().filter(keep).collect()
+        }
+        let kex: Vec<_> = offered(provider::kex::DEFAULT_ORDER, |k| {
+            k.is_enabled() && !k.is_legacy()
+        })
+        .into_iter()
+        .chain(KEX_EXTENSION_NAMES.iter().copied())
+        .collect();
+        let ciphers = offered(provider::cipher::DEFAULT_ORDER, |c| {
+            c.is_enabled() && !c.is_legacy()
+        });
+        let macs = offered(provider::mac::DEFAULT_ORDER, |m| {
+            m.is_enabled() && !m.is_legacy()
+        });
         for pref in [
             Preferred::DEFAULT,
             Preferred::COMPRESSED,
             Preferred::default(),
         ] {
-            assert_eq!(pref.kex, Preferred::APPROVED.kex);
+            assert_eq!(pref.kex[..], kex[..]);
             assert!(pref.host_key_certificates.is_empty());
             assert_eq!(pref.key[..], *provider::sign::DEFAULT_ORDER);
-            assert_eq!(pref.cipher, Preferred::APPROVED.cipher);
-            assert_eq!(pref.mac, Preferred::APPROVED.mac);
+            assert_eq!(pref.cipher[..], ciphers[..]);
+            assert_eq!(pref.mac[..], macs[..]);
             assert_eq!(pref.compression[..], *COMPRESSION_ORDER);
             assert!(matches!(pref.supported(), Cow::Borrowed(_)));
         }
@@ -1252,8 +1226,9 @@ mod tests {
 
     /// Algorithms that are not negotiable are neither advertised nor
     /// accepted, whatever the configured preferences say, and the others keep
-    /// their order: the ones the backend does not implement, and without the
-    /// `unapproved-algorithms` feature, the ones that are not approved.
+    /// their order: the ones the backend does not implement, and the ones
+    /// whose features are disabled. Russh's unit tests can still negotiate
+    /// `none` (see `negotiable_kex`).
     #[test]
     fn unnegotiable_algorithms_are_filtered_out() {
         let pref = Preferred {
@@ -1270,92 +1245,58 @@ mod tests {
         };
         let supported = pref.supported();
         assert_eq!(supported.key, Preferred::DEFAULT.key);
-        if APPROVED_ONLY {
-            // russh's unit tests still negotiate `none` (see `allowed`).
-            assert_eq!(
-                supported.kex[..],
-                [
-                    kex::MLKEM1024NISTP384_SHA384,
-                    kex::MLKEM768NISTP256_SHA256,
-                    kex::ECDH_SHA2_NISTP384,
-                    kex::NONE,
-                    kex::EXTENSION_SUPPORT_AS_CLIENT,
-                    kex::EXTENSION_SUPPORT_AS_SERVER,
-                    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
-                    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
-                ]
-            );
-            assert_eq!(
-                supported.cipher[..],
-                [cipher::NONE, cipher::AES_256_CTR, cipher::AES_256_GCM]
-            );
-            assert_eq!(supported.mac[..], [mac::NONE, mac::HMAC_SHA512_ETM]);
-        } else {
-            let kexes: Vec<_> = pref
-                .kex
-                .iter()
-                .copied()
-                .filter(|k| KEX_EXTENSION_NAMES.contains(k) || kex::KEXES.contains_key(k))
-                .collect();
-            assert_eq!(supported.kex[..], kexes[..]);
-            assert!(supported.kex.contains(&kex::NONE));
-            let ciphers: Vec<_> = cipher::ALL_CIPHERS
-                .iter()
-                .map(|c| **c)
-                .filter(|c| CIPHERS.contains_key(c))
-                .collect();
-            assert_eq!(supported.cipher[..], ciphers[..]);
-            let macs: Vec<_> = mac::ALL_MAC_ALGORITHMS
-                .iter()
-                .map(|m| **m)
-                .filter(|m| mac::MACS.contains_key(m))
-                .collect();
-            assert_eq!(supported.mac[..], macs[..]);
-        }
+        let kexes: Vec<_> = pref
+            .kex
+            .iter()
+            .copied()
+            .filter(|k| {
+                KEX_EXTENSION_NAMES.contains(k)
+                    || (kex::KEXES.contains_key(k) && (k.is_enabled() || *k == kex::NONE))
+            })
+            .collect();
+        assert_eq!(supported.kex[..], kexes[..]);
+        assert!(supported.kex.contains(&kex::NONE));
+        let ciphers: Vec<_> = cipher::ALL_CIPHERS
+            .iter()
+            .map(|c| **c)
+            .filter(|c| CIPHERS.contains_key(c) && (c.is_enabled() || *c == cipher::NONE))
+            .collect();
+        assert_eq!(supported.cipher[..], ciphers[..]);
+        let macs: Vec<_> = mac::ALL_MAC_ALGORITHMS
+            .iter()
+            .map(|m| **m)
+            .filter(|m| mac::MACS.contains_key(m) && (m.is_enabled() || *m == mac::NONE))
+            .collect();
+        assert_eq!(supported.mac[..], macs[..]);
     }
 
-    /// Without the `unapproved-algorithms` feature, a peer that offers only
-    /// algorithms that are not approved has none in common with russh, even
-    /// if russh's preferences list them.
-    #[cfg(not(feature = "unapproved-algorithms"))]
+    /// A peer that offers only key exchange methods whose features are
+    /// disabled has none in common with russh, even if russh's preferences
+    /// list them.
     #[test]
-    fn unapproved_algorithms_are_refused() {
-        let unapproved = Preferred {
-            kex: Cow::Borrowed(&[
-                kex::MLKEM768X25519_SHA256,
-                kex::CURVE25519,
-                kex::CURVE25519_PRE_RFC_8731,
-                kex::ECDH_SHA2_NISTP256,
-                kex::ECDH_SHA2_NISTP521,
-                kex::DH_GEX_SHA256,
-                kex::DH_G14_SHA256,
-                kex::DH_G16_SHA512,
-            ]),
-            cipher: Cow::Borrowed(&[
-                cipher::CHACHA20_POLY1305,
-                cipher::AES_128_GCM,
-                cipher::AES_128_CTR,
-                cipher::AES_192_CTR,
-            ]),
-            mac: Cow::Borrowed(&[mac::HMAC_SHA256_ETM, mac::HMAC_SHA256, mac::HMAC_SHA512]),
+    fn disabled_algorithms_are_refused() {
+        let disabled: Vec<kex::Name> = kex::ALL_KEX_ALGORITHMS
+            .iter()
+            .map(|k| **k)
+            .filter(|k| kex::KEXES.contains_key(k) && !k.is_enabled() && *k != kex::NONE)
+            .collect();
+        if disabled.is_empty() {
+            return;
+        }
+        let names: Vec<&str> = disabled.iter().map(AsRef::as_ref).collect();
+        let buf = build_kexinit(&names, false);
+        let listed = Preferred {
+            kex: Cow::Owned(disabled.clone()),
             ..Preferred::DEFAULT
         };
-        let supported = unapproved.supported();
-        assert!(supported.kex.is_empty());
-        assert!(supported.cipher.is_empty());
-        assert!(supported.mac.is_empty());
-
-        let buf = build_kexinit(&["mlkem768x25519-sha256", "curve25519-sha256"], false);
-        for pref in [&unapproved, &Preferred::DEFAULT] {
+        assert!(listed.supported().kex.is_empty());
+        for pref in [&listed, &Preferred::DEFAULT] {
             match Server::read_kex(&buf, pref, None, None, &KexCause::Initial) {
                 Err(Error::NoCommonAlgo {
                     kind: AlgorithmKind::Kex,
                     ours,
                     ..
-                }) => assert!(
-                    ours.iter()
-                        .all(|k| APPROVED_KEX.iter().any(|a| a.as_ref() == k.as_str()))
-                ),
+                }) => assert!(ours.iter().all(|k| !names.contains(&k.as_str()))),
                 other => panic!("expected no common kex, got {other:?}"),
             }
         }

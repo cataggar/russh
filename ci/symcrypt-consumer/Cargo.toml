@@ -3,7 +3,7 @@ name = "symcrypt-consumer"
 version = "0.0.0"
 edition = "2021"
 publish = false
-description = "CI check: a downstream crate that depends on russh with only the symcrypt feature"
+description = "CI check: a downstream crate that depends on russh with the symcrypt backend and a few algorithms"
 
 # Not part of the russh workspace, so features are resolved for this crate alone, as they would be
 # for a downstream user. Built only by .github/workflows/symcrypt.yml, after
@@ -11,7 +11,15 @@ description = "CI check: a downstream crate that depends on russh with only the 
 [workspace]
 
 [dependencies]
-russh = { path = "../../russh", default-features = false, features = ["symcrypt"] }
+russh = { path = "../../russh", default-features = false, features = [
+    "symcrypt",
+    "mlkem1024nistp384-sha384",
+    "mlkem768nistp256-sha256",
+    "ecdh-sha2-nistp384",
+    "aes256-gcm",
+    "aes256-ctr",
+    "hmac-sha2-512-etm",
+] }
 tokio = { version = "1.17.0", features = ["macros", "rt"] }
 
 [features]

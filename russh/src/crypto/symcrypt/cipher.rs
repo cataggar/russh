@@ -450,16 +450,17 @@ pub(crate) static ALGORITHMS: &[(&cipher::Name, &(dyn Cipher + Send + Sync))] = 
     (&cipher::AES_256_CTR, &AES_256_CTR),
 ];
 
-/// AES-GCM first: with SymCrypt it is 3.5–5× as fast as ChaCha20-Poly1305
-/// end to end, on x86-64 and arm64 CPUs with AES instructions
-/// (<https://github.com/cataggar/russh/issues/23>). OpenSSH and the `aws_lc`
-/// and `ring` backends prefer `chacha20-poly1305@openssh.com`, partly
-/// because it is faster on CPUs without AES instructions. The rest is their
-/// order. The client's order picks the cipher, so this changes only what
-/// russh clients negotiate.
+/// Every cipher of this backend, AES-GCM first: with SymCrypt it is 3.5–5×
+/// as fast as ChaCha20-Poly1305 end to end, on x86-64 and arm64 CPUs with AES
+/// instructions (<https://github.com/cataggar/russh/issues/23>). OpenSSH and
+/// the `aws_lc` and `ring` backends prefer `chacha20-poly1305@openssh.com`,
+/// partly because it is faster on CPUs without AES instructions. The rest is
+/// their order. The client's order picks the cipher, so this changes only
+/// what russh clients negotiate.
 pub(crate) const DEFAULT_ORDER: &[cipher::Name] = &[
     cipher::AES_256_GCM,
     cipher::CHACHA20_POLY1305,
+    cipher::AES_128_GCM,
     cipher::AES_256_CTR,
     cipher::AES_192_CTR,
     cipher::AES_128_CTR,
@@ -496,6 +497,7 @@ mod tests {
             [
                 cipher::AES_256_GCM,
                 cipher::CHACHA20_POLY1305,
+                cipher::AES_128_GCM,
                 cipher::AES_256_CTR,
                 cipher::AES_192_CTR,
                 cipher::AES_128_CTR,
@@ -505,7 +507,7 @@ mod tests {
             cipher::AES_128_CBC,
             cipher::AES_192_CBC,
             cipher::AES_256_CBC,
-            #[cfg(feature = "des")]
+            #[cfg(feature = "3des-cbc")]
             cipher::TRIPLE_DES_CBC,
         ] {
             assert!(!CIPHERS.contains_key(&name), "{name:?}");

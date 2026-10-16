@@ -23,6 +23,12 @@ static THREADS: usize = 16;
 async fn test_contention() -> Result<(), anyhow::Error> {
     env_logger::init();
 
+    // Without an AEAD, the debug build's AES-CTR and HMAC are too slow to
+    // move the data in time.
+    if aead_ciphers().is_empty() {
+        return Ok(());
+    }
+
     // The server keeps this listener, so its port can't be taken by anything
     // else before the server listens on it.
     let socket = TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -88,6 +94,18 @@ async fn test_contention() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// The AEAD ciphers whose features are enabled, ChaCha20-Poly1305 first.
+fn aead_ciphers() -> Vec<russh::cipher::Name> {
+    [
+        russh::cipher::CHACHA20_POLY1305,
+        russh::cipher::AES_256_GCM,
+        russh::cipher::AES_128_GCM,
+    ]
+    .into_iter()
+    .filter(|cipher| cipher.is_enabled())
+    .collect()
+}
+
 #[derive(Clone)]
 struct Server;
 
@@ -96,15 +114,7 @@ impl Server {
         let config = Arc::new(server::Config {
             keys: vec![test_keys::key(0)],
             preferred: russh::Preferred {
-                // `chacha20-poly1305@openssh.com` is not approved, so only
-                // the `unapproved-algorithms` feature lets russh negotiate it.
-                cipher: std::borrow::Cow::Borrowed(
-                    if russh::ALGORITHM_POLICY == russh::AlgorithmPolicy::Approved {
-                        &[russh::cipher::AES_256_GCM]
-                    } else {
-                        &[russh::cipher::CHACHA20_POLY1305]
-                    },
-                ),
+                cipher: std::borrow::Cow::Owned(aead_ciphers()),
                 ..Default::default()
             },
             ..Default::default()

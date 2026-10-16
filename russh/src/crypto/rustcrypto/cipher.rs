@@ -103,7 +103,7 @@ pub(crate) static AES_256_CTR: SshBlockCipher<CtrWrapper<Ctr128BE<Aes256>>> = Ss
 pub(crate) static AES_128_CBC: SshBlockCipher<CbcWrapper<Aes128>> = SshBlockCipher::new();
 pub(crate) static AES_192_CBC: SshBlockCipher<CbcWrapper<Aes192>> = SshBlockCipher::new();
 pub(crate) static AES_256_CBC: SshBlockCipher<CbcWrapper<Aes256>> = SshBlockCipher::new();
-#[cfg(feature = "des")]
+#[cfg(feature = "3des-cbc")]
 pub(crate) static TRIPLE_DES_CBC: SshBlockCipher<CbcWrapper<des::TdesEde3>> = SshBlockCipher::new();
 
 #[cfg(test)]

@@ -330,6 +330,127 @@ pub const ALL_KEX_ALGORITHMS: &[&Name] = &[
     &NONE,
 ];
 
+/// For each key exchange method: its name, whether its crate feature is
+/// enabled, and whether it is legacy.
+const FEATURES: &[(&str, bool, bool)] = &[
+    (
+        MLKEM1024NISTP384_SHA384.0,
+        cfg!(feature = "mlkem1024nistp384-sha384"),
+        false,
+    ),
+    (
+        MLKEM768NISTP256_SHA256.0,
+        cfg!(feature = "mlkem768nistp256-sha256"),
+        false,
+    ),
+    (
+        MLKEM768X25519_SHA256.0,
+        cfg!(feature = "mlkem768x25519-sha256"),
+        false,
+    ),
+    (CURVE25519.0, cfg!(feature = "curve25519-sha256"), false),
+    (
+        CURVE25519_PRE_RFC_8731.0,
+        cfg!(feature = "curve25519-sha256"),
+        false,
+    ),
+    (
+        ECDH_SHA2_NISTP256.0,
+        cfg!(feature = "ecdh-sha2-nistp256"),
+        false,
+    ),
+    (
+        ECDH_SHA2_NISTP384.0,
+        cfg!(feature = "ecdh-sha2-nistp384"),
+        false,
+    ),
+    (
+        ECDH_SHA2_NISTP521.0,
+        cfg!(feature = "ecdh-sha2-nistp521"),
+        false,
+    ),
+    (
+        DH_GEX_SHA256.0,
+        cfg!(feature = "diffie-hellman-group-exchange-sha256"),
+        false,
+    ),
+    (
+        DH_G14_SHA256.0,
+        cfg!(feature = "diffie-hellman-group14-sha256"),
+        false,
+    ),
+    (
+        DH_G15_SHA512.0,
+        cfg!(feature = "diffie-hellman-group15-sha512"),
+        false,
+    ),
+    (
+        DH_G16_SHA512.0,
+        cfg!(feature = "diffie-hellman-group16-sha512"),
+        false,
+    ),
+    (
+        DH_G17_SHA512.0,
+        cfg!(feature = "diffie-hellman-group17-sha512"),
+        false,
+    ),
+    (
+        DH_G18_SHA512.0,
+        cfg!(feature = "diffie-hellman-group18-sha512"),
+        false,
+    ),
+    (
+        DH_GEX_SHA1.0,
+        cfg!(feature = "diffie-hellman-group-exchange-sha1"),
+        true,
+    ),
+    (
+        DH_G14_SHA1.0,
+        cfg!(feature = "diffie-hellman-group14-sha1"),
+        true,
+    ),
+    (
+        DH_G1_SHA1.0,
+        cfg!(feature = "diffie-hellman-group1-sha1"),
+        true,
+    ),
+    (NONE.0, cfg!(feature = "none"), true),
+];
+
+impl Name {
+    /// Whether the crate feature of this key exchange method is enabled, so
+    /// that russh negotiates it if the crypto backend implements it. Each
+    /// method has a feature of the same name (`curve25519-sha256` for both
+    /// names of that method).
+    ///
+    /// Cargo unifies features across the dependency graph, so a crate that
+    /// must not negotiate a method can check at compile time that no crate in
+    /// its build enabled it:
+    ///
+    /// ```
+    /// # #[cfg(not(feature = "curve25519-sha256"))]
+    /// const _: () = assert!(
+    ///     !russh::kex::CURVE25519.is_enabled(),
+    ///     "`cargo tree -e features -i russh` shows what enables `curve25519-sha256`",
+    /// );
+    /// ```
+    pub const fn is_enabled(&self) -> bool {
+        matches!(
+            crate::helpers::algorithm_flags(FEATURES, self.0),
+            Some((true, _))
+        )
+    }
+
+    /// Whether this is a legacy method (SHA-1, or `none`), which
+    /// `Preferred::default()` doesn't offer even when it is enabled.
+    pub(crate) const fn is_legacy(&self) -> bool {
+        matches!(
+            crate::helpers::algorithm_flags(FEATURES, self.0),
+            Some((_, true))
+        )
+    }
+}
+
 pub(crate) static KEXES: LazyLock<HashMap<&'static Name, &(dyn KexType + Send + Sync)>> =
     LazyLock::new(|| {
         let mut h: HashMap<&'static Name, &(dyn KexType + Send + Sync)> = HashMap::new();
@@ -500,6 +621,26 @@ pub(crate) fn encode_mpint<W: Writer>(s: &[u8], w: &mut W) -> Result<(), Error> 
 mod tests {
     use super::encode_mpint;
     use crate::CryptoVec;
+
+    /// Every key exchange method has exactly one entry in `FEATURES`.
+    #[test]
+    fn every_method_has_a_feature() {
+        let mut names: Vec<&str> = super::FEATURES.iter().map(|(name, ..)| *name).collect();
+        names.sort_unstable();
+        let mut all: Vec<&str> = super::ALL_KEX_ALGORITHMS.iter().map(|n| n.0).collect();
+        all.sort_unstable();
+        assert_eq!(names, all);
+        for name in super::ALL_KEX_ALGORITHMS {
+            assert!(crate::helpers::algorithm_flags(super::FEATURES, name.0).is_some());
+        }
+        assert!(!super::EXTENSION_SUPPORT_AS_CLIENT.is_enabled());
+        assert_eq!(
+            super::ECDH_SHA2_NISTP384.is_enabled(),
+            cfg!(feature = "ecdh-sha2-nistp384")
+        );
+        assert!(super::DH_G1_SHA1.is_legacy());
+        assert!(!super::CURVE25519_PRE_RFC_8731.is_legacy());
+    }
 
     // Regression: an all-zero shared secret (attacker-controlled all-zero
     // Curve25519 point) used to index s[s.len()] and panic. RFC 4251 §5: the

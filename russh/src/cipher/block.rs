@@ -376,7 +376,7 @@ mod tests {
     /// With an EtM MAC, only what follows the clear packet length is padded
     /// to whole blocks: OpenSSH sends SSH_MSG_USERAUTH_SUCCESS with
     /// 3des-cbc in 4 + 8 bytes.
-    #[cfg(all(feature = "des", not(russh_backend = "symcrypt")))]
+    #[cfg(all(feature = "3des-cbc", not(russh_backend = "symcrypt")))]
     #[tokio::test]
     async fn reads_short_3des_cbc_etm_packets() {
         let payload = [crate::msg::USERAUTH_SUCCESS];
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(len, 4 + 8);
     }
 
-    #[cfg(all(feature = "des", not(russh_backend = "symcrypt")))]
+    #[cfg(all(feature = "3des-cbc", not(russh_backend = "symcrypt")))]
     #[tokio::test]
     async fn reads_short_3des_cbc_packets() {
         let payload = [crate::msg::USERAUTH_SUCCESS];
@@ -420,7 +420,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "des", not(russh_backend = "symcrypt")))]
+    #[cfg(all(feature = "3des-cbc", not(russh_backend = "symcrypt")))]
     #[tokio::test]
     async fn rejects_3des_cbc_etm_packets_of_partial_blocks() {
         for packet_length in [0, 4, 12] {
@@ -438,7 +438,7 @@ mod tests {
     /// Without EtM, 3des-cbc reads one 8-byte block to learn the packet
     /// length, but packets are still at least 16 bytes long (RFC 4253,
     /// section 6).
-    #[cfg(all(feature = "des", not(russh_backend = "symcrypt")))]
+    #[cfg(all(feature = "3des-cbc", not(russh_backend = "symcrypt")))]
     #[tokio::test]
     async fn rejects_3des_cbc_packets_shorter_than_16_bytes() {
         let (mut sealing, _, _) = keys(cipher::TRIPLE_DES_CBC, mac::HMAC_SHA256);

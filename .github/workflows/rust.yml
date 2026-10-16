@@ -64,7 +64,7 @@ jobs:
         run: cargo test --verbose -p russh
 
       - name: Test russh (ring)
-        run: cargo test --verbose -p russh --no-default-features --features ring,rsa,flate2
+        run: cargo test --verbose -p russh --no-default-features --features ring,rsa,flate2,secure-algorithms
 
       - name: Set up SymCrypt
         uses: ./.github/actions/setup-symcrypt
@@ -94,7 +94,7 @@ jobs:
           rustup target add --toolchain 1.89.0 wasm32-wasip1
 
       - name: Build (WASM-compatible features)
-        run: cargo +1.89.0 build --verbose --target wasm32-wasip1 --no-default-features --features flate2,ring -p russh
+        run: cargo +1.89.0 build --verbose --target wasm32-wasip1 --no-default-features --features flate2,ring,secure-algorithms -p russh
 
   Formatting:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
@@ -152,13 +152,17 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Clippy (aws-lc-rs)
-        run: cargo clippy -p russh --all-targets --no-default-features --features aws-lc-rs -- -D warnings
+        run: cargo clippy -p russh --all-targets --no-default-features --features aws-lc-rs,secure-algorithms -- -D warnings
 
       - name: Clippy (ring)
-        run: cargo clippy -p russh --all-targets --no-default-features --features ring -- -D warnings
+        run: cargo clippy -p russh --all-targets --no-default-features --features ring,secure-algorithms -- -D warnings
 
       - name: Clippy (ring, rsa)
-        run: cargo clippy -p russh --all-targets --no-default-features --features ring,rsa -- -D warnings
+        run: cargo clippy -p russh --all-targets --no-default-features --features ring,rsa,secure-algorithms -- -D warnings
+
+      # A build with only a few algorithm features.
+      - name: Clippy (aws-lc-rs, a few algorithms)
+        run: cargo clippy -p russh --all-targets --no-default-features --features aws-lc-rs,mlkem1024nistp384-sha384,mlkem768nistp256-sha256,ecdh-sha2-nistp384,aes256-gcm,aes256-ctr,hmac-sha2-512-etm -- -D warnings
 
       - name: Set up SymCrypt
         uses: ./.github/actions/setup-symcrypt
@@ -202,8 +206,10 @@ jobs:
 
   # russh's tests with each crypto backend, against the OpenSSH 10.2 of Ubuntu 26.04 rather than the
   # 9.6 of the 24.04 jobs: the interop checks that need OpenSSH 9.9 or later (mlkem768x25519-sha256)
-  # run only here. Each backend is tested both with only the approved algorithms (without
-  # `unapproved-algorithms`, as by default) and with the others too. `ring` without `rsa` checks
+  # run only here. Each backend is tested with the default algorithms (`secure-algorithms`), with
+  # all of them (`all-algorithms`), and with only a few (the ML-KEM hybrids with the NIST curves and
+  # ECDH on P-384, AES-256 and HMAC-SHA-512-EtM): the cases of disabled algorithms are skipped, and
+  # `russh/tests/algorithm_features.rs` checks that they are refused. `ring` without `rsa` checks
   # that the tests that use RSA keys are gated on it, and `symcrypt` with every opt-in feature that
   # the tests still pass with the features compiled in (the symcrypt backend never uses them for
   # protocol crypto). `symcrypt,ed25519-aws-lc` runs the Ed25519 interop checks against this OpenSSH
@@ -215,12 +221,13 @@ jobs:
       matrix:
         features:
           - default
-          - default,unapproved-algorithms
-          - ring
-          - ring,rsa,unapproved-algorithms
-          - symcrypt
-          - symcrypt,ed25519-aws-lc
-          - symcrypt,rsa,des,dsa,flate2,serde,async-trait,unapproved-algorithms
+          - default,all-algorithms
+          - aws-lc-rs,mlkem1024nistp384-sha384,mlkem768nistp256-sha256,ecdh-sha2-nistp384,aes256-gcm,aes256-ctr,hmac-sha2-512-etm
+          - ring,secure-algorithms
+          - ring,rsa,all-algorithms
+          - symcrypt,secure-algorithms
+          - symcrypt,ed25519-aws-lc,mlkem1024nistp384-sha384,mlkem768nistp256-sha256,ecdh-sha2-nistp384,aes256-gcm,aes256-ctr,hmac-sha2-512-etm
+          - symcrypt,rsa,des,dsa,flate2,serde,async-trait,all-algorithms
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:26.04
     env:

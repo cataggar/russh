@@ -63,6 +63,28 @@ impl TryFrom<&str> for Name {
     }
 }
 
+impl Name {
+    /// Whether the crate feature of this MAC is enabled, so that russh
+    /// negotiates it if the crypto backend implements it. Each MAC has a
+    /// feature of the same name, without `@openssh.com`; `none` has the `none`
+    /// feature. See [`crate::kex::Name::is_enabled`].
+    pub const fn is_enabled(&self) -> bool {
+        matches!(
+            crate::helpers::algorithm_flags(FEATURES, self.0),
+            Some((true, _))
+        )
+    }
+
+    /// Whether this is a legacy MAC (SHA-1, or `none`), which
+    /// `Preferred::default()` doesn't offer even when it is enabled.
+    pub(crate) const fn is_legacy(&self) -> bool {
+        matches!(
+            crate::helpers::algorithm_flags(FEATURES, self.0),
+            Some((_, true))
+        )
+    }
+}
+
 /// `none`
 pub const NONE: Name = Name("none");
 /// `hmac-sha1`
@@ -100,3 +122,42 @@ pub(crate) static MACS: LazyLock<HashMap<&'static Name, &(dyn MacAlgorithm + Sen
         h.extend(provider::mac::ALGORITHMS.iter().copied());
         h
     });
+
+/// For each MAC: its name, whether its crate feature is enabled, and whether
+/// it is legacy.
+const FEATURES: &[(&str, bool, bool)] = &[
+    (
+        HMAC_SHA512_ETM.0,
+        cfg!(feature = "hmac-sha2-512-etm"),
+        false,
+    ),
+    (
+        HMAC_SHA256_ETM.0,
+        cfg!(feature = "hmac-sha2-256-etm"),
+        false,
+    ),
+    (HMAC_SHA512.0, cfg!(feature = "hmac-sha2-512"), false),
+    (HMAC_SHA256.0, cfg!(feature = "hmac-sha2-256"), false),
+    (HMAC_SHA1_ETM.0, cfg!(feature = "hmac-sha1-etm"), true),
+    (HMAC_SHA1.0, cfg!(feature = "hmac-sha1"), true),
+    (NONE.0, cfg!(feature = "none"), true),
+];
+
+#[cfg(test)]
+mod tests {
+    /// Every MAC has exactly one entry in `FEATURES`.
+    #[test]
+    fn every_mac_has_a_feature() {
+        let mut names: Vec<&str> = super::FEATURES.iter().map(|(name, ..)| *name).collect();
+        names.sort_unstable();
+        let mut all: Vec<&str> = super::ALL_MAC_ALGORITHMS.iter().map(|n| n.0).collect();
+        all.sort_unstable();
+        assert_eq!(names, all);
+        assert_eq!(
+            super::HMAC_SHA512_ETM.is_enabled(),
+            cfg!(feature = "hmac-sha2-512-etm")
+        );
+        assert!(super::HMAC_SHA1.is_legacy());
+        assert!(!super::HMAC_SHA256.is_legacy());
+    }
+}

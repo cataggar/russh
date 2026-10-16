@@ -1091,23 +1091,32 @@ pub(crate) mod raw_no_crypto {
         Arc::new(server::Config {
             inactivity_timeout: None,
             keys: vec![test_keys::key(0)],
-            preferred: Preferred::APPROVED,
             ..Default::default()
         })
     }
 
-    /// KEXINIT advertising algorithms the approved server config accepts, so
-    /// that negotiation succeeds and the server waits for KEX_ECDH_INIT.
+    /// The first key exchange method of the default preferences, which
+    /// depend on the algorithm features.
+    fn default_kex() -> String {
+        Preferred::default().kex[0].as_ref().to_owned()
+    }
+
+    /// KEXINIT advertising the algorithms of the default server config, so
+    /// that negotiation succeeds and the server waits for the client's
+    /// key exchange message.
     fn real_kexinit_payload(kex_names: &[&str]) -> Vec<u8> {
+        let preferred = Preferred::default();
+        let ciphers: Vec<&str> = preferred.cipher.iter().map(AsRef::as_ref).collect();
+        let macs: Vec<&str> = preferred.mac.iter().map(AsRef::as_ref).collect();
         let mut payload = Vec::new();
         payload.push(MSG_KEXINIT);
         payload.extend_from_slice(&[0; 16]);
         encode_name_list(&mut payload, kex_names);
         encode_name_list(&mut payload, &[test_keys::ALGORITHM.as_str()]);
-        encode_name_list(&mut payload, &["aes256-ctr"]);
-        encode_name_list(&mut payload, &["aes256-ctr"]);
-        encode_name_list(&mut payload, &["hmac-sha2-512-etm@openssh.com"]);
-        encode_name_list(&mut payload, &["hmac-sha2-512-etm@openssh.com"]);
+        encode_name_list(&mut payload, &ciphers);
+        encode_name_list(&mut payload, &ciphers);
+        encode_name_list(&mut payload, &macs);
+        encode_name_list(&mut payload, &macs);
         encode_name_list(&mut payload, &["none"]);
         encode_name_list(&mut payload, &["none"]);
         encode_name_list(&mut payload, &[]);
@@ -1132,8 +1141,7 @@ pub(crate) mod raw_no_crypto {
     #[tokio::test]
     async fn ignore_during_initial_strict_kex_is_rejected() {
         assert!(matches!(
-            ignore_during_initial_kex(&["ecdh-sha2-nistp384", "kex-strict-c-v00@openssh.com"])
-                .await,
+            ignore_during_initial_kex(&[&default_kex(), "kex-strict-c-v00@openssh.com"]).await,
             ServerSignal::ProtocolError { .. }
         ));
     }
@@ -1142,19 +1150,20 @@ pub(crate) mod raw_no_crypto {
     #[tokio::test]
     async fn ignore_during_initial_kex_is_allowed_without_strict_kex() {
         assert!(matches!(
-            ignore_during_initial_kex(&["ecdh-sha2-nistp384"]).await,
+            ignore_during_initial_kex(&[&default_kex()]).await,
             ServerSignal::Survived { .. }
         ));
     }
 
     /// Server that did its initial exchange with the `none` kex but can also
-    /// negotiate ecdh-sha2-nistp384, so a rekey offering only that parks it
-    /// waiting for a KEX_ECDH_INIT the raw client never sends.
+    /// negotiate the first default method, so a rekey offering only that
+    /// parks it waiting for a key exchange message the raw client never
+    /// sends.
     fn stalled_rekey_server_config() -> Arc<server::Config> {
         Arc::new(server::Config {
             inactivity_timeout: None,
             preferred: Preferred {
-                kex: Cow::Owned(vec![kex::NONE, kex::ECDH_SHA2_NISTP384]),
+                kex: Cow::Owned(vec![kex::NONE, Preferred::default().kex[0]]),
                 ..no_crypto_preferred()
             },
             keys: vec![test_keys::key(0)],
@@ -1169,7 +1178,7 @@ pub(crate) mod raw_no_crypto {
         raw_client_no_crypto_kex(&mut session.stream).await.unwrap();
         session.auth_none().await.unwrap();
         session
-            .send_packet(&kexinit_payload("ecdh-sha2-nistp384"))
+            .send_packet(&kexinit_payload(&default_kex()))
             .await
             .unwrap();
         let server_kexinit = read_packet(&mut session.stream).await.unwrap();

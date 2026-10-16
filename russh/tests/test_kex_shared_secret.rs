@@ -99,8 +99,7 @@ async fn kex_done_with(kex_alg: kex::Name, gex: Option<client::GexParams>) -> (V
 }
 
 /// Test that kex_done callback is invoked with shared secret
-// `curve25519-sha256` is not approved.
-#[cfg(feature = "unapproved-algorithms")]
+#[cfg(feature = "curve25519-sha256")]
 #[tokio::test]
 async fn test_kex_done_callback_receives_shared_secret() {
     let (secret, names) = kex_done_with(kex::CURVE25519, None).await;
@@ -116,8 +115,7 @@ async fn test_kex_done_callback_receives_shared_secret() {
 }
 
 /// Test kex_done with different KEX algorithms
-// `ecdh-sha2-nistp256` is not approved.
-#[cfg(feature = "unapproved-algorithms")]
+#[cfg(feature = "ecdh-sha2-nistp256")]
 #[tokio::test]
 async fn test_kex_done_with_ecdh_nistp256() {
     let (secret, _) = kex_done_with(kex::ECDH_SHA2_NISTP256, None).await;
@@ -129,6 +127,7 @@ async fn test_kex_done_with_ecdh_nistp256() {
     );
 }
 
+#[cfg(feature = "ecdh-sha2-nistp384")]
 #[tokio::test]
 async fn test_kex_done_with_ecdh_nistp384() {
     let (secret, _) = kex_done_with(kex::ECDH_SHA2_NISTP384, None).await;
@@ -146,15 +145,20 @@ async fn test_kex_done_with_mlkem_nistp_hybrids() {
     for (kex_alg, len) in [
         (kex::MLKEM768NISTP256_SHA256, 32),
         (kex::MLKEM1024NISTP384_SHA384, 48),
-    ] {
+    ]
+    .into_iter()
+    .filter(|(kex_alg, _)| kex_alg.is_enabled())
+    {
         let (secret, _) = kex_done_with(kex_alg, None).await;
         assert_eq!(secret.len(), len, "{kex_alg:?}");
     }
 }
 
-// The SymCrypt backend has no Diffie-Hellman group exchange, and it is not
-// approved.
-#[cfg(all(not(russh_backend = "symcrypt"), feature = "unapproved-algorithms"))]
+// The SymCrypt backend has no Diffie-Hellman group exchange.
+#[cfg(all(
+    not(russh_backend = "symcrypt"),
+    feature = "diffie-hellman-group-exchange-sha256"
+))]
 #[tokio::test]
 async fn test_kex_done_with_dh_gex_sha256_and_rfc4419_minimum() {
     kex_done_with(
@@ -176,7 +180,7 @@ async fn test_kex_done_on_rekey() {
         auth_rejection_time: std::time::Duration::from_secs(3),
         keys: vec![test_keys::key(0)],
         preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::ECDH_SHA2_NISTP384]),
+            kex: Cow::Owned(vec![Preferred::default().kex[0]]),
             ..Default::default()
         },
         ..Default::default()
@@ -199,7 +203,7 @@ async fn test_kex_done_on_rekey() {
 
     let client_config = client::Config {
         preferred: Preferred {
-            kex: Cow::Borrowed(&[kex::ECDH_SHA2_NISTP384]),
+            kex: Cow::Owned(vec![Preferred::default().kex[0]]),
             ..Default::default()
         },
         // Set rekey limits very low to trigger rekey quickly

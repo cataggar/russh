@@ -1290,9 +1290,9 @@ mod tests {
         ];
         assert_eq!(DEFAULT_ORDER, expected);
         assert!(ALGORITHMS.iter().map(|(name, _)| **name).eq(expected));
-        // Without `unapproved-algorithms`, the defaults are the approved
-        // algorithms instead (see `negotiation::tests`).
-        #[cfg(feature = "unapproved-algorithms")]
+        // With every algorithm that isn't legacy, `Preferred::DEFAULT` offers
+        // all of them (see `negotiation::tests` for other features).
+        #[cfg(feature = "secure-algorithms")]
         for pref in [
             crate::Preferred::DEFAULT,
             crate::Preferred::COMPRESSED,
@@ -1515,8 +1515,8 @@ mod tests {
     /// interoperate.
     #[test]
     fn key_exchanges_agree() {
-        let cipher_name = crate::Preferred::DEFAULT.cipher[0];
-        let mac_name = crate::Preferred::DEFAULT.mac[0];
+        let cipher_name = cipher::AES_256_GCM;
+        let mac_name = mac::NONE;
         for name in DEFAULT_ORDER {
             let kex_type = kex::KEXES.get(name).unwrap();
             let (mut client, mut server) = (kex_type.make(), kex_type.make());
