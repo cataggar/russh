@@ -1144,6 +1144,7 @@ mod tests {
             assert_eq!(
                 pref.key[..],
                 [
+                    Algorithm::Mldsa87P384,
                     Algorithm::Ed25519,
                     Algorithm::Ecdsa {
                         curve: EcdsaCurve::NistP256,

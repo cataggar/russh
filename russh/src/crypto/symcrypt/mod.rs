@@ -200,6 +200,8 @@ mod tests {
             assert_eq!(
                 pref.key[..],
                 [
+                    #[cfg(feature = "ssh-mldsa87-p384")]
+                    Algorithm::Mldsa87P384,
                     P256,
                     P384,
                     P521,
@@ -252,6 +254,7 @@ mod tests {
     #[test]
     fn unsupported_algorithms_are_not_negotiated() {
         let keys = [
+            Algorithm::Mldsa87P384,
             Algorithm::Ed25519,
             P256,
             P384,
@@ -297,6 +300,8 @@ mod tests {
         .collect();
         assert_eq!(supported.kex[..], kexes[..]);
         let signers = [
+            #[cfg(feature = "ssh-mldsa87-p384")]
+            Algorithm::Mldsa87P384,
             #[cfg(russh_ed25519_aws_lc)]
             Algorithm::Ed25519,
             P256,

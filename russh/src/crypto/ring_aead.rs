@@ -206,6 +206,8 @@ pub(crate) mod tests {
         assert_eq!(
             provider::sign::DEFAULT_ORDER,
             [
+                #[cfg(feature = "ssh-mldsa87-p384")]
+                Algorithm::Mldsa87P384,
                 Algorithm::Ed25519,
                 Algorithm::Ecdsa {
                     curve: EcdsaCurve::NistP256

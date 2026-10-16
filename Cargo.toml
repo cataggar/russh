@@ -29,7 +29,8 @@ ssh-encoding = { version = "0.3", features = ["bytes"] }
 # russh enables `sha2` and the algorithm, key encryption and PPK features of
 # ssh-key only with the backends that use RustCrypto (its `_rustcrypto`
 # feature), and `sha2` in its tests.
-ssh-key = { git = "https://github.com/cataggar/RustCrypto-SSH", rev = "6a7e2a86860054a961a379ca6656373ef9b057a3", version = "=0.7.0-rc.11", default-features = false, features = ["ecdsa", "rand_core", "std"] }
+ssh-key = { git = "https://github.com/cataggar/RustCrypto-SSH", rev = "3c91f4bc8dfcf5820afd105bb166adf1e04a974e", version = "=0.7.0-rc.11", default-features = false, features = ["ecdsa", "rand_core", "std"] }
 thiserror = "2.0.18"
 tokio = { version = "1.17.0" }
 tokio-stream = { version = "0.1.3", features = ["net", "sync"] }
+

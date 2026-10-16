@@ -140,6 +140,20 @@ async fn russh_negotiates_each_enabled_algorithm() {
             assert_eq!(names.server_mac, mac_alg);
         }
     }
+
+    #[cfg(feature = "ssh-mldsa87-p384")]
+    {
+        use russh::keys::ssh_key::Algorithm;
+        let host_key = russh::keys::generate_secret_key_for(&Algorithm::Mldsa87P384).unwrap();
+        let only = Preferred {
+            key: Cow::Borrowed(&[Algorithm::Mldsa87P384]),
+            ..Preferred::default()
+        };
+        let names = negotiate_with_keys(vec![host_key], only.clone(), only)
+            .await
+            .unwrap();
+        assert_eq!(names.key, Algorithm::Mldsa87P384);
+    }
 }
 
 /// Listing algorithms whose features are disabled, on either side, makes the
@@ -168,6 +182,15 @@ async fn russh_refuses_disabled_algorithms() {
             let only = with_cipher(cipher_alg, Some(mac_alg));
             cases.push((format!("{mac_alg:?}"), only, AlgorithmKind::Mac));
         }
+    }
+    #[cfg(not(feature = "ssh-mldsa87-p384"))]
+    {
+        use russh::keys::ssh_key::Algorithm;
+        let only = Preferred {
+            key: Cow::Borrowed(&[Algorithm::Mldsa87P384]),
+            ..Preferred::default()
+        };
+        cases.push(("ssh-mldsa87-p384".to_string(), only, AlgorithmKind::Key));
     }
     for (name, only, kind) in cases {
         check_refused(&name, only, kind).await;
@@ -213,10 +236,21 @@ async fn check_refused(name: &str, only: Preferred, kind: AlgorithmKind) {
     }
 }
 
+/// Whether OpenSSH is available and supports at least one enabled kex method.
+fn openssh_supports_any_enabled_kex() -> bool {
+    let Some(openssh) = openssh::available() else {
+        return false;
+    };
+    Preferred::default()
+        .kex
+        .iter()
+        .any(|k| openssh.supports(openssh::Query::Kex, k.as_ref()))
+}
+
 /// The default preferences against sshd with its default algorithms.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openssh_negotiates_default_preferences() {
-    if openssh::available().is_none() {
+    if !openssh_supports_any_enabled_kex() {
         return;
     }
     let sshd = Case::default()
@@ -259,6 +293,9 @@ async fn openssh_disabled_kex_is_refused() {
 /// ... nor are the ciphers whose features are disabled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openssh_disabled_ciphers_are_refused() {
+    if !openssh_supports_any_enabled_kex() {
+        return;
+    }
     let mac = Preferred::default().mac.first().copied();
     openssh::check_refused(
         "disabled ciphers",
@@ -280,6 +317,9 @@ async fn openssh_disabled_ciphers_are_refused() {
 /// ... nor the MACs whose features are disabled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn openssh_disabled_macs_are_refused() {
+    if !openssh_supports_any_enabled_kex() {
+        return;
+    }
     let Some(cipher) = enabled_cipher_with_a_mac() else {
         return;
     };
@@ -297,9 +337,17 @@ async fn openssh_disabled_macs_are_refused() {
 /// The algorithms that a russh client offering `client` negotiates with a
 /// russh server offering `server`, or why it couldn't.
 async fn negotiate(server: Preferred, client: Preferred) -> Result<Names, russh::Error> {
+    negotiate_with_keys(vec![test_keys::key(0)], server, client).await
+}
+
+async fn negotiate_with_keys(
+    keys: Vec<russh::keys::PrivateKey>,
+    server: Preferred,
+    client: Preferred,
+) -> Result<Names, russh::Error> {
     let (server_stream, client_stream) = tokio::io::duplex(1 << 16);
     let config = server::Config {
-        keys: vec![test_keys::key(0)],
+        keys,
         preferred: server,
         ..Default::default()
     };
