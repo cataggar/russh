@@ -57,10 +57,19 @@ use ::symcrypt::rsa::{RsaKey, RsaKeyUsage};
 use hex_literal::hex;
 use log::{debug, error};
 use ssh_encoding::{Decode, Encode};
-use ssh_key::private::{EcdsaKeypair, KeypairData, Mldsa87P384Keypair, RsaKeypair};
-use ssh_key::public::{EcdsaPublicKey, KeyData, Mldsa87P384PublicKey, RsaPublicKey};
+#[cfg(feature = "ssh-mldsa87-p384")]
+use ssh_key::private::Mldsa87P384Keypair;
+use ssh_key::private::{EcdsaKeypair, KeypairData, RsaKeypair};
+#[cfg(feature = "ssh-mldsa87-p384")]
+use ssh_key::public::Mldsa87P384PublicKey;
+use ssh_key::public::{EcdsaPublicKey, KeyData, RsaPublicKey};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature};
-use symcrypt_sys::{SYMCRYPT_ERROR, SYMCRYPT_ERROR_SYMCRYPT_NO_ERROR as SYMCRYPT_NO_ERROR};
+use symcrypt_sys::{
+    SYMCRYPT_ERROR, SYMCRYPT_ERROR_SYMCRYPT_INVALID_BLOB as SYMCRYPT_INVALID_BLOB,
+    SYMCRYPT_ERROR_SYMCRYPT_MEMORY_ALLOCATION_FAILURE as SYMCRYPT_MEMORY_ALLOCATION_FAILURE,
+    SYMCRYPT_ERROR_SYMCRYPT_NO_ERROR as SYMCRYPT_NO_ERROR,
+};
+#[cfg(feature = "ssh-mldsa87-p384")]
 use zeroize::Zeroizing;
 
 use self::key_cache::KeyCache;
@@ -68,11 +77,14 @@ use crate::crypto::{KeyHolder, Signer, Verifier, held_key};
 
 mod key_cache;
 
+#[cfg(feature = "ssh-mldsa87-p384")]
 const COMPOSITE_PREFIX: &[u8; 32] = b"CompositeAlgorithmSignatures2025";
+#[cfg(feature = "ssh-mldsa87-p384")]
 const MLDSA87_P384_LABEL: &[u8; 33] = b"COMPSIG-MLDSA87-ECDSA-P384-SHA512";
 
 pub(crate) const MLDSA87_SEED_LEN: usize = 32;
 pub(crate) const MLDSA87_PUBLIC_KEY_LEN: usize = 2592;
+#[cfg(feature = "ssh-mldsa87-p384")]
 pub(crate) const MLDSA87_SIGNATURE_LEN: usize = 4627;
 
 #[allow(non_camel_case_types)]
@@ -92,6 +104,7 @@ mod mldsa_ffi {
     unsafe extern "C" {
         pub(super) fn SymCryptMlDsakeyAllocate(params: u32) -> *mut SYMCRYPT_MLDSAKEY;
         pub(super) fn SymCryptMlDsakeyFree(pk_mldsakey: *mut SYMCRYPT_MLDSAKEY);
+        #[cfg(feature = "ssh-mldsa87-p384")]
         pub(super) fn SymCryptMlDsakeyGenerate(
             pk_mldsakey: *mut SYMCRYPT_MLDSAKEY,
             flags: u32,
@@ -110,6 +123,7 @@ mod mldsa_ffi {
             format: u32,
             flags: u32,
         ) -> SYMCRYPT_ERROR;
+        #[cfg(feature = "ssh-mldsa87-p384")]
         pub(super) fn SymCryptMlDsaSign(
             pk_mldsakey: *const SYMCRYPT_MLDSAKEY,
             pb_input: *const u8,
@@ -120,6 +134,7 @@ mod mldsa_ffi {
             pb_signature: *mut u8,
             cb_signature: usize,
         ) -> SYMCRYPT_ERROR;
+        #[cfg(feature = "ssh-mldsa87-p384")]
         pub(super) fn SymCryptMlDsaVerify(
             pk_mldsakey: *const SYMCRYPT_MLDSAKEY,
             pb_input: *const u8,
@@ -167,9 +182,12 @@ impl MlDsa87Key {
         let ptr = unsafe {
             mldsa_ffi::SymCryptMlDsakeyAllocate(mldsa_ffi::SYMCRYPT_MLDSA_PARAMS_MLDSA87)
         };
-        NonNull::new(ptr).map(Self).ok_or(0x8008_0007)
+        NonNull::new(ptr)
+            .map(Self)
+            .ok_or(SYMCRYPT_MEMORY_ALLOCATION_FAILURE)
     }
 
+    #[cfg(feature = "ssh-mldsa87-p384")]
     pub(crate) fn generate_keypair() -> Result<
         (
             Zeroizing<[u8; MLDSA87_SEED_LEN]>,
@@ -225,11 +243,12 @@ impl MlDsa87Key {
         if let Some(expected) = expected_public
             && &public != expected
         {
-            return Err(0x8008_0001);
+            return Err(SYMCRYPT_INVALID_BLOB);
         }
         Ok((key, public))
     }
 
+    #[cfg(feature = "ssh-mldsa87-p384")]
     pub(crate) fn from_public_key(
         public: &[u8; MLDSA87_PUBLIC_KEY_LEN],
     ) -> Result<Self, SYMCRYPT_ERROR> {
@@ -270,6 +289,7 @@ impl MlDsa87Key {
         Ok(public)
     }
 
+    #[cfg(feature = "ssh-mldsa87-p384")]
     pub(crate) fn sign(
         &self,
         input: &[u8],
@@ -296,6 +316,7 @@ impl MlDsa87Key {
         Ok(sig)
     }
 
+    #[cfg(feature = "ssh-mldsa87-p384")]
     pub(crate) fn verify(
         &self,
         input: &[u8],
@@ -323,6 +344,7 @@ impl MlDsa87Key {
     }
 }
 
+#[cfg(feature = "ssh-mldsa87-p384")]
 fn mldsa87_p384_message(message: &[u8]) -> Vec<u8> {
     let ph = sha512(message);
     let mut m_prime =
@@ -376,6 +398,7 @@ impl Verifier for Signatures {
             return Err(ssh_key::Error::AlgorithmUnsupported { algorithm }.into());
         }
         match (key, algorithm) {
+            #[cfg(feature = "ssh-mldsa87-p384")]
             (KeyData::Mldsa87P384(key), Algorithm::Mldsa87P384) => {
                 verify_mldsa87_p384(key, message, signature.as_bytes())
             }
@@ -719,6 +742,7 @@ impl Curve {
     }
 }
 
+#[cfg(feature = "ssh-mldsa87-p384")]
 fn verify_mldsa87_p384(
     key: &Mldsa87P384PublicKey,
     message: &[u8],
@@ -1052,19 +1076,21 @@ mod tests {
 
     use hex_literal::hex;
     use ssh_encoding::{Decode, Encode};
-    use ssh_key::private::{
-        EcdsaKeypair, EcdsaPrivateKey, KeypairData, Mldsa87P384Keypair, RsaKeypair, RsaPrivateKey,
-    };
+    #[cfg(feature = "ssh-mldsa87-p384")]
+    use ssh_key::private::Mldsa87P384Keypair;
+    use ssh_key::private::{EcdsaKeypair, EcdsaPrivateKey, KeypairData, RsaKeypair, RsaPrivateKey};
     use ssh_key::public::{EcdsaPublicKey, KeyData, RsaPublicKey};
     use ssh_key::{
         Algorithm, Certificate, EcdsaCurve, HashAlg, Mpint, PrivateKey, Signature, SshSig,
     };
 
     use super::key_cache::KeyCache;
+    #[cfg(feature = "ssh-mldsa87-p384")]
+    use super::verify_mldsa87_p384;
     use super::{
         BY_VALUE_CACHE_CAPACITY, ByValueCache, Curve, DEFAULT_ORDER, KEY_CACHE_CAPACITY,
         RSA_VERIFY_CACHE_CAPACITY, RsaKey, RsaVerifyCache, SigningKey, rsa_public_components,
-        rsa_verify_key, sign_by_value, sign_cached, verify_mldsa87_p384, verify_rsa_cached,
+        rsa_verify_key, sign_by_value, sign_cached, verify_rsa_cached,
     };
     use crate::crypto::{
         KeyHolder, is_supported_signature_algorithm, sign, sign_held, verify, verify_certificate,
@@ -1988,17 +2014,17 @@ mod tests {
     fn held_keys_are_imported_once() {
         let cache = KeyCache::new(KEY_CACHE_CAPACITY);
         let sha2 = [Some(HashAlg::Sha256), Some(HashAlg::Sha512)];
-        let mut cases = vec![
+        let cases = [
             (ecdsa_p256(), &[None][..]),
             (ecdsa_p384(), &[None]),
             (ecdsa_p521(), &[None]),
             (rsa_2048(), &sha2),
+            #[cfg(feature = "ssh-mldsa87-p384")]
+            (
+                crate::keys::generate_secret_key_for(&Algorithm::Mldsa87P384).unwrap(),
+                &[None],
+            ),
         ];
-        #[cfg(feature = "ssh-mldsa87-p384")]
-        cases.push((
-            crate::keys::generate_secret_key_for(&Algorithm::Mldsa87P384).unwrap(),
-            &[None],
-        ));
         for (key, hash_algs) in cases {
             let key = Arc::new(key);
             let imports = count_imports(|| {
