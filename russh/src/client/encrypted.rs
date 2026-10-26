@@ -361,6 +361,16 @@ impl Session {
                                     self.common.buffer = loop {
                                         match self.receiver.recv().await {
                                             Some(Msg::Signed { data }) => break data[..].to_vec(),
+                                            // The signer could not sign. Leave the PK_OK
+                                            // unanswered, as OpenSSH does when it cannot
+                                            // sign: the server keeps waiting for a userauth
+                                            // request and the next one (any method) replaces
+                                            // this attempt. Going back to the main loop is
+                                            // what lets that next request through.
+                                            Some(Msg::SignFailed) => {
+                                                debug!("signer failed, abandoning the request");
+                                                return Ok(());
+                                            }
                                             None => return Err(crate::Error::RecvError.into()),
                                             _ => {}
                                         }
@@ -395,6 +405,11 @@ impl Session {
                                     self.common.buffer = loop {
                                         match self.receiver.recv().await {
                                             Some(Msg::Signed { data }) => break data,
+                                            // See the public key case above.
+                                            Some(Msg::SignFailed) => {
+                                                debug!("signer failed, abandoning the request");
+                                                return Ok(());
+                                            }
                                             None => return Err(crate::Error::RecvError.into()),
                                             _ => {}
                                         }
@@ -490,6 +505,12 @@ impl Session {
     }
 
     fn handle_ext_info(&mut self, r: &mut impl Reader) -> Result<(), Error> {
+        // RFC 8308 §2.4: a server sends EXT_INFO at most twice per session.
+        // Refusing more keeps `received_extensions` bounded.
+        self.ext_info_count += 1;
+        if self.ext_info_count > 2 {
+            return Err(Error::Inconsistent);
+        }
         let n_extensions = u32::decode(r)? as usize;
         debug!("Received EXT_INFO, {n_extensions:?} extensions");
         for _ in 0..n_extensions {
@@ -535,7 +556,7 @@ impl Session {
         match buf.split_first() {
             Some((&msg::CHANNEL_OPEN_CONFIRMATION, mut reader)) => {
                 debug!("channel_open_confirmation");
-                let msg = map_err!(ChannelOpenConfirmation::decode(&mut reader))?;
+                let msg = ChannelOpenConfirmation::parse(&mut reader)?;
                 map_err!(ensure_end(&reader))?;
                 let local_id = ChannelId(msg.recipient_channel);
 
@@ -817,10 +838,10 @@ impl Session {
                     )? as u32;
                 }
                 if let Some(chan) = self.channels.get(&channel_num) {
-                    chan.window_size().update(new_size).await;
+                    chan.window_size().grow(amount).await;
                     // Use try_send to avoid blocking the session loop when channel buffer is full.
                     // WindowAdjusted is informational - the critical side effect (updating
-                    // WindowSizeRef and notifying ChannelTx) already happens in update().
+                    // WindowSizeRef and notifying ChannelTx) already happens in grow().
                     let _ = chan.try_send(ChannelMsg::WindowAdjusted { new_size });
                 }
                 client.window_adjusted(channel_num, new_size, self).await

@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::future::Future;
 use futures::stream::{Stream, StreamExt};
 use ssh_encoding::{Decode, Encode, Reader};
-use ssh_key::PrivateKey;
+use ssh_key::{HashAlg, PrivateKey};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::sleep;
@@ -52,7 +52,6 @@ pub enum MessageType {
     Unlock,
 }
 
-#[cfg_attr(feature = "async-trait", async_trait::async_trait)]
 pub trait Agent: Clone + Send + 'static {
     fn confirm(
         self,
@@ -315,7 +314,9 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
                     lifetime = Some(seconds);
                     c.push(Constraint::KeyLifetime { seconds });
                 } else if t == msg::CONSTRAIN_CONFIRM {
-                    c.push(Constraint::Confirm)
+                    if !c.contains(&Constraint::Confirm) {
+                        c.push(Constraint::Confirm)
+                    }
                 } else {
                     return Ok(false);
                 }
@@ -372,11 +373,7 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
             }
         };
         let agent = if needs_confirm {
-            let (agent, ok) = {
-                let _pk = key.clone();
-                Box::new(futures::future::ready((agent, true)))
-            }
-            .await;
+            let (agent, ok) = agent.confirm(key.clone()).await;
             if !ok {
                 return (agent, false);
             }
@@ -397,9 +394,9 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + Sync 
         // flags counts as one with none set.
         let flags = u32::decode(r).unwrap_or(0);
         let hash_alg = if flags & msg::RSA_SHA2_256 != 0 {
-            Some(crate::keys::HashAlg::Sha256)
+            Some(HashAlg::Sha256)
         } else if flags & msg::RSA_SHA2_512 != 0 {
-            Some(crate::keys::HashAlg::Sha512)
+            Some(HashAlg::Sha512)
         } else {
             None
         };
@@ -947,5 +944,43 @@ mod tests {
             client.remove_all_identities().await?;
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_confirm_constraints_are_stored_once() {
+        use ssh_encoding::Encode;
+
+        use crate::keys::decode_secret_key;
+
+        let (server, _client) = tokio::io::duplex(64);
+        let connection = Connection {
+            lock: Lock::default(),
+            keys: KeyStore(std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            ))),
+            agent: Some(()),
+            s: server,
+            buf: Vec::new(),
+        };
+
+        let key =
+            decode_secret_key(include_str!("../../../tests/data/keys/ecdsa-p256"), None).unwrap();
+        let mut payload = Vec::new();
+        key.key_data().encode(&mut payload).unwrap();
+        String::new().encode(&mut payload).unwrap();
+        payload.resize(payload.len() + 10_000, super::msg::CONSTRAIN_CONFIRM);
+
+        let mut writebuf = Vec::new();
+        let mut r = &payload[..];
+        assert!(
+            connection
+                .add_key(&mut r, true, &mut writebuf)
+                .await
+                .unwrap()
+        );
+
+        let keys = connection.keys.0.read().unwrap();
+        let (_, _, constraints) = keys.values().next().unwrap();
+        assert_eq!(constraints, &[super::Constraint::Confirm]);
     }
 }

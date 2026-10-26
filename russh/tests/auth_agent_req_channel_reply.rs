@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use common::openssh::{self, Sshd};
 use common::test_keys;
-use russh::keys::ssh_key;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Preferred, client, server};
 use tokio::task::JoinHandle;
@@ -36,7 +35,7 @@ impl server::Handler for Server {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _key: &ssh_key::PublicKey,
+        _key: server::VerifiedPublicKey<'_>,
     ) -> Result<server::Auth, Self::Error> {
         Ok(server::Auth::Accept)
     }
