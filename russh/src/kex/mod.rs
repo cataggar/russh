@@ -45,6 +45,7 @@ use crate::client::GexParams;
 use crate::crypto::provider::hash::{Sha1, Sha256, Sha384, Sha512};
 use crate::crypto::provider::kex::{NistP256, NistP384, NistP521};
 use crate::crypto::{self, provider};
+use crate::keys::agent::AgentSessionBinding;
 use crate::mac::{self, MACS};
 use crate::session::{Exchange, NewKeys};
 use crate::{CryptoVec, Error, cipher};
@@ -118,6 +119,8 @@ pub(crate) enum KexProgress<T> {
     },
     Done {
         server_host_key: Option<PublicKey>,
+        /// Initial key-exchange data used by OpenSSH agent session binding.
+        agent_session_binding: Option<AgentSessionBinding>,
         /// The certificate the server presented, when it presented one.
         ///
         /// Carried beside the key rather than replacing it: the key exchange is

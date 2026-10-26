@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use common::test_keys;
 use russh::keys::ssh_key::certificate::{Builder, CertType};
-use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{MethodKind, MethodSet, client, server};
 
 struct AcceptServerKey;
@@ -46,7 +46,7 @@ impl server::Handler for PartialSuccessServer {
     async fn auth_publickey_offered(
         &mut self,
         _user: &str,
-        _public_key: &ssh_key::PublicKey,
+        _public_key: server::PublicKeyOffer<'_>,
     ) -> Result<server::Auth, Self::Error> {
         Ok(server::Auth::Accept)
     }
@@ -54,7 +54,7 @@ impl server::Handler for PartialSuccessServer {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _public_key: &ssh_key::PublicKey,
+        _public_key: server::VerifiedPublicKey<'_>,
     ) -> Result<server::Auth, Self::Error> {
         Ok(partial_success_reject())
     }

@@ -67,6 +67,7 @@ pub(crate) fn decode_agent_key(
     if algorithm_name.ends_with("-cert-v01@openssh.com") {
         let cert_alg = Algorithm::new_certificate_ext(&algorithm_name)?;
         let cert_blob = Vec::<u8>::decode(reader)?;
+        crate::keys::key::check_cert_nesting(&cert_blob)?;
         let cert = Certificate::from_bytes(&cert_blob)?;
         if cert.public_key().algorithm().with_hash_alg(None) != cert_alg.with_hash_alg(None) {
             return Err(Error::KeyIsCorrupt);

@@ -175,7 +175,7 @@ mod compress {
         async fn auth_publickey(
             &mut self,
             _: &str,
-            _: &crate::keys::ssh_key::PublicKey,
+            _: server::VerifiedPublicKey<'_>,
         ) -> Result<server::Auth, Self::Error> {
             debug!("auth_publickey");
             Ok(server::Auth::Accept)
@@ -344,7 +344,7 @@ mod channels {
             async fn auth_publickey(
                 &mut self,
                 _: &str,
-                _: &crate::keys::ssh_key::PublicKey,
+                _: server::VerifiedPublicKey<'_>,
             ) -> Result<server::Auth, Self::Error> {
                 Ok(server::Auth::Accept)
             }
@@ -415,7 +415,7 @@ mod channels {
             async fn auth_publickey(
                 &mut self,
                 _: &str,
-                _: &crate::keys::ssh_key::PublicKey,
+                _: server::VerifiedPublicKey<'_>,
             ) -> Result<server::Auth, Self::Error> {
                 Ok(server::Auth::Accept)
             }
@@ -501,7 +501,7 @@ mod channels {
             async fn auth_publickey(
                 &mut self,
                 _: &str,
-                _: &crate::keys::ssh_key::PublicKey,
+                _: server::VerifiedPublicKey<'_>,
             ) -> Result<server::Auth, Self::Error> {
                 Ok(server::Auth::Accept)
             }
@@ -587,7 +587,7 @@ mod channels {
             async fn auth_publickey(
                 &mut self,
                 _: &str,
-                _: &crate::keys::ssh_key::PublicKey,
+                _: server::VerifiedPublicKey<'_>,
             ) -> Result<server::Auth, Self::Error> {
                 Ok(server::Auth::Accept)
             }
@@ -669,7 +669,7 @@ mod channels {
             async fn auth_publickey(
                 &mut self,
                 _: &str,
-                _: &crate::keys::ssh_key::PublicKey,
+                _: server::VerifiedPublicKey<'_>,
             ) -> Result<server::Auth, Self::Error> {
                 Ok(server::Auth::Accept)
             }
@@ -780,7 +780,7 @@ mod channels {
             async fn auth_publickey(
                 &mut self,
                 _: &str,
-                _: &crate::keys::ssh_key::PublicKey,
+                _: server::VerifiedPublicKey<'_>,
             ) -> Result<server::Auth, Self::Error> {
                 Ok(server::Auth::Accept)
             }
@@ -1635,7 +1635,7 @@ mod future_certificate {
                 async fn auth_publickey_offered(
                     &mut self,
                     _user: &str,
-                    _public_key: &ssh_key::PublicKey,
+                    _public_key: server::PublicKeyOffer<'_>,
                 ) -> Result<server::Auth, Self::Error> {
                     // Accept the key/certificate for the probe
                     Ok(server::Auth::Accept)
@@ -1753,7 +1753,7 @@ mod rekey_under_load {
         async fn auth_publickey(
             &mut self,
             _: &str,
-            _: &crate::keys::ssh_key::PublicKey,
+            _: server::VerifiedPublicKey<'_>,
         ) -> Result<server::Auth, Self::Error> {
             Ok(server::Auth::Accept)
         }
@@ -1873,7 +1873,7 @@ mod unusable_keys {
     use ssh_key::certificate::{self, CertType};
     use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey, KeypairData, SkEd25519};
     use ssh_key::public::{self, Ed25519PublicKey};
-    use ssh_key::{Algorithm, Certificate, HashAlg, PrivateKey, PublicKey};
+    use ssh_key::{Algorithm, Certificate, HashAlg, PrivateKey};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -1942,17 +1942,17 @@ mod unusable_keys {
         async fn auth_publickey_offered(
             &mut self,
             _: &str,
-            key: &PublicKey,
+            offer: server::PublicKeyOffer<'_>,
         ) -> Result<server::Auth, Self::Error> {
-            self.accept(key.algorithm())
+            self.accept(offer.public_key.algorithm())
         }
 
         async fn auth_publickey(
             &mut self,
             _: &str,
-            key: &PublicKey,
+            key: server::VerifiedPublicKey<'_>,
         ) -> Result<server::Auth, Self::Error> {
-            self.accept(key.algorithm())
+            self.accept(key.public_key.algorithm())
         }
 
         async fn auth_openssh_certificate(

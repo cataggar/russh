@@ -2594,7 +2594,7 @@ mod tests {
             async fn auth_publickey(
                 &mut self,
                 _: &str,
-                _: &ssh_key::PublicKey,
+                _: crate::server::VerifiedPublicKey<'_>,
             ) -> Result<crate::server::Auth, Self::Error> {
                 Ok(crate::server::Auth::Accept)
             }

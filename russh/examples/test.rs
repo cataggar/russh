@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use log::debug;
-use russh::keys::*;
-use russh::server::{Auth, Msg, Server as _, Session};
+use russh::server::{Auth, Msg, Server as _, Session, VerifiedPublicKey};
 use russh::*;
 
 #[tokio::main]
@@ -79,7 +78,7 @@ impl server::Handler for Server {
     async fn auth_publickey(
         &mut self,
         _: &str,
-        _: &ssh_key::PublicKey,
+        _: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         Ok(server::Auth::Accept)
     }

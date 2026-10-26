@@ -39,7 +39,7 @@ use anyhow::{Context as _, bail, ensure};
 use common::openssh::{self, Case, KeyAlg, KeyFormat, KeyType, OpenSsh, Query, Refused, Sshd};
 use russh::client::AuthResult;
 use russh::keys::ssh_key::public::KeyData;
-use russh::keys::{Certificate, HashAlg, PrivateKey, PublicKey};
+use russh::keys::{Certificate, HashAlg, PrivateKey};
 use russh::{ChannelId, Preferred, server};
 use tokio::net::TcpListener;
 use tokio::process::Command;
@@ -597,9 +597,11 @@ impl server::Handler for Server {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        key: &PublicKey,
+        key: server::VerifiedPublicKey<'_>,
     ) -> Result<server::Auth, Self::Error> {
-        Ok(accept_if(self.user_key.as_ref() == Some(key.key_data())))
+        Ok(accept_if(
+            self.user_key.as_ref() == Some(key.public_key.key_data()),
+        ))
     }
 
     async fn auth_openssh_certificate(
