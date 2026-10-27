@@ -15,7 +15,7 @@ env:
 # executables must also pass `copy-dll-to` (see .github/actions/setup-symcrypt/action.yml).
 jobs:
   Build:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -73,7 +73,7 @@ jobs:
         run: cargo build --verbose --all-features
 
   Build-WASM:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -97,7 +97,7 @@ jobs:
         run: cargo +1.89.0 build --verbose --target wasm32-wasip1 --no-default-features --features flate2,ring,secure-algorithms -p russh
 
   Formatting:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
       RUSTUP_HOME: ${{ github.workspace }}/.rustup-home
@@ -130,7 +130,7 @@ jobs:
           cargo fmt --manifest-path ci/symcrypt-consumer/Cargo.toml --check
 
   Clippy:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -171,7 +171,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   Test:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -228,7 +228,7 @@ jobs:
           - symcrypt,secure-algorithms
           - symcrypt,ed25519-aws-lc,mlkem1024nistp384-sha384,mlkem768nistp256-sha256,ecdh-sha2-nistp384,aes256-gcm,aes256-ctr,hmac-sha2-512-etm
           - symcrypt,rsa,des,dsa,flate2,serde,async-trait,all-algorithms
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:26.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
@@ -263,7 +263,7 @@ jobs:
           RUSSH_REQUIRE_SSHD: "1"
 
   Minimal-versions:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
     env:
       CARGO_HOME: ${{ github.workspace }}/.cargo-home
